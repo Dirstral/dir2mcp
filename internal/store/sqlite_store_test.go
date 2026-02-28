@@ -99,6 +99,55 @@ func TestSQLiteStore_UpsertChunkTask_RequiresRelPath(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for empty RelPath, got nil")
 	}
+
+	err = st.UpsertChunkTask(ctx, model.ChunkTask{
+		Label:     2,
+		Text:      "some text",
+		IndexKind: "text",
+		Metadata: model.ChunkMetadata{
+			ChunkID: 2,
+			RelPath: "   ",
+		},
+	})
+	if err == nil {
+		t.Fatal("expected error for whitespace RelPath, got nil")
+	}
+}
+
+func TestSQLiteStore_UpsertChunkTask_TrimsRelPath(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "meta.sqlite")
+	st := NewSQLiteStore(dbPath)
+	defer func() { _ = st.Close() }()
+
+	if err := st.Init(ctx); err != nil {
+		t.Fatalf("Init failed: %v", err)
+	}
+
+	if err := st.UpsertChunkTask(ctx, model.ChunkTask{
+		Label:     1,
+		Text:      "trim me",
+		IndexKind: "text",
+		Metadata: model.ChunkMetadata{
+			ChunkID: 1,
+			RelPath: "  docs/a.md  ",
+			DocType: "md",
+			RepType: "raw_text",
+		},
+	}); err != nil {
+		t.Fatalf("UpsertChunkTask failed: %v", err)
+	}
+
+	tasks, err := st.NextPending(ctx, 10, "text")
+	if err != nil {
+		t.Fatalf("NextPending failed: %v", err)
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("expected 1 task, got %d", len(tasks))
+	}
+	if tasks[0].Metadata.RelPath != "docs/a.md" {
+		t.Fatalf("expected trimmed rel_path, got %q", tasks[0].Metadata.RelPath)
+	}
 }
 
 // verifyChunkIndexes ensures the sqlite initialization created the indexes we

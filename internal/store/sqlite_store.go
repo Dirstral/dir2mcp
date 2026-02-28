@@ -119,7 +119,8 @@ func (s *SQLiteStore) UpsertChunkTask(ctx context.Context, task model.ChunkTask)
 	if task.Label == 0 {
 		return errors.New("task label is required")
 	}
-	if strings.TrimSpace(task.Metadata.RelPath) == "" {
+	relPath := strings.TrimSpace(task.Metadata.RelPath)
+	if relPath == "" {
 		return errors.New("task rel_path is required")
 	}
 
@@ -137,7 +138,7 @@ func (s *SQLiteStore) UpsertChunkTask(ctx context.Context, task model.ChunkTask)
 		   embedding_status='pending',
 		   embedding_error=''`,
 		int64(task.Label),
-		task.Metadata.RelPath,
+		relPath,
 		defaultIfEmpty(task.Metadata.DocType, "unknown"),
 		defaultIfEmpty(task.Metadata.RepType, "raw_text"),
 		task.Text,
