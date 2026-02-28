@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Dirstral/dir2mcp/internal/appstate"
 	"github.com/Dirstral/dir2mcp/internal/config"
 	"github.com/Dirstral/dir2mcp/internal/model"
 )
@@ -32,6 +33,10 @@ const (
 type Server struct {
 	cfg       config.Config
 	authToken string
+	retriever model.Retriever
+	store     model.Store
+	indexing  *appstate.IndexingState
+	tools     map[string]toolDefinition
 
 	sessionMu sync.RWMutex
 	sessions  map[string]time.Time
@@ -71,14 +76,37 @@ func (e validationError) Error() string {
 	return e.message
 }
 
-func NewServer(cfg config.Config, retriever model.Retriever) *Server {
-	_ = retriever
+type ServerOption func(*Server)
 
-	return &Server{
+func WithStore(store model.Store) ServerOption {
+	return func(s *Server) {
+		s.store = store
+	}
+}
+
+func WithIndexingState(state *appstate.IndexingState) ServerOption {
+	return func(s *Server) {
+		s.indexing = state
+	}
+}
+
+func NewServer(cfg config.Config, retriever model.Retriever, opts ...ServerOption) *Server {
+	s := &Server{
 		cfg:       cfg,
 		authToken: loadAuthToken(cfg),
+		retriever: retriever,
 		sessions:  make(map[string]time.Time),
 	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(s)
+		}
+	}
+	if s.indexing == nil {
+		s.indexing = appstate.NewIndexingState(appstate.ModeIncremental)
+	}
+	s.tools = s.buildToolRegistry()
+	return s
 }
 
 func (s *Server) Handler() http.Handler {
@@ -198,6 +226,18 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeResult(w, http.StatusOK, id, map[string]interface{}{})
+	case "tools/list":
+		if !hasID {
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+		s.handleToolsList(w, id)
+	case "tools/call":
+		if !hasID {
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+		s.handleToolsCall(r.Context(), w, req.Params, id)
 	default:
 		if !hasID {
 			w.WriteHeader(http.StatusAccepted)
