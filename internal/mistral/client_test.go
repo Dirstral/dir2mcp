@@ -1,0 +1,171 @@
+package mistral
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/Dirstral/dir2mcp/internal/model"
+)
+
+type embedTestRequest struct {
+	Model string   `json:"model"`
+	Input []string `json:"input"`
+}
+
+func TestEmbed_BatchesRequestsAndPreservesOrder(t *testing.T) {
+	var calls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer test-key" {
+			t.Fatalf("unexpected authorization header: %q", got)
+		}
+		if r.URL.Path != "/v1/embeddings" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		atomic.AddInt32(&calls, 1)
+
+		var req embedTestRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+
+		resp := map[string]any{
+			"data": []map[string]any{
+				{"index": 1, "embedding": []float64{2.0, 2.5}},
+				{"index": 0, "embedding": []float64{1.0, 1.5}},
+			},
+		}
+		if len(req.Input) == 1 {
+			resp = map[string]any{
+				"data": []map[string]any{
+					{"index": 0, "embedding": []float64{3.0, 3.5}},
+				},
+			}
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "test-key")
+	client.BatchSize = 2
+	client.MaxRetries = 1
+	client.InitialBackoff = 1 * time.Millisecond
+	client.MaxBackoff = 1 * time.Millisecond
+
+	vectors, err := client.Embed(context.Background(), "mistral-embed", []string{"a", "b", "c"})
+	if err != nil {
+		t.Fatalf("embed failed: %v", err)
+	}
+	if len(vectors) != 3 {
+		t.Fatalf("unexpected vector count: got %d want 3", len(vectors))
+	}
+
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("unexpected call count: got %d want 2", got)
+	}
+
+	if vectors[0][0] != 1.0 || vectors[1][0] != 2.0 || vectors[2][0] != 3.0 {
+		t.Fatalf("unexpected vector ordering: %#v", vectors)
+	}
+}
+
+func TestEmbed_RetriesOnRateLimitThenSucceeds(t *testing.T) {
+	var calls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		n := atomic.AddInt32(&calls, 1)
+		if n == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte("rate limited"))
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data": []map[string]any{
+				{"index": 0, "embedding": []float64{7.0}},
+			},
+		})
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "test-key")
+	client.BatchSize = 8
+	client.MaxRetries = 2
+	client.InitialBackoff = 1 * time.Millisecond
+	client.MaxBackoff = 1 * time.Millisecond
+
+	vectors, err := client.Embed(context.Background(), "mistral-embed", []string{"retry-me"})
+	if err != nil {
+		t.Fatalf("embed should have succeeded after retry: %v", err)
+	}
+	if len(vectors) != 1 || vectors[0][0] != 7.0 {
+		t.Fatalf("unexpected vectors: %#v", vectors)
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("unexpected call count: got %d want 2", got)
+	}
+}
+
+func TestEmbed_RetriesOnServerErrorThenSucceeds(t *testing.T) {
+	var calls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		n := atomic.AddInt32(&calls, 1)
+		if n == 1 {
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = w.Write([]byte("temporary upstream error"))
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data": []map[string]any{
+				{"index": 0, "embedding": []float64{9.0, 9.5}},
+			},
+		})
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "test-key")
+	client.MaxRetries = 2
+	client.InitialBackoff = 1 * time.Millisecond
+	client.MaxBackoff = 1 * time.Millisecond
+
+	vectors, err := client.Embed(context.Background(), "mistral-embed", []string{"retry-5xx"})
+	if err != nil {
+		t.Fatalf("embed should have succeeded after retry: %v", err)
+	}
+	if len(vectors) != 1 || vectors[0][0] != 9.0 {
+		t.Fatalf("unexpected vectors: %#v", vectors)
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("unexpected call count: got %d want 2", got)
+	}
+}
+
+func TestEmbed_MapsAuthErrors(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte("invalid key"))
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "bad-key")
+	client.MaxRetries = 0
+
+	_, err := client.Embed(context.Background(), "mistral-embed", []string{"x"})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+
+	var providerErr *model.ProviderError
+	if ok := errors.As(err, &providerErr); !ok {
+		t.Fatalf("expected ProviderError, got %T", err)
+	}
+	if providerErr.Code != "MISTRAL_AUTH" {
+		t.Fatalf("unexpected code: %s", providerErr.Code)
+	}
+	if providerErr.Retryable {
+		t.Fatal("auth errors must not be retryable")
+	}
+}
