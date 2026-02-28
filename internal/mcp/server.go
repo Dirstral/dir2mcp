@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -87,13 +88,20 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) Run(ctx context.Context) error {
+	ln, err := net.Listen("tcp", s.cfg.ListenAddr)
+	if err != nil {
+		return err
+	}
+	return s.RunOnListener(ctx, ln)
+}
+
+func (s *Server) RunOnListener(ctx context.Context, ln net.Listener) error {
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	go s.runSessionCleanup(runCtx)
 
 	server := &http.Server{
-		Addr:              s.cfg.ListenAddr,
 		Handler:           s.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
@@ -103,7 +111,7 @@ func (s *Server) Run(ctx context.Context) error {
 
 	errCh := make(chan error, 1)
 	go func() {
-		err := server.ListenAndServe()
+		err := server.Serve(ln)
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 			return
