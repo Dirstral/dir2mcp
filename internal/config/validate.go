@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"strings"
 )
 
 // Validate checks required fields. For non-interactive mode, returns an error
@@ -14,6 +15,9 @@ func Validate(cfg *Config, nonInteractive bool) error {
 		}
 		// Interactive: we could prompt later; for now still return so caller can decide
 		return fmt.Errorf("CONFIG_INVALID: Missing MISTRAL_API_KEY\nSet env: MISTRAL_API_KEY=...\nOr run: dir2mcp config init")
+	}
+	if cfg.Server.MCPPath == "" || !strings.HasPrefix(cfg.Server.MCPPath, "/") {
+		return fmt.Errorf("CONFIG_INVALID: server.mcp_path must start with '/'")
 	}
 	return nil
 }

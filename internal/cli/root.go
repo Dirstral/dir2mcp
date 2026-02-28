@@ -31,9 +31,10 @@ type GlobalFlags struct {
 var globalFlags GlobalFlags
 
 var rootCmd = &cobra.Command{
-	Use:   "dir2mcp",
-	Short: "Deploy-first MCP server for private directory data",
-	Long:  "dir2mcp turns a directory of privately hosted data into a standard MCP tool server in one command.",
+	Use:           "dir2mcp",
+	Short:         "Deploy-first MCP server for private directory data",
+	Long:          "dir2mcp turns a directory of privately hosted data into a standard MCP tool server in one command.",
+	SilenceErrors: true,
 }
 
 func init() {
