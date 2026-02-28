@@ -1090,8 +1090,13 @@ func writeCorpusSnapshot(ctx context.Context, stateDir string, st model.Store, i
 		return fmt.Errorf("chmod temp corpus snapshot: %w", err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("rename corpus snapshot: %w", err)
+		// os.Rename fails on Windows when the destination already exists.
+		// Remove the existing file and retry once to support Windows.
+		_ = os.Remove(path)
+		if err2 := os.Rename(tmp, path); err2 != nil {
+			_ = os.Remove(tmp)
+			return fmt.Errorf("rename corpus snapshot: %w", err2)
+		}
 	}
 	return nil
 }
