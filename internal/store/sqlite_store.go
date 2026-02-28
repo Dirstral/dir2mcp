@@ -578,7 +578,7 @@ func (s *SQLiteStore) ListFiles(ctx context.Context, prefix, glob string, limit,
 	where := make([]string, 0, 2)
 	args := make([]any, 0, 4)
 	if normalizedPrefix != "" {
-		where = append(where, "rel_path LIKE ? ESCAPE '\\\\'")
+		where = append(where, `rel_path LIKE ? ESCAPE '\'`)
 		args = append(args, escapeLike(normalizedPrefix)+"%")
 	}
 	if strings.TrimSpace(glob) != "" {
