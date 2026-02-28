@@ -26,11 +26,12 @@ type Config struct {
 	SecretPatterns  []string
 	// ResolvedAuthToken is a runtime-only token value injected by CLI wiring.
 	// It is not loaded from disk and should not be persisted.
-	ResolvedAuthToken string
-	MistralAPIKey     string
-	MistralBaseURL    string
-	ElevenLabsAPIKey  string
-	ElevenLabsBaseURL string
+	ResolvedAuthToken    string
+	MistralAPIKey        string
+	MistralBaseURL       string
+	ElevenLabsAPIKey     string
+	ElevenLabsBaseURL    string
+	ElevenLabsTTSVoiceID string
 	// AllowedOrigins is always initialized with local defaults and then extended
 	// via env/CLI comma-separated origin lists.
 	AllowedOrigins []string
@@ -63,10 +64,11 @@ func Default() Config {
 			`(?i)token\s*[:=]\s*[A-Za-z0-9_.-]{20,}`,
 			`sk_[a-z0-9]{32}|api_[A-Za-z0-9]{32}`,
 		},
-		MistralAPIKey:     "",
-		MistralBaseURL:    "",
-		ElevenLabsAPIKey:  "",
-		ElevenLabsBaseURL: "",
+		MistralAPIKey:        "",
+		MistralBaseURL:       "",
+		ElevenLabsAPIKey:     "",
+		ElevenLabsBaseURL:    "",
+		ElevenLabsTTSVoiceID: "JBFqnCBsd6RMkjVDRZzb",
 		AllowedOrigins: []string{
 			"http://localhost",
 			"http://127.0.0.1",
@@ -116,6 +118,9 @@ func applyEnvOverrides(cfg *Config, overrideEnv map[string]string) {
 	}
 	if baseURL, ok := envLookup("ELEVENLABS_BASE_URL", overrideEnv); ok && strings.TrimSpace(baseURL) != "" {
 		cfg.ElevenLabsBaseURL = baseURL
+	}
+	if voiceID, ok := envLookup("ELEVENLABS_VOICE_ID", overrideEnv); ok && strings.TrimSpace(voiceID) != "" {
+		cfg.ElevenLabsTTSVoiceID = voiceID
 	}
 	if allowedOrigins, ok := envLookup("DIR2MCP_ALLOWED_ORIGINS", overrideEnv); ok {
 		cfg.AllowedOrigins = MergeAllowedOrigins(cfg.AllowedOrigins, allowedOrigins)
