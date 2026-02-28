@@ -964,6 +964,12 @@ func (s *SQLiteStore) ensureDB(ctx context.Context) (*sql.DB, error) {
 	return s.db, nil
 }
 
+// EnsureDB returns an initialized database handle and increments active-op
+// tracking. Callers must invoke ReleaseDB when done.
+func (s *SQLiteStore) EnsureDB(ctx context.Context) (*sql.DB, error) {
+	return s.ensureDB(ctx)
+}
+
 // ReleaseDB marks completion of an operation that previously acquired a
 // database handle via ensureDB.
 func (s *SQLiteStore) ReleaseDB() {
