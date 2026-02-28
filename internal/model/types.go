@@ -60,6 +60,13 @@ type SearchHit struct {
 	Span    Span
 }
 
+type ChunkTask struct {
+	Label     uint64
+	Text      string
+	IndexKind string
+	Metadata  SearchHit
+}
+
 type Citation struct {
 	ChunkID int64
 	RelPath string

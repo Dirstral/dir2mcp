@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/Dirstral/dir2mcp/internal/config"
 	"github.com/Dirstral/dir2mcp/internal/index"
@@ -70,11 +71,64 @@ func (a *App) runUp() int {
 
 	stateDB := filepath.Join(cfg.StateDir, "meta.sqlite")
 	st := store.NewSQLiteStore(stateDB)
-	ix := index.NewHNSWIndex(filepath.Join(cfg.StateDir, "vectors_text.hnsw"))
+	textIndexPath := filepath.Join(cfg.StateDir, "vectors_text.hnsw")
+	codeIndexPath := filepath.Join(cfg.StateDir, "vectors_code.hnsw")
+	textIndex := index.NewHNSWIndex(textIndexPath)
+	codeIndex := index.NewHNSWIndex(codeIndexPath)
 	client := mistral.NewClient(cfg.MistralBaseURL, cfg.MistralAPIKey)
-	ret := retrieval.NewService(st, ix, client)
+	ret := retrieval.NewService(st, textIndex, client, client)
+	ret.SetCodeIndex(codeIndex)
+
+	persistence := index.NewPersistenceManager(
+		[]index.IndexedFile{
+			{Name: "text", Path: textIndexPath, Index: textIndex},
+			{Name: "code", Path: codeIndexPath, Index: codeIndex},
+		},
+		15*time.Second,
+		func(saveErr error) { fmt.Fprintf(os.Stderr, "index autosave error: %v\n", saveErr) },
+	)
+	if err := persistence.LoadAll(context.Background()); err != nil {
+		fmt.Fprintf(os.Stderr, "load indices: %v\n", err)
+		return 5
+	}
+	persistence.Start(context.Background())
+	defer func() {
+		if saveErr := persistence.StopAndSave(); saveErr != nil {
+			fmt.Fprintf(os.Stderr, "final index save error: %v\n", saveErr)
+		}
+	}()
+
+	textWorker := &index.EmbeddingWorker{
+		Source:       st,
+		Index:        textIndex,
+		Embedder:     client,
+		ModelForText: "mistral-embed",
+		ModelForCode: "codestral-embed",
+		BatchSize:    32,
+		OnIndexedChunk: func(label uint64, metadata model.SearchHit) {
+			ret.SetChunkMetadata(label, metadata)
+		},
+	}
+	codeWorker := &index.EmbeddingWorker{
+		Source:       st,
+		Index:        codeIndex,
+		Embedder:     client,
+		ModelForText: "mistral-embed",
+		ModelForCode: "codestral-embed",
+		BatchSize:    32,
+		OnIndexedChunk: func(label uint64, metadata model.SearchHit) {
+			ret.SetChunkMetadata(label, metadata)
+		},
+	}
 	mcpServer := mcp.NewServer(cfg, ret)
 	ing := ingest.NewService(cfg, st)
+
+	if _, err := textWorker.RunOnce(context.Background(), "text"); err != nil {
+		fmt.Fprintf(os.Stderr, "text embedding pass warning: %v\n", err)
+	}
+	if _, err := codeWorker.RunOnce(context.Background(), "code"); err != nil {
+		fmt.Fprintf(os.Stderr, "code embedding pass warning: %v\n", err)
+	}
 
 	fmt.Printf("State dir: %s\n", cfg.StateDir)
 	fmt.Printf("MCP endpoint (planned): http://%s%s\n", cfg.ListenAddr, cfg.MCPPath)
@@ -82,6 +136,8 @@ func (a *App) runUp() int {
 
 	_ = mcpServer
 	_ = ing
+	_ = textWorker
+	_ = codeWorker
 	return 0
 }
 
