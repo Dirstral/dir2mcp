@@ -9,6 +9,7 @@ import (
 
 	"dir2mcp/internal/config"
 	"dir2mcp/internal/mcp"
+	"dir2mcp/tests/testutil"
 )
 
 func TestOriginAllowlist_NoOriginHeaderPasses(t *testing.T) {
@@ -45,7 +46,7 @@ func TestOriginAllowlist_DefaultConfigBlocksElevenLabs(t *testing.T) {
 func TestOriginAllowlist_EnvAllowsElevenLabsAndKeepsLocalhost(t *testing.T) {
 	tmp := t.TempDir()
 
-	withWorkingDir(t, tmp, func() {
+	testutil.WithWorkingDir(t, tmp, func() {
 		t.Setenv("DIR2MCP_ALLOWED_ORIGINS", "https://elevenlabs.io")
 
 		cfg, err := config.Load("")
