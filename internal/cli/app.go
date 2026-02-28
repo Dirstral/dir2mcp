@@ -272,6 +272,7 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 
 	client := mistral.NewClient(cfg.MistralBaseURL, cfg.MistralAPIKey)
 	ret := retrieval.NewService(st, ix, client, client)
+	ret.SetRootDir(cfg.RootDir)
 	mcpServer := mcp.NewServer(cfg, ret)
 	ing := a.newIngestor(cfg, st)
 

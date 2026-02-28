@@ -88,6 +88,16 @@ type searchArgs struct {
 	DocTypes   []string `json:"doc_types"`
 }
 
+type openFileArgs struct {
+	RelPath   string `json:"rel_path"`
+	StartLine int    `json:"start_line"`
+	EndLine   int    `json:"end_line"`
+	Page      int    `json:"page"`
+	StartMS   int    `json:"start_ms"`
+	EndMS     int    `json:"end_ms"`
+	MaxChars  int    `json:"max_chars"`
+}
+
 func (e validationError) Error() string {
 	return e.message
 }
@@ -274,7 +284,7 @@ func (s *Server) handleToolsList(w http.ResponseWriter, id interface{}, hasID bo
 			"type": "object",
 			"properties": map[string]interface{}{
 				"query":       map[string]interface{}{"type": "string"},
-				"k":           map[string]interface{}{"type": "integer"},
+				"k":           map[string]interface{}{"type": "integer", "default": 10},
 				"index":       map[string]interface{}{"type": "string", "enum": []string{"auto", "text", "code", "both"}},
 				"path_prefix": map[string]interface{}{"type": "string"},
 				"file_glob":   map[string]interface{}{"type": "string"},
@@ -286,9 +296,26 @@ func (s *Server) handleToolsList(w http.ResponseWriter, id interface{}, hasID bo
 			"required": []string{"query"},
 		},
 	}
+	openFileTool := map[string]interface{}{
+		"name":        "dir2mcp.open_file",
+		"description": "Open an exact source slice for verification (lines/page/time).",
+		"inputSchema": map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"rel_path":   map[string]interface{}{"type": "string"},
+				"start_line": map[string]interface{}{"type": "integer", "minimum": 1},
+				"end_line":   map[string]interface{}{"type": "integer", "minimum": 1},
+				"page":       map[string]interface{}{"type": "integer", "minimum": 1},
+				"start_ms":   map[string]interface{}{"type": "integer", "minimum": 0},
+				"end_ms":     map[string]interface{}{"type": "integer", "minimum": 0},
+				"max_chars":  map[string]interface{}{"type": "integer", "minimum": 200, "maximum": 50000, "default": 20000},
+			},
+			"required": []string{"rel_path"},
+		},
+	}
 
 	writeResult(w, http.StatusOK, id, map[string]interface{}{
-		"tools": []interface{}{searchTool},
+		"tools": []interface{}{searchTool, openFileTool},
 	})
 }
 
@@ -373,8 +400,85 @@ func (s *Server) handleToolsCall(ctx context.Context, w http.ResponseWriter, id 
 				"indexing_complete": false,
 			},
 		})
+	case "dir2mcp.open_file":
+		var args openFileArgs
+		if len(params.Arguments) > 0 {
+			if err := json.Unmarshal(params.Arguments, &args); err != nil {
+				writeError(w, http.StatusBadRequest, id, -32602, "invalid tool arguments", "INVALID_FIELD", false)
+				return
+			}
+		}
+		if strings.TrimSpace(args.RelPath) == "" {
+			writeError(w, http.StatusBadRequest, id, -32602, "rel_path is required", "MISSING_FIELD", false)
+			return
+		}
+		if args.MaxChars <= 0 {
+			args.MaxChars = 20000
+		}
+		span := model.Span{}
+		if args.Page > 0 {
+			span = model.Span{Kind: "page", Page: args.Page}
+		} else if args.StartMS > 0 || args.EndMS > 0 {
+			span = model.Span{Kind: "time", StartMS: args.StartMS, EndMS: args.EndMS}
+		} else if args.StartLine > 0 || args.EndLine > 0 {
+			span = model.Span{Kind: "lines", StartLine: args.StartLine, EndLine: args.EndLine}
+		}
+
+		content, err := s.retriever.OpenFile(ctx, args.RelPath, span, args.MaxChars)
+		if err != nil {
+			log.Printf("tools/call open_file failed: id=%v tool=%s err=%v", id, params.Name, err)
+			switch {
+			case errors.Is(err, model.ErrForbidden):
+				writeError(w, http.StatusOK, id, -32000, "forbidden", "FORBIDDEN", false)
+			case errors.Is(err, model.ErrPathOutsideRoot):
+				writeError(w, http.StatusOK, id, -32000, "path outside root", "PATH_OUTSIDE_ROOT", false)
+			case errors.Is(err, model.ErrDocTypeUnsupported):
+				writeError(w, http.StatusOK, id, -32000, "doc type unsupported", "DOC_TYPE_UNSUPPORTED", false)
+			case errors.Is(err, os.ErrNotExist):
+				writeError(w, http.StatusOK, id, -32000, "file not found", "NOT_FOUND", false)
+			default:
+				writeError(w, http.StatusOK, id, -32000, "internal server error", "INTERNAL_ERROR", true)
+			}
+			return
+		}
+
+		writeResult(w, http.StatusOK, id, map[string]interface{}{
+			"content": []interface{}{
+				map[string]interface{}{
+					"type": "text",
+					"text": content,
+				},
+			},
+			"structuredContent": map[string]interface{}{
+				"rel_path":  args.RelPath,
+				"doc_type":  inferDocType(args.RelPath),
+				"span":      span,
+				"content":   content,
+				"truncated": len([]rune(content)) >= args.MaxChars,
+			},
+		})
 	default:
 		writeError(w, http.StatusBadRequest, id, -32602, "unknown tool", "INVALID_FIELD", false)
+	}
+}
+
+func inferDocType(relPath string) string {
+	ext := strings.ToLower(filepath.Ext(strings.TrimSpace(relPath)))
+	switch ext {
+	case ".go", ".js", ".ts", ".py", ".java", ".rb", ".cpp", ".c", ".cs":
+		return "code"
+	case ".md":
+		return "md"
+	case ".txt", ".rst":
+		return "text"
+	case ".pdf":
+		return "pdf"
+	case ".mp3", ".wav", ".m4a", ".flac":
+		return "audio"
+	case ".png", ".jpg", ".jpeg", ".gif", ".webp":
+		return "image"
+	default:
+		return "unknown"
 	}
 }
 

@@ -15,7 +15,9 @@ import (
 )
 
 type fakeRetriever struct {
-	hits []model.SearchHit
+	hits            []model.SearchHit
+	openFileContent string
+	openFileErr     error
 }
 
 func (f *fakeRetriever) Search(_ context.Context, _ model.SearchQuery) ([]model.SearchHit, error) {
@@ -27,7 +29,7 @@ func (f *fakeRetriever) Ask(_ context.Context, _ string, _ model.SearchQuery) (m
 }
 
 func (f *fakeRetriever) OpenFile(_ context.Context, _ string, _ model.Span, _ int) (string, error) {
-	return "", nil
+	return f.openFileContent, f.openFileErr
 }
 
 func (f *fakeRetriever) Stats(_ context.Context) (model.Stats, error) {
@@ -121,6 +123,9 @@ func TestServer_ToolsList(t *testing.T) {
 			t.Fatalf("expected dir2mcp.search.inputSchema.properties to include %q", key)
 		}
 	}
+	if _, ok := names["dir2mcp.open_file"]; !ok {
+		t.Fatalf("expected dir2mcp.open_file in tools/list")
+	}
 }
 
 func TestServer_ToolsCall_Search(t *testing.T) {
@@ -203,6 +208,80 @@ func TestServer_ToolsCall_Search(t *testing.T) {
 	}
 	if int(kVal) != 5 {
 		t.Fatalf("expected structuredContent.k 5, got %v", kVal)
+	}
+}
+
+func TestServer_ToolsCall_OpenFile(t *testing.T) {
+	cfg := config.Default()
+	cfg.AuthMode = "none"
+	srv := NewServer(cfg, &fakeRetriever{openFileContent: "line two"})
+	sessionID := initializeSession(t, srv)
+	reqBody := `{"jsonrpc":"2.0","id":"open-1","method":"tools/call","params":{"name":"dir2mcp.open_file","arguments":{"rel_path":"docs/a.md","start_line":2,"end_line":2,"max_chars":200}}}`
+	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("MCP-Session-Id", sessionID)
+	rr := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if resp["error"] != nil {
+		t.Fatalf("expected no error, got %v", resp["error"])
+	}
+	result, ok := resp["result"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected result object, got: %#v", resp["result"])
+	}
+	structured, ok := result["structuredContent"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected structuredContent object, got: %#v", result["structuredContent"])
+	}
+	if structured["rel_path"] != "docs/a.md" {
+		t.Fatalf("unexpected rel_path: %v", structured["rel_path"])
+	}
+	if structured["doc_type"] != "md" {
+		t.Fatalf("unexpected doc_type: %v", structured["doc_type"])
+	}
+	if structured["content"] != "line two" {
+		t.Fatalf("unexpected content: %v", structured["content"])
+	}
+}
+
+func TestServer_ToolsCall_OpenFile_Forbidden(t *testing.T) {
+	cfg := config.Default()
+	cfg.AuthMode = "none"
+	srv := NewServer(cfg, &fakeRetriever{openFileErr: model.ErrForbidden})
+	sessionID := initializeSession(t, srv)
+	reqBody := `{"jsonrpc":"2.0","id":"open-2","method":"tools/call","params":{"name":"dir2mcp.open_file","arguments":{"rel_path":"private/secret.txt"}}}`
+	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("MCP-Session-Id", sessionID)
+	rr := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", rr.Code, rr.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	errObj, ok := resp["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected error object, got %#v", resp["error"])
+	}
+	data, ok := errObj["data"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected error data object, got %#v", errObj["data"])
+	}
+	if data["code"] != "FORBIDDEN" {
+		t.Fatalf("expected FORBIDDEN code, got %v", data["code"])
 	}
 }
 

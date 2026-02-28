@@ -291,7 +291,15 @@ func isTransientEmbedError(err error) bool {
 	// net.Error can indicate timeouts or temporary network failures.
 	var ne net.Error
 	if errors.As(err, &ne) {
+		// timeout errors are almost always transient
 		if ne.Timeout() {
+			return true
+		}
+		// Temporary() is deprecated (see staticcheck) but in practice a
+		// few drivers/clients still return it to indicate retryable network
+		// glitches that are not strictly timeouts.  We check it here and
+		// silence the linter rather than accidentally dropping those cases.
+		if ne.Temporary() { //nolint:staticcheck
 			return true
 		}
 	}

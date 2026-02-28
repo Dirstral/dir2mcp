@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -140,6 +141,54 @@ func TestEmbeddingWorker_RunOnce_EmbeddingFailure(t *testing.T) {
 	}
 	if source.failedReason != "upstream failed" {
 		t.Fatalf("expected failedReason 'upstream failed', got %q", source.failedReason)
+	}
+}
+
+// transient error cases should leave chunks pending rather than marking them
+// failed; RunOnce still returns the underlying error so the run loop can
+// apply its retry/backoff policy.
+func TestEmbeddingWorker_RunOnce_EmbeddingTransient(t *testing.T) {
+	source := &fakeChunkSource{
+		tasks: []model.ChunkTask{model.NewChunkTask(42, "maybe", "", model.ChunkMetadata{ChunkID: 42})},
+	}
+
+	// a simple rate-limit style message should be treated as transient
+	rateErr := errors.New("rate limit exceeded")
+	worker := &EmbeddingWorker{
+		Source:    source,
+		Index:     NewHNSWIndex(""),
+		Embedder:  &fakeEmbedder{err: rateErr},
+		BatchSize: 1,
+	}
+	n, err := worker.RunOnce(context.Background(), "text")
+	if err != rateErr {
+		t.Fatalf("expected same error back, got %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("expected 0 indexed tasks, got %d", n)
+	}
+	if len(source.failedLabels) != 0 {
+		t.Fatalf("transient error should not mark failed, got %v", source.failedLabels)
+	}
+
+	// net.Error with Temporary() true is also transient
+	source.tasks = []model.ChunkTask{model.NewChunkTask(43, "again", "", model.ChunkMetadata{ChunkID: 43})}
+	tmpErr := &net.DNSError{IsTemporary: true}
+	retryWorker := &EmbeddingWorker{
+		Source:    source,
+		Index:     NewHNSWIndex(""),
+		Embedder:  &fakeEmbedder{err: tmpErr},
+		BatchSize: 1,
+	}
+	n2, err2 := retryWorker.RunOnce(context.Background(), "text")
+	if err2 != tmpErr {
+		t.Fatalf("expected temp error back, got %v", err2)
+	}
+	if n2 != 0 {
+		t.Fatalf("expected 0 indexed tasks, got %d", n2)
+	}
+	if len(source.failedLabels) != 0 {
+		t.Fatalf("net temporary error should not mark failed, got %v", source.failedLabels)
 	}
 }
 
