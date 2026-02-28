@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"path"
@@ -275,12 +276,21 @@ func (s *Service) Ask(ctx context.Context, question string, query model.SearchQu
 }
 
 func (s *Service) OpenFile(ctx context.Context, relPath string, span model.Span, maxChars int) (string, error) {
+	content, _, err := s.openFile(ctx, relPath, span, maxChars)
+	return content, err
+}
+
+func (s *Service) OpenFileWithMeta(ctx context.Context, relPath string, span model.Span, maxChars int) (string, bool, error) {
+	return s.openFile(ctx, relPath, span, maxChars)
+}
+
+func (s *Service) openFile(ctx context.Context, relPath string, span model.Span, maxChars int) (string, bool, error) {
 	if err := ctx.Err(); err != nil {
-		return "", err
+		return "", false, err
 	}
 	relPath = strings.TrimSpace(relPath)
 	if relPath == "" {
-		return "", model.ErrForbidden
+		return "", false, model.ErrForbidden
 	}
 
 	if maxChars <= 0 {
@@ -301,17 +311,17 @@ func (s *Service) OpenFile(ctx context.Context, relPath string, span model.Span,
 
 	normalizedRel := filepath.ToSlash(filepath.Clean(relPath))
 	if normalizedRel == "." || strings.HasPrefix(normalizedRel, "../") || normalizedRel == ".." || filepath.IsAbs(relPath) {
-		return "", model.ErrPathOutsideRoot
+		return "", false, model.ErrPathOutsideRoot
 	}
 	for _, pattern := range pathExcludes {
 		if s.matchExcludePattern(pattern, normalizedRel) {
-			return "", model.ErrForbidden
+			return "", false, model.ErrForbidden
 		}
 	}
 
 	rootAbs, err := filepath.Abs(rootDir)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	realRoot := rootAbs
 	if resolvedRoot, rootErr := filepath.EvalSymlinks(rootAbs); rootErr == nil {
@@ -321,7 +331,7 @@ func (s *Service) OpenFile(ctx context.Context, relPath string, span model.Span,
 	targetAbs := filepath.Join(realRoot, filepath.FromSlash(normalizedRel))
 	relFromRoot, err := filepath.Rel(realRoot, targetAbs)
 	if err != nil || relFromRoot == ".." || strings.HasPrefix(relFromRoot, ".."+string(os.PathSeparator)) {
-		return "", model.ErrPathOutsideRoot
+		return "", false, model.ErrPathOutsideRoot
 	}
 
 	kind := strings.ToLower(strings.TrimSpace(span.Kind))
@@ -329,43 +339,50 @@ func (s *Service) OpenFile(ctx context.Context, relPath string, span model.Span,
 		if fromMeta, ok := s.sliceFromMetadata(normalizedRel, span); ok {
 			for _, re := range secretPatterns {
 				if re != nil && re.MatchString(fromMeta) {
-					return "", model.ErrForbidden
+					return "", false, model.ErrForbidden
 				}
 			}
-			return truncateRunes(fromMeta, maxChars), nil
+			out, truncated := truncateRunesWithFlag(fromMeta, maxChars)
+			return out, truncated, nil
 		}
 	}
 
 	resolvedAbs, err := filepath.EvalSymlinks(targetAbs)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return "", err
+			return "", false, err
 		}
 		// if eval fails for other reasons, continue with direct target path check
 		resolvedAbs = targetAbs
 	}
 	resolvedRel, err := filepath.Rel(realRoot, resolvedAbs)
 	if err != nil || resolvedRel == ".." || strings.HasPrefix(resolvedRel, ".."+string(os.PathSeparator)) {
-		return "", model.ErrPathOutsideRoot
+		return "", false, model.ErrPathOutsideRoot
+	}
+	resolvedRel = filepath.ToSlash(filepath.Clean(resolvedRel))
+	for _, pattern := range pathExcludes {
+		if s.matchExcludePattern(pattern, resolvedRel) {
+			return "", false, model.ErrForbidden
+		}
 	}
 
 	info, err := os.Stat(resolvedAbs)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	if info.IsDir() {
-		return "", model.ErrDocTypeUnsupported
+		return "", false, model.ErrDocTypeUnsupported
 	}
 
-	raw, err := os.ReadFile(resolvedAbs)
+	raw, readTruncated, err := readFileBounded(resolvedAbs, maxChars+1)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	content := string(raw)
 
 	for _, re := range secretPatterns {
 		if re != nil && re.MatchString(content) {
-			return "", model.ErrForbidden
+			return "", false, model.ErrForbidden
 		}
 	}
 
@@ -383,7 +400,7 @@ func (s *Service) OpenFile(ctx context.Context, relPath string, span model.Span,
 		// metadata-backed OCR handled above; fall back to slicing pages directly
 		paged, ok := slicePage(content, page)
 		if !ok {
-			return "", model.ErrDocTypeUnsupported
+			return "", false, model.ErrDocTypeUnsupported
 		}
 		selected = paged
 	case "time":
@@ -401,14 +418,15 @@ func (s *Service) OpenFile(ctx context.Context, relPath string, span model.Span,
 		// metadata-backed slices for time spans are handled earlier; just extract
 		timeSlice, ok := sliceTime(content, startMS, endMS)
 		if !ok {
-			return "", model.ErrDocTypeUnsupported
+			return "", false, model.ErrDocTypeUnsupported
 		}
 		selected = timeSlice
 	default:
-		return "", model.ErrDocTypeUnsupported
+		return "", false, model.ErrDocTypeUnsupported
 	}
 
-	return truncateRunes(selected, maxChars), nil
+	out, outTruncated := truncateRunesWithFlag(selected, maxChars)
+	return out, readTruncated || outTruncated, nil
 }
 
 func (s *Service) Stats(ctx context.Context) (model.Stats, error) {
@@ -734,15 +752,35 @@ func sliceLines(content string, start, end int) string {
 	return strings.Join(lines[start-1:end], "\n")
 }
 
-func truncateRunes(s string, max int) string {
+func truncateRunesWithFlag(s string, max int) (string, bool) {
 	if max <= 0 {
-		return s
+		return s, false
 	}
 	r := []rune(s)
 	if len(r) <= max {
-		return s
+		return s, false
 	}
-	return string(r[:max])
+	return string(r[:max]), true
+}
+
+func readFileBounded(path string, maxBytes int) ([]byte, bool, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, false, err
+	}
+	defer func() { _ = f.Close() }()
+
+	if maxBytes <= 0 {
+		data, readErr := io.ReadAll(f)
+		return data, false, readErr
+	}
+
+	lim := io.LimitReader(f, int64(maxBytes))
+	data, readErr := io.ReadAll(lim)
+	if readErr != nil {
+		return nil, false, readErr
+	}
+	return data, len(data) == maxBytes, nil
 }
 
 func (s *Service) sliceFromMetadata(relPath string, requested model.Span) (string, bool) {

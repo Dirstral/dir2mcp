@@ -19,6 +19,8 @@ type fakeRetriever struct {
 	openFileContent string
 	openFileErr     error
 	lastMaxChars    int // record value passed to OpenFile
+	lastRelPath     string
+	lastSpan        model.Span
 }
 
 func (f *fakeRetriever) Search(_ context.Context, _ model.SearchQuery) ([]model.SearchHit, error) {
@@ -29,7 +31,9 @@ func (f *fakeRetriever) Ask(_ context.Context, _ string, _ model.SearchQuery) (m
 	return model.AskResult{}, nil
 }
 
-func (f *fakeRetriever) OpenFile(_ context.Context, _ string, _ model.Span, maxChars int) (string, error) {
+func (f *fakeRetriever) OpenFile(_ context.Context, relPath string, span model.Span, maxChars int) (string, error) {
+	f.lastRelPath = relPath
+	f.lastSpan = span
 	f.lastMaxChars = maxChars
 	return f.openFileContent, f.openFileErr
 }
@@ -256,7 +260,8 @@ func TestServer_ToolsCall_Search(t *testing.T) {
 func TestServer_ToolsCall_OpenFile(t *testing.T) {
 	cfg := config.Default()
 	cfg.AuthMode = "none"
-	srv := NewServer(cfg, &fakeRetriever{openFileContent: "line two"})
+	fr := &fakeRetriever{openFileContent: "line two"}
+	srv := NewServer(cfg, fr)
 	sessionID := initializeSession(t, srv)
 	reqBody := `{"jsonrpc":"2.0","id":"open-1","method":"tools/call","params":{"name":"dir2mcp.open_file","arguments":{"rel_path":"docs/a.md","start_line":2,"end_line":2,"max_chars":200}}}`
 	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(reqBody))
@@ -308,6 +313,12 @@ func TestServer_ToolsCall_OpenFile(t *testing.T) {
 	if structured["content"] != "line two" {
 		t.Fatalf("unexpected content: %v", structured["content"])
 	}
+	if fr.lastRelPath != "docs/a.md" {
+		t.Fatalf("unexpected rel_path forwarded to retriever: %q", fr.lastRelPath)
+	}
+	if fr.lastSpan.Kind != "lines" || fr.lastSpan.StartLine != 2 || fr.lastSpan.EndLine != 2 {
+		t.Fatalf("unexpected span forwarded to retriever: %#v", fr.lastSpan)
+	}
 }
 
 func Test_inferDocType_VariousExtensions(t *testing.T) {
@@ -334,7 +345,7 @@ func TestServer_ToolsCall_OpenFile_EnforceMinChars(t *testing.T) {
 	fr := &fakeRetriever{openFileContent: "hello"}
 	srv := NewServer(cfg, fr)
 	sessionID := initializeSession(t, srv)
-	// send a request with a too-small max_chars; handler should bump to 200
+	// send a request with a too-small max_chars; handler should reject it
 	reqBody := `{"jsonrpc":"2.0","id":"open-min","method":"tools/call","params":{"name":"dir2mcp.open_file","arguments":{"rel_path":"docs/a.md","max_chars":10}}}`
 	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(reqBody))
 	req.Header.Set("Content-Type", "application/json")
@@ -345,8 +356,73 @@ func TestServer_ToolsCall_OpenFile_EnforceMinChars(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("unexpected status: %d body=%s", rr.Code, rr.Body.String())
 	}
-	if fr.lastMaxChars != 200 {
-		t.Fatalf("expected maxChars to be set to 200; got %d", fr.lastMaxChars)
+	var resp map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	resultObj, ok := resp["result"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected result object, got %#v", resp["result"])
+	}
+	isError, _ := resultObj["isError"].(bool)
+	if !isError {
+		t.Fatalf("expected tool error response, got %#v", resultObj)
+	}
+	structured, ok := resultObj["structuredContent"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected structuredContent object, got %#v", resultObj["structuredContent"])
+	}
+	errEnvelope, ok := structured["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected structuredContent.error object, got %#v", structured["error"])
+	}
+	if errEnvelope["code"] != "INVALID_FIELD" {
+		t.Fatalf("expected INVALID_FIELD code, got %v", errEnvelope["code"])
+	}
+	if fr.lastMaxChars != 0 {
+		t.Fatalf("retriever should not be called on invalid args, got maxChars=%d", fr.lastMaxChars)
+	}
+}
+
+func TestServer_ToolsCall_OpenFile_PageSpanForwarded(t *testing.T) {
+	cfg := config.Default()
+	cfg.AuthMode = "none"
+	fr := &fakeRetriever{openFileContent: "page two"}
+	srv := NewServer(cfg, fr)
+	sessionID := initializeSession(t, srv)
+	reqBody := `{"jsonrpc":"2.0","id":"open-page","method":"tools/call","params":{"name":"dir2mcp.open_file","arguments":{"rel_path":"docs/a.pdf","page":2,"max_chars":200}}}`
+	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("MCP-Session-Id", sessionID)
+	rr := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", rr.Code, rr.Body.String())
+	}
+	if fr.lastSpan.Kind != "page" || fr.lastSpan.Page != 2 {
+		t.Fatalf("unexpected page span forwarded: %#v", fr.lastSpan)
+	}
+}
+
+func TestServer_ToolsCall_OpenFile_TimeSpanForwarded(t *testing.T) {
+	cfg := config.Default()
+	cfg.AuthMode = "none"
+	fr := &fakeRetriever{openFileContent: "clip"}
+	srv := NewServer(cfg, fr)
+	sessionID := initializeSession(t, srv)
+	reqBody := `{"jsonrpc":"2.0","id":"open-time","method":"tools/call","params":{"name":"dir2mcp.open_file","arguments":{"rel_path":"audio/t.txt","start_ms":1000,"end_ms":2000,"max_chars":200}}}`
+	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("MCP-Session-Id", sessionID)
+	rr := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", rr.Code, rr.Body.String())
+	}
+	if fr.lastSpan.Kind != "time" || fr.lastSpan.StartMS != 1000 || fr.lastSpan.EndMS != 2000 {
+		t.Fatalf("unexpected time span forwarded: %#v", fr.lastSpan)
 	}
 }
 

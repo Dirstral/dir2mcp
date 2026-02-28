@@ -70,6 +70,10 @@ type toolExecutionError struct {
 	Retryable bool
 }
 
+type retrieverOpenFileWithMeta interface {
+	OpenFileWithMeta(ctx context.Context, relPath string, span model.Span, maxChars int) (string, bool, error)
+}
+
 func (s *Server) buildToolRegistry() map[string]toolDefinition {
 	return map[string]toolDefinition{
 		toolNameSearch: {
@@ -531,13 +535,10 @@ func (s *Server) handleOpenFileTool(ctx context.Context, args map[string]interfa
 		if parseErr != nil {
 			return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: parseErr.Error(), Retryable: false}
 		}
-		if parsed <= 0 {
-			maxChars = 20000
-		} else if parsed < 200 || parsed > 50000 {
-			return toolCallResult{}, &toolExecutionError{Code: "INVALID_RANGE", Message: "max_chars must be between 200 and 50000", Retryable: false}
-		} else {
-			maxChars = parsed
-		}
+		maxChars = parsed
+	}
+	if maxChars < 200 || maxChars > 20000 {
+		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: "max_chars must be between 200 and 20000", Retryable: false}
 	}
 
 	span := model.Span{}
@@ -546,40 +547,59 @@ func (s *Server) handleOpenFileTool(ctx context.Context, args map[string]interfa
 		if parseErr != nil {
 			return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: parseErr.Error(), Retryable: false}
 		}
-		if page < 1 {
-			return toolCallResult{}, &toolExecutionError{Code: "INVALID_RANGE", Message: "page must be >= 1", Retryable: false}
+		if page <= 0 {
+			return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: "page must be > 0", Retryable: false}
 		}
 		span = model.Span{Kind: "page", Page: page}
 	} else {
-		startMS, err := parseOptionalInteger(args, "start_ms")
+		startMS, hasStartMS, err := parseOptionalIntegerWithPresence(args, "start_ms")
 		if err != nil {
 			return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
 		}
-		endMS, err := parseOptionalInteger(args, "end_ms")
+		endMS, hasEndMS, err := parseOptionalIntegerWithPresence(args, "end_ms")
 		if err != nil {
 			return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
 		}
-		if startMS < 0 || endMS < 0 {
-			return toolCallResult{}, &toolExecutionError{Code: "INVALID_RANGE", Message: "start_ms/end_ms must be >= 0", Retryable: false}
+		if (hasStartMS && startMS < 0) || (hasEndMS && endMS < 0) {
+			return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: "start_ms/end_ms must be >= 0", Retryable: false}
 		}
-		if startMS > 0 || endMS > 0 {
+		if hasStartMS && hasEndMS && startMS > endMS {
+			return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: "start_ms must be <= end_ms", Retryable: false}
+		}
+		if hasStartMS || hasEndMS {
 			span = model.Span{Kind: "time", StartMS: startMS, EndMS: endMS}
 		} else {
-			startLine, err := parseOptionalInteger(args, "start_line")
+			startLine, hasStartLine, err := parseOptionalIntegerWithPresence(args, "start_line")
 			if err != nil {
 				return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
 			}
-			endLine, err := parseOptionalInteger(args, "end_line")
+			endLine, hasEndLine, err := parseOptionalIntegerWithPresence(args, "end_line")
 			if err != nil {
 				return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
 			}
-			if startLine > 0 || endLine > 0 {
+			if (hasStartLine && startLine < 0) || (hasEndLine && endLine < 0) {
+				return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: "start_line/end_line must be >= 0", Retryable: false}
+			}
+			if hasStartLine && hasEndLine && startLine > endLine {
+				return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: "start_line must be <= end_line", Retryable: false}
+			}
+			if hasStartLine || hasEndLine {
 				span = model.Span{Kind: "lines", StartLine: startLine, EndLine: endLine}
 			}
 		}
 	}
 
-	content, openErr := s.retriever.OpenFile(ctx, relPath, span, maxChars)
+	var (
+		content   string
+		truncated bool
+		openErr   error
+	)
+	if withMeta, ok := s.retriever.(retrieverOpenFileWithMeta); ok {
+		content, truncated, openErr = withMeta.OpenFileWithMeta(ctx, relPath, span, maxChars)
+	} else {
+		content, openErr = s.retriever.OpenFile(ctx, relPath, span, maxChars)
+		truncated = len([]rune(content)) > maxChars
+	}
 	if openErr != nil {
 		switch {
 		case errors.Is(openErr, model.ErrForbidden):
@@ -595,15 +615,14 @@ func (s *Server) handleOpenFileTool(ctx context.Context, args map[string]interfa
 		}
 	}
 
-	// retriever.OpenFile guarantees len([]rune(content)) <= maxChars.
-	// We treat content whose length equals maxChars as potentially truncated.
-	truncated := len([]rune(content)) == maxChars
 	structured := map[string]interface{}{
 		"rel_path":  relPath,
 		"doc_type":  inferDocType(relPath),
-		"span":      span,
 		"content":   content,
 		"truncated": truncated,
+	}
+	if strings.TrimSpace(span.Kind) != "" {
+		structured["span"] = span
 	}
 
 	return toolCallResult{
@@ -701,12 +720,16 @@ func parseInteger(value interface{}, field string) (int, error) {
 	}
 }
 
-func parseOptionalInteger(args map[string]interface{}, key string) (int, error) {
+func parseOptionalIntegerWithPresence(args map[string]interface{}, key string) (int, bool, error) {
 	raw, ok := args[key]
 	if !ok {
-		return 0, nil
+		return 0, false, nil
 	}
-	return parseInteger(raw, key)
+	v, err := parseInteger(raw, key)
+	if err != nil {
+		return 0, true, err
+	}
+	return v, true, nil
 }
 
 func parseOptionalStringSlice(args map[string]interface{}, key string) ([]string, error) {

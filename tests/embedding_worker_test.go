@@ -178,7 +178,7 @@ func TestEmbeddingWorker_RunOnce_EmbeddingTransient(t *testing.T) {
 	})
 
 	t.Run("net-temporary", func(t *testing.T) {
-		// net.Error with Temporary() true is also transient
+		// net.Error with Temporary() true (without timeout) is also transient.
 		source := &fakeChunkSource{
 			tasks: []model.ChunkTask{model.NewChunkTask(43, "again", "", model.ChunkMetadata{ChunkID: 43})},
 		}
