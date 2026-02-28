@@ -76,6 +76,6 @@ func TestPersistenceManager_AutoSaveAndStop(t *testing.T) {
 	}
 
 	if atomic.LoadInt32(&i1.saveCalls) < 2 {
-		t.Fatalf("expected at least 2 save calls (tick + final), got %d", i1.saveCalls)
+		t.Fatalf("expected at least 2 save calls (tick + final), got %d", atomic.LoadInt32(&i1.saveCalls))
 	}
 }

@@ -33,14 +33,20 @@ func (f *fakeRetriever) Stats(_ context.Context) (model.Stats, error) {
 }
 
 func TestServer_ToolsList(t *testing.T) {
-	srv := NewServer(config.Default(), &fakeRetriever{})
+	cfg := config.Default()
+	cfg.AuthMode = "none"
+	srv := NewServer(cfg, &fakeRetriever{})
+	sessionID := initializeSession(t, srv)
+
 	reqBody := `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`
 	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("MCP-Session-Id", sessionID)
 	rr := httptest.NewRecorder()
 
 	srv.Handler().ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
-		t.Fatalf("unexpected status: %d", rr.Code)
+		t.Fatalf("unexpected status: %d body=%s", rr.Code, rr.Body.String())
 	}
 	var resp map[string]any
 	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
@@ -57,9 +63,14 @@ func TestServer_ToolsCall_Search(t *testing.T) {
 	hits := []model.SearchHit{
 		{ChunkID: 7, RelPath: "docs/a.md", DocType: "md", Score: 0.9},
 	}
-	srv := NewServer(config.Default(), &fakeRetriever{hits: hits})
+	cfg := config.Default()
+	cfg.AuthMode = "none"
+	srv := NewServer(cfg, &fakeRetriever{hits: hits})
+	sessionID := initializeSession(t, srv)
 	reqBody := `{"jsonrpc":"2.0","id":"req-1","method":"tools/call","params":{"name":"dir2mcp.search","arguments":{"query":"hello","k":5}}}`
 	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("MCP-Session-Id", sessionID)
 	rr := httptest.NewRecorder()
 
 	srv.Handler().ServeHTTP(rr, req)
@@ -74,4 +85,21 @@ func TestServer_ToolsCall_Search(t *testing.T) {
 	if resp["error"] != nil {
 		t.Fatalf("expected no error, got %v", resp["error"])
 	}
+}
+
+func initializeSession(t *testing.T, srv *Server) string {
+	t.Helper()
+	reqBody := `{"jsonrpc":"2.0","id":"init-1","method":"initialize","params":{}}`
+	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("initialize failed status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	sessionID := rr.Header().Get("MCP-Session-Id")
+	if sessionID == "" {
+		t.Fatal("missing MCP-Session-Id on initialize")
+	}
+	return sessionID
 }

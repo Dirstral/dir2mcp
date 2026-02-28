@@ -68,6 +68,8 @@ func (a *App) runUp() int {
 		fmt.Fprintf(os.Stderr, "create state dir: %v\n", err)
 		return 1
 	}
+	runCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	stateDB := filepath.Join(cfg.StateDir, "meta.sqlite")
 	st := store.NewSQLiteStore(stateDB)
@@ -87,11 +89,11 @@ func (a *App) runUp() int {
 		15*time.Second,
 		func(saveErr error) { fmt.Fprintf(os.Stderr, "index autosave error: %v\n", saveErr) },
 	)
-	if err := persistence.LoadAll(context.Background()); err != nil {
+	if err := persistence.LoadAll(runCtx); err != nil {
 		fmt.Fprintf(os.Stderr, "load indices: %v\n", err)
 		return 5
 	}
-	persistence.Start(context.Background())
+	persistence.Start(runCtx)
 	defer func() {
 		if saveErr := persistence.StopAndSave(); saveErr != nil {
 			fmt.Fprintf(os.Stderr, "final index save error: %v\n", saveErr)
@@ -123,21 +125,28 @@ func (a *App) runUp() int {
 	mcpServer := mcp.NewServer(cfg, ret)
 	ing := ingest.NewService(cfg, st)
 
-	if _, err := textWorker.RunOnce(context.Background(), "text"); err != nil {
-		fmt.Fprintf(os.Stderr, "text embedding pass warning: %v\n", err)
-	}
-	if _, err := codeWorker.RunOnce(context.Background(), "code"); err != nil {
-		fmt.Fprintf(os.Stderr, "code embedding pass warning: %v\n", err)
-	}
+	bootstrapMetadata(runCtx, st, ret)
 
 	fmt.Printf("State dir: %s\n", cfg.StateDir)
 	fmt.Printf("MCP endpoint (planned): http://%s%s\n", cfg.ListenAddr, cfg.MCPPath)
 	fmt.Println("Skeleton wiring complete; server/indexing logic is not implemented yet.")
 
-	_ = mcpServer
+	go func() {
+		if err := textWorker.Run(runCtx, 2*time.Second, "text"); err != nil && !errors.Is(err, context.Canceled) {
+			fmt.Fprintf(os.Stderr, "text worker stopped: %v\n", err)
+		}
+	}()
+	go func() {
+		if err := codeWorker.Run(runCtx, 2*time.Second, "code"); err != nil && !errors.Is(err, context.Canceled) {
+			fmt.Fprintf(os.Stderr, "code worker stopped: %v\n", err)
+		}
+	}()
+
 	_ = ing
-	_ = textWorker
-	_ = codeWorker
+	if err := mcpServer.Run(runCtx); err != nil && !errors.Is(err, context.Canceled) {
+		fmt.Fprintf(os.Stderr, "mcp server: %v\n", err)
+		return 4
+	}
 	return 0
 }
 
@@ -198,4 +207,32 @@ func (a *App) runConfig(args []string) int {
 		return 1
 	}
 	return 0
+}
+
+type embeddedMetadataStore interface {
+	ListEmbeddedChunkMetadata(ctx context.Context, indexKind string, limit, offset int) ([]model.ChunkTask, error)
+}
+
+func bootstrapMetadata(ctx context.Context, st embeddedMetadataStore, ret *retrieval.Service) {
+	if st == nil || ret == nil {
+		return
+	}
+	const pageSize = 500
+	for _, kind := range []string{"text", "code"} {
+		offset := 0
+		for {
+			tasks, err := st.ListEmbeddedChunkMetadata(ctx, kind, pageSize, offset)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "metadata bootstrap warning (%s): %v\n", kind, err)
+				break
+			}
+			if len(tasks) == 0 {
+				break
+			}
+			for _, task := range tasks {
+				ret.SetChunkMetadata(task.Label, task.Metadata)
+			}
+			offset += len(tasks)
+		}
+	}
 }

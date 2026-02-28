@@ -63,6 +63,10 @@ func (w *EmbeddingWorker) RunOnce(ctx context.Context, indexKind string) (int, e
 
 	for idx := range tasks {
 		if addErr := w.Index.Add(tasks[idx].Label, vectors[idx]); addErr != nil {
+			// Mark successfully indexed chunks before this failure
+			if idx > 0 {
+				_ = w.Source.MarkEmbedded(ctx, labels[:idx])
+			}
 			_ = w.Source.MarkFailed(ctx, labels[idx:idx+1], addErr.Error())
 			return idx, addErr
 		}

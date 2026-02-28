@@ -266,12 +266,12 @@ func (s *SQLiteStore) NextPending(ctx context.Context, limit int, indexKind stri
 	tasks := make([]model.ChunkTask, 0, limit)
 	for rows.Next() {
 		var (
-			chunkID  int64
-			relPath  string
-			docType  string
-			repType  string
-			text     string
-			idxKind  string
+			chunkID int64
+			relPath string
+			docType string
+			repType string
+			text    string
+			idxKind string
 		)
 		if err := rows.Scan(&chunkID, &relPath, &docType, &repType, &text, &idxKind); err != nil {
 			return nil, err
@@ -293,6 +293,66 @@ func (s *SQLiteStore) NextPending(ctx context.Context, limit int, indexKind stri
 		})
 	}
 	return tasks, rows.Err()
+}
+
+func (s *SQLiteStore) ListEmbeddedChunkMetadata(ctx context.Context, indexKind string, limit, offset int) ([]model.ChunkTask, error) {
+	db, err := s.ensureDB(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if limit <= 0 {
+		limit = 500
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	args := []any{"ok", limit, offset}
+	query := `SELECT chunk_id, rel_path, doc_type, rep_type, text, index_kind
+	          FROM chunks
+	          WHERE embedding_status = ? AND deleted = 0`
+	if strings.TrimSpace(indexKind) != "" {
+		query += ` AND index_kind = ?`
+		args = []any{"ok", indexKind, limit, offset}
+	}
+	query += ` ORDER BY chunk_id LIMIT ? OFFSET ?`
+
+	rows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	out := make([]model.ChunkTask, 0, limit)
+	for rows.Next() {
+		var (
+			chunkID int64
+			relPath string
+			docType string
+			repType string
+			text    string
+			kind    string
+		)
+		if err := rows.Scan(&chunkID, &relPath, &docType, &repType, &text, &kind); err != nil {
+			return nil, err
+		}
+		out = append(out, model.ChunkTask{
+			Label:     uint64(chunkID),
+			Text:      text,
+			IndexKind: kind,
+			Metadata: model.SearchHit{
+				ChunkID: chunkID,
+				RelPath: relPath,
+				DocType: docType,
+				RepType: repType,
+				Snippet: snippet(text, 240),
+				Span: model.Span{
+					Kind: "lines",
+				},
+			},
+		})
+	}
+	return out, rows.Err()
 }
 
 func (s *SQLiteStore) MarkEmbedded(ctx context.Context, labels []uint64) error {
