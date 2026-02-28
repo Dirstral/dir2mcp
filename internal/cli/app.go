@@ -705,6 +705,12 @@ func buildMCPURL(addr, path string) string {
 	return "http://" + addr + path
 }
 
+// PublicURLAddress derives the public-facing address using the configured
+// listen host and the resolved runtime port.
+func PublicURLAddress(configuredListenAddr, resolvedListenAddr string) string {
+	return publicURLAddress(configuredListenAddr, resolvedListenAddr)
+}
+
 func publicURLAddress(configuredListenAddr, resolvedListenAddr string) string {
 	configuredListenAddr = strings.TrimSpace(configuredListenAddr)
 	resolvedListenAddr = strings.TrimSpace(resolvedListenAddr)
@@ -722,6 +728,12 @@ func publicURLAddress(configuredListenAddr, resolvedListenAddr string) string {
 	}
 
 	return net.JoinHostPort(host, "0")
+}
+
+// ExtractPortFromAddress extracts a numeric trailing port token from a
+// host:port address or malformed best-effort address string.
+func ExtractPortFromAddress(addr string) string {
+	return extractPortFromAddress(addr)
 }
 
 func extractPortFromAddress(addr string) string {
