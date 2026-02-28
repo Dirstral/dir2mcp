@@ -8,6 +8,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"dir2mcp/internal/config"
@@ -15,12 +16,13 @@ import (
 )
 
 type fakeRetriever struct {
-	hits            []model.SearchHit
-	openFileContent string
-	openFileErr     error
-	lastMaxChars    int // record value passed to OpenFile
-	lastRelPath     string
-	lastSpan        model.Span
+	hits              []model.SearchHit
+	openFileContent   string
+	openFileErr       error
+	lastMaxChars      int // record value passed to OpenFile
+	lastRelPath       string
+	lastSpan          model.Span
+	wasOpenFileCalled bool // true if OpenFile was invoked
 }
 
 func (f *fakeRetriever) Search(_ context.Context, _ model.SearchQuery) ([]model.SearchHit, error) {
@@ -32,6 +34,7 @@ func (f *fakeRetriever) Ask(_ context.Context, _ string, _ model.SearchQuery) (m
 }
 
 func (f *fakeRetriever) OpenFile(_ context.Context, relPath string, span model.Span, maxChars int) (string, error) {
+	f.wasOpenFileCalled = true
 	f.lastRelPath = relPath
 	f.lastSpan = span
 	f.lastMaxChars = maxChars
@@ -171,6 +174,14 @@ func TestServer_ToolsList(t *testing.T) {
 		if _, ok := properties[key]; !ok {
 			t.Fatalf("expected dir2mcp.open_file.inputSchema.properties to include %q", key)
 		}
+	}
+	// ensure the schema enforces positive line numbers
+	if startProp, ok := properties["start_line"].(map[string]any); ok {
+		if m, ok := startProp["minimum"].(float64); !ok || m < 1 {
+			t.Fatalf("start_line.minimum should be >=1, got %#v", startProp["minimum"])
+		}
+	} else {
+		t.Fatalf("start_line property missing from schema")
 	}
 }
 
@@ -321,6 +332,138 @@ func TestServer_ToolsCall_OpenFile(t *testing.T) {
 	}
 }
 
+func TestServer_ToolsCall_OpenFile_InvalidLines(t *testing.T) {
+	cfg := config.Default()
+	cfg.AuthMode = "none"
+	srv := NewServer(cfg, &fakeRetriever{})
+	sessionID := initializeSession(t, srv)
+
+	cases := []struct {
+		args    map[string]interface{}
+		message string
+	}{
+		{map[string]interface{}{"rel_path": "docs/a.md", "start_line": 0}, "start_line"},
+		{map[string]interface{}{"rel_path": "docs/a.md", "end_line": 0}, "start_line"},
+	}
+
+	for _, c := range cases {
+		// build the JSON body using Go structs to avoid quoting errors
+		body := map[string]interface{}{
+			"jsonrpc": "2.0",
+			"id":      "bad",
+			"method":  "tools/call",
+			"params": map[string]interface{}{
+				"name":      "dir2mcp.open_file",
+				"arguments": c.args,
+			},
+		}
+		reqBytes, _ := json.Marshal(body)
+		req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBuffer(reqBytes))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("MCP-Session-Id", sessionID)
+		rr := httptest.NewRecorder()
+
+		srv.Handler().ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("unexpected status: %d body=%s", rr.Code, rr.Body.String())
+		}
+		var resp map[string]any
+		if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("unmarshal response: %v", err)
+		}
+		// tool-level errors are returned inside the result payload
+		resultObj, ok := resp["result"].(map[string]any)
+		if !ok {
+			t.Fatalf("expected result object, got %#v", resp["result"])
+		}
+		isError, _ := resultObj["isError"].(bool)
+		if !isError {
+			t.Fatalf("expected tool error for %v; response body=%s", c.args, rr.Body.String())
+		}
+		structured, ok := resultObj["structuredContent"].(map[string]any)
+		if !ok {
+			t.Fatalf("expected structuredContent object, got %#v", resultObj["structuredContent"])
+		}
+		errEnvelope, ok := structured["error"].(map[string]any)
+		if !ok {
+			t.Fatalf("expected structuredContent.error object, got %#v", structured["error"])
+		}
+		if errEnvelope["code"] != "INVALID_FIELD" {
+			t.Fatalf("expected INVALID_FIELD code, got %v", errEnvelope["code"])
+		}
+		msg, _ := errEnvelope["message"].(string)
+		if !strings.Contains(msg, c.message) {
+			t.Fatalf("unexpected error message: %v", msg)
+		}
+	}
+}
+
+func TestServer_ToolsCall_OpenFile_ConflictingSpanParameters(t *testing.T) {
+	cfg := config.Default()
+	cfg.AuthMode = "none"
+	srv := NewServer(cfg, &fakeRetriever{})
+	sessionID := initializeSession(t, srv)
+
+	cases := []struct {
+		args    map[string]interface{}
+		message string
+	}{
+		{map[string]interface{}{"rel_path": "docs/a.md", "page": 2, "start_ms": 100}, "conflicting span parameters"},
+		{map[string]interface{}{"rel_path": "docs/a.md", "page": 2, "start_line": 1}, "conflicting span parameters"},
+		{map[string]interface{}{"rel_path": "docs/a.md", "start_ms": 0, "start_line": 1}, "conflicting span parameters"},
+		{map[string]interface{}{"rel_path": "docs/a.md", "start_ms": 0, "end_ms": 10, "start_line": 1}, "conflicting span parameters"},
+	}
+
+	for _, c := range cases {
+		body := map[string]interface{}{
+			"jsonrpc": "2.0",
+			"id":      "bad",
+			"method":  "tools/call",
+			"params": map[string]interface{}{
+				"name":      "dir2mcp.open_file",
+				"arguments": c.args,
+			},
+		}
+		reqBytes, _ := json.Marshal(body)
+		req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBuffer(reqBytes))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("MCP-Session-Id", sessionID)
+		rr := httptest.NewRecorder()
+
+		srv.Handler().ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("unexpected status: %d body=%s", rr.Code, rr.Body.String())
+		}
+		var resp map[string]any
+		if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("unmarshal response: %v", err)
+		}
+		resultObj, ok := resp["result"].(map[string]any)
+		if !ok {
+			t.Fatalf("expected result object, got %#v", resp["result"])
+		}
+		isError, _ := resultObj["isError"].(bool)
+		if !isError {
+			t.Fatalf("expected tool error for %v; response body=%s", c.args, rr.Body.String())
+		}
+		structured, ok := resultObj["structuredContent"].(map[string]any)
+		if !ok {
+			t.Fatalf("expected structuredContent object, got %#v", resultObj["structuredContent"])
+		}
+		errEnvelope, ok := structured["error"].(map[string]any)
+		if !ok {
+			t.Fatalf("expected structuredContent.error object, got %#v", structured["error"])
+		}
+		if errEnvelope["code"] != "INVALID_FIELD" {
+			t.Fatalf("expected INVALID_FIELD code, got %v", errEnvelope["code"])
+		}
+		msg, _ := errEnvelope["message"].(string)
+		if !strings.Contains(msg, c.message) {
+			t.Fatalf("unexpected error message: %v", msg)
+		}
+	}
+}
+
 func Test_inferDocType_VariousExtensions(t *testing.T) {
 	cases := map[string]string{
 		"file.jsx":   "code",
@@ -342,7 +485,7 @@ func Test_inferDocType_VariousExtensions(t *testing.T) {
 func TestServer_ToolsCall_OpenFile_EnforceMinChars(t *testing.T) {
 	cfg := config.Default()
 	cfg.AuthMode = "none"
-	fr := &fakeRetriever{openFileContent: "hello"}
+	fr := &fakeRetriever{openFileContent: "hello", wasOpenFileCalled: false}
 	srv := NewServer(cfg, fr)
 	sessionID := initializeSession(t, srv)
 	// send a request with a too-small max_chars; handler should reject it
@@ -379,9 +522,10 @@ func TestServer_ToolsCall_OpenFile_EnforceMinChars(t *testing.T) {
 	if errEnvelope["code"] != "INVALID_FIELD" {
 		t.Fatalf("expected INVALID_FIELD code, got %v", errEnvelope["code"])
 	}
-	if fr.lastMaxChars != 0 {
-		t.Fatalf("retriever should not be called on invalid args, got maxChars=%d", fr.lastMaxChars)
+	if fr.wasOpenFileCalled {
+		t.Fatalf("retriever should not be called on invalid args")
 	}
+	// lastMaxChars remains available for future value checks if needed
 }
 
 func TestServer_ToolsCall_OpenFile_PageSpanForwarded(t *testing.T) {

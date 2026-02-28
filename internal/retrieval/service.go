@@ -173,8 +173,10 @@ func (s *Service) SetPathExcludes(patterns []string) {
 	}
 
 	s.metaMu.Lock()
-	// store normalized list so callers reading pathExcludes see the same
-	// values used as keys in the regexp cache.
+	// keep the original (unnormalized) patterns in s.pathExcludes so
+	// callers observe exactly what they provided. compiled regexps are
+	// stored in s.excludeRegexps; the helper matchExcludePattern will
+	// perform the necessary normalization when doing lookups.
 	s.pathExcludes = copied
 	s.excludeRegexps = compiled
 	s.metaMu.Unlock()
@@ -685,16 +687,23 @@ func (s *Service) matchExcludePattern(pattern, relPath string) bool {
 	s.metaMu.RUnlock()
 	if re == nil {
 		// compile lazily in case cache was missed; store for future
-		var err error
-		re, err = regexp.Compile(globToRegexp(pattern))
+		regex, err := regexp.Compile(globToRegexp(pattern))
 		if err != nil {
 			return false
 		}
+		// another goroutine may have stored the compiled regexp while we
+		// were working; grab write lock and re-check before inserting.
 		s.metaMu.Lock()
 		if s.excludeRegexps == nil {
 			s.excludeRegexps = make(map[string]*regexp.Regexp)
 		}
-		s.excludeRegexps[pattern] = re
+		if existing := s.excludeRegexps[pattern]; existing != nil {
+			// use the one already in cache instead of overwriting
+			re = existing
+		} else {
+			s.excludeRegexps[pattern] = regex
+			re = regex
+		}
 		s.metaMu.Unlock()
 	}
 	return re.MatchString(relPath)

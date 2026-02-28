@@ -537,56 +537,83 @@ func (s *Server) handleOpenFileTool(ctx context.Context, args map[string]interfa
 		}
 		maxChars = parsed
 	}
-	if maxChars < 200 || maxChars > 20000 {
-		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: "max_chars must be between 200 and 20000", Retryable: false}
+	if maxChars < 200 || maxChars > 50000 {
+		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: "max_chars must be between 200 and 50000", Retryable: false}
 	}
 
+	// parse all span-related parameters so we can detect conflicts between groups
 	span := model.Span{}
+	// group A: page
+	hasPage := false
+	var page int
 	if raw, ok := args["page"]; ok {
-		page, parseErr := parseInteger(raw, "page")
+		hasPage = true
+		var parseErr error
+		page, parseErr = parseInteger(raw, "page")
 		if parseErr != nil {
 			return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: parseErr.Error(), Retryable: false}
 		}
 		if page <= 0 {
 			return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: "page must be > 0", Retryable: false}
 		}
+	}
+
+	// group B: start_ms/end_ms
+	startMS, hasStartMS, err := parseOptionalIntegerWithPresence(args, "start_ms")
+	if err != nil {
+		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
+	}
+	endMS, hasEndMS, err := parseOptionalIntegerWithPresence(args, "end_ms")
+	if err != nil {
+		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
+	}
+
+	// group C: start_line/end_line
+	startLine, hasStartLine, err := parseOptionalIntegerWithPresence(args, "start_line")
+	if err != nil {
+		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
+	}
+	endLine, hasEndLine, err := parseOptionalIntegerWithPresence(args, "end_line")
+	if err != nil {
+		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
+	}
+
+	// detect mutually-exclusive groups: page vs time vs lines
+	groups := 0
+	if hasPage {
+		groups++
+	}
+	if hasStartMS || hasEndMS {
+		groups++
+	}
+	if hasStartLine || hasEndLine {
+		groups++
+	}
+	if groups > 1 {
+		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: "conflicting span parameters: provide only one of page, start_ms/end_ms, or start_line/end_line", Retryable: false}
+	}
+
+	// now build the span based on the single group present (if any)
+	if hasPage {
 		span = model.Span{Kind: "page", Page: page}
-	} else {
-		startMS, hasStartMS, err := parseOptionalIntegerWithPresence(args, "start_ms")
-		if err != nil {
-			return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
-		}
-		endMS, hasEndMS, err := parseOptionalIntegerWithPresence(args, "end_ms")
-		if err != nil {
-			return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
-		}
+	} else if hasStartMS || hasEndMS {
 		if (hasStartMS && startMS < 0) || (hasEndMS && endMS < 0) {
 			return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: "start_ms/end_ms must be >= 0", Retryable: false}
 		}
 		if hasStartMS && hasEndMS && startMS > endMS {
 			return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: "start_ms must be <= end_ms", Retryable: false}
 		}
-		if hasStartMS || hasEndMS {
-			span = model.Span{Kind: "time", StartMS: startMS, EndMS: endMS}
-		} else {
-			startLine, hasStartLine, err := parseOptionalIntegerWithPresence(args, "start_line")
-			if err != nil {
-				return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
-			}
-			endLine, hasEndLine, err := parseOptionalIntegerWithPresence(args, "end_line")
-			if err != nil {
-				return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
-			}
-			if (hasStartLine && startLine < 0) || (hasEndLine && endLine < 0) {
-				return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: "start_line/end_line must be >= 0", Retryable: false}
-			}
-			if hasStartLine && hasEndLine && startLine > endLine {
-				return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: "start_line must be <= end_line", Retryable: false}
-			}
-			if hasStartLine || hasEndLine {
-				span = model.Span{Kind: "lines", StartLine: startLine, EndLine: endLine}
-			}
+		span = model.Span{Kind: "time", StartMS: startMS, EndMS: endMS}
+	} else if hasStartLine || hasEndLine {
+		// runtime validation mirrors openFileInputSchema which requires
+		// positive line numbers; do not allow zero or negative values.
+		if (hasStartLine && startLine <= 0) || (hasEndLine && endLine <= 0) {
+			return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: "start_line/end_line must be > 0", Retryable: false}
 		}
+		if hasStartLine && hasEndLine && startLine > endLine {
+			return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: "start_line must be <= end_line", Retryable: false}
+		}
+		span = model.Span{Kind: "lines", StartLine: startLine, EndLine: endLine}
 	}
 
 	var (

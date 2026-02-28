@@ -6,6 +6,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"dir2mcp/internal/index"
@@ -328,6 +329,23 @@ func TestOpenFile_TimeSpan(t *testing.T) {
 	if out != want {
 		t.Fatalf("unexpected time slice: got %q want %q", out, want)
 	}
+}
+
+func TestMatchExcludePattern_Concurrent(t *testing.T) {
+	svc := NewService(nil, nil, nil, nil)
+	pattern := "**/foo/**"
+	var wg sync.WaitGroup
+	const goroutines = 20
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			if !svc.matchExcludePattern(pattern, "a/foo/b") {
+				t.Error("expected pattern to match")
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 func TestOpenFile_PageSpan_FromMetadata(t *testing.T) {
