@@ -607,6 +607,50 @@ func (s *Server) handleAskAudioTool(ctx context.Context, args map[string]interfa
 		return toolCallResult{}, &toolExecutionError{Code: "INDEX_NOT_READY", Message: "retriever not configured", Retryable: false}
 	}
 
+	if mode == "search_only" {
+		hits, searchErr := s.retriever.Search(ctx, model.SearchQuery{
+			Query:      question,
+			K:          k,
+			Index:      indexName,
+			PathPrefix: pathPrefix,
+			FileGlob:   fileGlob,
+			DocTypes:   docTypes,
+		})
+		if searchErr != nil {
+			switch {
+			case errors.Is(searchErr, model.ErrIndexNotReady), errors.Is(searchErr, model.ErrIndexNotConfigured):
+				return toolCallResult{}, &toolExecutionError{Code: "INDEX_NOT_READY", Message: "index not ready", Retryable: true}
+			default:
+				return toolCallResult{}, &toolExecutionError{Code: "INTERNAL_ERROR", Message: "internal server error", Retryable: true}
+			}
+		}
+		hitMaps := make([]map[string]interface{}, 0, len(hits))
+		for _, h := range hits {
+			hitMaps = append(hitMaps, map[string]interface{}{
+				"chunk_id": h.ChunkID,
+				"rel_path": h.RelPath,
+				"doc_type": h.DocType,
+				"rep_type": h.RepType,
+				"score":    h.Score,
+				"snippet":  h.Snippet,
+				"span":     buildOpenFileSpan(h.Span),
+			})
+		}
+		structured := map[string]interface{}{
+			"question":          question,
+			"answer":            "",
+			"citations":         []interface{}{},
+			"hits":              hitMaps,
+			"indexing_complete": false,
+		}
+		return toolCallResult{
+			Content: []toolContentItem{
+				{Type: "text", Text: fmt.Sprintf("found %d results for %q", len(hits), question)},
+			},
+			StructuredContent: structured,
+		}, nil
+	}
+
 	askResult, askErr := s.retriever.Ask(ctx, question, model.SearchQuery{
 		Query:      question,
 		K:          k,
