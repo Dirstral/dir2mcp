@@ -115,6 +115,11 @@ func (s *Service) SetOCR(ocr model.OCR) {
 	s.ocr = ocr
 }
 
+// ProcessDocument exposes single-document processing for external tests.
+func (s *Service) ProcessDocument(ctx context.Context, f DiscoveredFile, secretPatterns []*regexp.Regexp, forceReindex bool) error {
+	return s.processDocument(ctx, f, secretPatterns, forceReindex)
+}
+
 // SetOCRCacheLimits configures in‑memory limits that the service will enforce
 // when writing to the OCR cache. A maxBytes value of zero disables size
 // pruning; a ttl value of zero disables age‑based pruning. Both limits can be
@@ -135,6 +140,20 @@ func (s *Service) SetOCRCachePruneEvery(n int) {
 	s.ocrCacheMu.Lock()
 	defer s.ocrCacheMu.Unlock()
 	s.ocrCachePruneEvery = n
+}
+
+// SetOCRCacheStatHook sets a stat hook for cache enforcement.
+func (s *Service) SetOCRCacheStatHook(fn func(os.DirEntry) (os.FileInfo, error)) {
+	s.ocrCacheMu.Lock()
+	defer s.ocrCacheMu.Unlock()
+	s.ocrCacheStat = fn
+}
+
+// SetOCRCacheEnforceHook sets a cache policy enforcement hook.
+func (s *Service) SetOCRCacheEnforceHook(fn func(string) error) {
+	s.ocrCacheMu.Lock()
+	defer s.ocrCacheMu.Unlock()
+	s.ocrCacheEnforce = fn
 }
 
 // markOCRCacheWrite increments the write counter and reports whether policy
@@ -581,6 +600,11 @@ func (s *Service) generateOCRMarkdownRepresentation(ctx context.Context, doc mod
 	return nil
 }
 
+// GenerateOCRMarkdownRepresentation exposes OCR representation generation for tests.
+func (s *Service) GenerateOCRMarkdownRepresentation(ctx context.Context, doc model.Document, content []byte) error {
+	return s.generateOCRMarkdownRepresentation(ctx, doc, content)
+}
+
 // enforceOCRCachePolicy scans cacheDir and removes entries that violate
 // the configured size or age limits.  It's safe to call even if neither
 // policy is enabled; in that case it is a no-op.
@@ -682,6 +706,11 @@ func (s *Service) enforceOCRCachePolicy(cacheDir string) error {
 	return nil
 }
 
+// EnforceOCRCachePolicy exposes cache policy enforcement for tests.
+func (s *Service) EnforceOCRCachePolicy(cacheDir string) error {
+	return s.enforceOCRCachePolicy(cacheDir)
+}
+
 func (s *Service) readOrComputeOCR(ctx context.Context, doc model.Document, content []byte) (string, error) {
 	cacheDir := filepath.Join(s.cfg.StateDir, "cache", "ocr")
 	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
@@ -727,4 +756,9 @@ func (s *Service) readOrComputeOCR(ctx context.Context, doc model.Document, cont
 		}
 	}
 	return string(ocrBytes), nil
+}
+
+// ReadOrComputeOCR exposes OCR cache lookup/computation for tests.
+func (s *Service) ReadOrComputeOCR(ctx context.Context, doc model.Document, content []byte) (string, error) {
+	return s.readOrComputeOCR(ctx, doc, content)
 }
