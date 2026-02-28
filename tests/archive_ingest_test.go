@@ -167,6 +167,9 @@ func TestArchiveIngest_NestedArchiveNotRecursed(t *testing.T) {
 	st := runArchiveIngest(t, "outer.zip", outerZip)
 	paths := docPaths(t, st)
 
+	if !paths["outer.zip/inner.zip"] {
+		t.Error("nested archive member should be persisted as a depth-1 document")
+	}
 	if paths["outer.zip/inner.zip/inner.txt"] {
 		t.Error("nested archive member must not be recursed into")
 	}
