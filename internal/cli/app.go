@@ -670,16 +670,67 @@ func buildMCPURL(addr, path string) string {
 }
 
 func publicURLAddress(configuredListenAddr, resolvedListenAddr string) string {
+	configuredListenAddr = strings.TrimSpace(configuredListenAddr)
+	resolvedListenAddr = strings.TrimSpace(resolvedListenAddr)
+
 	host := "0.0.0.0"
 	if parsedHost, _, err := net.SplitHostPort(configuredListenAddr); err == nil && strings.TrimSpace(parsedHost) != "" {
 		host = parsedHost
 	}
 
-	if _, port, err := net.SplitHostPort(resolvedListenAddr); err == nil && port != "" {
+	if port := extractPortFromAddress(resolvedListenAddr); port != "" {
 		return net.JoinHostPort(host, port)
 	}
 
-	return configuredListenAddr
+	if resolvedListenAddr != "" {
+		return resolvedListenAddr
+	}
+	if configuredListenAddr != "" {
+		return configuredListenAddr
+	}
+	return net.JoinHostPort(host, "0")
+}
+
+func extractPortFromAddress(addr string) string {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return ""
+	}
+
+	if _, port, err := net.SplitHostPort(addr); err == nil {
+		port = strings.TrimSpace(port)
+		if isNumericPort(port) {
+			return port
+		}
+		return ""
+	}
+
+	// Best effort for malformed values where SplitHostPort fails but the
+	// value still contains a trailing numeric ":port" token.
+	i := strings.LastIndex(addr, ":")
+	if i < 0 || i == len(addr)-1 {
+		return ""
+	}
+	port := addr[i+1:]
+	if strings.IndexAny(port, " \t\r\n/\\") >= 0 {
+		return ""
+	}
+	if isNumericPort(port) {
+		return port
+	}
+	return ""
+}
+
+func isNumericPort(port string) bool {
+	if port == "" {
+		return false
+	}
+	for _, r := range port {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func buildConnectionPayload(cfg config.Config, url string, auth authMaterial) connectionPayload {
