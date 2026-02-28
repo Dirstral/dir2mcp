@@ -1,4 +1,4 @@
-package mistral_test
+package tests
 
 import (
 	"context"
