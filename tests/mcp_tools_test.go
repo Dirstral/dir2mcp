@@ -15,6 +15,8 @@ import (
 	"dir2mcp/internal/model"
 )
 
+// TestMCPToolsList_RegistersDayOneToolsWithSchemas verifies that tools/list
+// advertises the expected Day 1 MCP tools with schemas.
 func TestMCPToolsList_RegistersDayOneToolsWithSchemas(t *testing.T) {
 	cfg := config.Default()
 	cfg.AuthMode = "none"
@@ -74,6 +76,8 @@ func TestMCPToolsList_RegistersDayOneToolsWithSchemas(t *testing.T) {
 	}
 }
 
+// TestMCPToolsCallStats_ReturnsStructuredContent verifies the happy-path
+// response shape for dir2mcp.stats.
 func TestMCPToolsCallStats_ReturnsStructuredContent(t *testing.T) {
 	cfg := config.Default()
 	cfg.AuthMode = "none"
@@ -134,6 +138,8 @@ func TestMCPToolsCallStats_ReturnsStructuredContent(t *testing.T) {
 	}
 }
 
+// TestMCPToolsCallListFiles_GracefulWithoutSQLiteStore verifies that
+// list_files returns an empty, valid response when no store is configured.
 func TestMCPToolsCallListFiles_GracefulWithoutSQLiteStore(t *testing.T) {
 	cfg := config.Default()
 	cfg.AuthMode = "none"
@@ -181,6 +187,8 @@ func TestMCPToolsCallListFiles_GracefulWithoutSQLiteStore(t *testing.T) {
 	}
 }
 
+// TestMCPToolsCallStats_RejectsUnknownArgument verifies stats argument
+// validation failures are reported as INVALID_FIELD.
 func TestMCPToolsCallStats_RejectsUnknownArgument(t *testing.T) {
 	cfg := config.Default()
 	cfg.AuthMode = "none"
@@ -198,6 +206,8 @@ func TestMCPToolsCallStats_RejectsUnknownArgument(t *testing.T) {
 	assertToolCallErrorCode(t, resp, "INVALID_FIELD")
 }
 
+// TestMCPToolsCallListFiles_RejectsUnknownArgument verifies unknown
+// list_files arguments are rejected.
 func TestMCPToolsCallListFiles_RejectsUnknownArgument(t *testing.T) {
 	cfg := config.Default()
 	cfg.AuthMode = "none"
@@ -215,6 +225,8 @@ func TestMCPToolsCallListFiles_RejectsUnknownArgument(t *testing.T) {
 	assertToolCallErrorCode(t, resp, "INVALID_FIELD")
 }
 
+// TestMCPToolsCallListFiles_RejectsLimitWrongType verifies non-integer limit
+// values are rejected with INVALID_FIELD.
 func TestMCPToolsCallListFiles_RejectsLimitWrongType(t *testing.T) {
 	cfg := config.Default()
 	cfg.AuthMode = "none"
@@ -232,6 +244,8 @@ func TestMCPToolsCallListFiles_RejectsLimitWrongType(t *testing.T) {
 	assertToolCallErrorCode(t, resp, "INVALID_FIELD")
 }
 
+// TestMCPToolsCallListFiles_RejectsLimitOutOfRange verifies list_files limit
+// range checks (min and max bounds).
 func TestMCPToolsCallListFiles_RejectsLimitOutOfRange(t *testing.T) {
 	cfg := config.Default()
 	cfg.AuthMode = "none"
@@ -267,6 +281,8 @@ func TestMCPToolsCallListFiles_RejectsLimitOutOfRange(t *testing.T) {
 	}
 }
 
+// TestMCPToolsCallListFiles_RejectsOffsetWrongType verifies non-integer offset
+// values are rejected with INVALID_FIELD.
 func TestMCPToolsCallListFiles_RejectsOffsetWrongType(t *testing.T) {
 	cfg := config.Default()
 	cfg.AuthMode = "none"
@@ -284,6 +300,8 @@ func TestMCPToolsCallListFiles_RejectsOffsetWrongType(t *testing.T) {
 	assertToolCallErrorCode(t, resp, "INVALID_FIELD")
 }
 
+// TestMCPToolsCallListFiles_RejectsNegativeOffset verifies negative offsets
+// are rejected with INVALID_RANGE.
 func TestMCPToolsCallListFiles_RejectsNegativeOffset(t *testing.T) {
 	cfg := config.Default()
 	cfg.AuthMode = "none"
@@ -301,6 +319,8 @@ func TestMCPToolsCallListFiles_RejectsNegativeOffset(t *testing.T) {
 	assertToolCallErrorCode(t, resp, "INVALID_RANGE")
 }
 
+// TestMCPToolsCallListFiles_StoreFailureReturnsStoreCorrupt verifies store
+// backend failures are surfaced as STORE_CORRUPT tool errors.
 func TestMCPToolsCallListFiles_StoreFailureReturnsStoreCorrupt(t *testing.T) {
 	cfg := config.Default()
 	cfg.AuthMode = "none"
@@ -320,6 +340,8 @@ func TestMCPToolsCallListFiles_StoreFailureReturnsStoreCorrupt(t *testing.T) {
 	assertToolCallErrorCode(t, resp, "STORE_CORRUPT")
 }
 
+// failingListFilesStore is a minimal store stub that forces ListFiles to
+// return a configured error for error-path testing.
 type failingListFilesStore struct {
 	err error
 }
@@ -344,6 +366,8 @@ func (s *failingListFilesStore) Close() error {
 	return nil
 }
 
+// assertToolCallErrorCode validates that a tools/call response returned a
+// tool-level error payload with the expected canonical error code.
 func assertToolCallErrorCode(t *testing.T, resp *http.Response, wantCode string) {
 	t.Helper()
 
@@ -387,6 +411,8 @@ func assertToolCallErrorCode(t *testing.T, resp *http.Response, wantCode string)
 	}
 }
 
+// initializeSession performs MCP initialize and returns the session id used
+// for subsequent tools/list and tools/call requests.
 func initializeSession(t *testing.T, url string) string {
 	t.Helper()
 	resp := postRPC(t, url, "", `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`)
@@ -404,6 +430,8 @@ func initializeSession(t *testing.T, url string) string {
 	return sessionID
 }
 
+// postRPC sends a JSON-RPC POST request to the MCP endpoint with an optional
+// MCP session header.
 func postRPC(t *testing.T, url, sessionID, body string) *http.Response {
 	t.Helper()
 	req, err := http.NewRequest(http.MethodPost, url, bytes.NewBufferString(body))
