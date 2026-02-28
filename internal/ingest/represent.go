@@ -292,7 +292,7 @@ func ChunkCodeByLines(content string, maxLines, overlapLines int) []ChunkSegment
 	raw := chunkCodeByLines(content, maxLines, overlapLines)
 	out := make([]ChunkSegment, 0, len(raw))
 	for _, seg := range raw {
-		out = append(out, ChunkSegment{Text: seg.Text, Span: seg.Span})
+		out = append(out, ChunkSegment(seg))
 	}
 	return out
 }
@@ -370,7 +370,7 @@ func ChunkTextByChars(content string, maxChars, overlapChars, minChars int) []Ch
 	raw := chunkTextByChars(content, maxChars, overlapChars, minChars)
 	out := make([]ChunkSegment, 0, len(raw))
 	for _, seg := range raw {
-		out = append(out, ChunkSegment{Text: seg.Text, Span: seg.Span})
+		out = append(out, ChunkSegment(seg))
 	}
 	return out
 }

@@ -74,12 +74,6 @@ func matchPathExclude(glob, relPath string) bool {
 	return matchGlobSegments(strings.Split(pattern, "/"), strings.Split(relPath, "/"))
 }
 
-// matchesGlobPattern checks if filePath matches pattern using the same semantics
-// as exclusion matching. It is kept for test ergonomics.
-func matchesGlobPattern(filePath, pattern string) bool {
-	return MatchesGlobPattern(filePath, pattern)
-}
-
 // MatchesGlobPattern checks whether filePath matches pattern.
 func MatchesGlobPattern(filePath, pattern string) bool {
 	return matchPathExclude(pattern, filePath)
