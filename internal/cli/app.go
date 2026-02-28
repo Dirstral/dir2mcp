@@ -564,7 +564,7 @@ func preloadEmbeddedChunkMetadata(ctx context.Context, source embeddedChunkListe
 
 func startEmbeddingWorkers(
 	ctx context.Context,
-	st *store.SQLiteStore,
+	st index.ChunkSource,
 	textIndex model.Index,
 	codeIndex model.Index,
 	embedder model.Embedder,
