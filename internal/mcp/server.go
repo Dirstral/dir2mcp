@@ -134,7 +134,12 @@ func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 			w.Header().Set("Vary", "Origin")
 		}
 
-		if r.Method == http.MethodOptions {
+		accessControlRequestMethod := strings.TrimSpace(r.Header.Get("Access-Control-Request-Method"))
+		accessControlRequestHeaders := strings.TrimSpace(r.Header.Get("Access-Control-Request-Headers"))
+		isPreflight := r.Method == http.MethodOptions &&
+			origin != "" &&
+			(accessControlRequestMethod != "" || accessControlRequestHeaders != "")
+		if isPreflight {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
