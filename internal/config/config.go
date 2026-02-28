@@ -168,7 +168,7 @@ func normalizeOriginKey(origin string) string {
 		scheme := strings.ToLower(parsed.Scheme)
 		host := strings.ToLower(parsed.Hostname())
 		port := parsed.Port()
-		if port == "" {
+		if port == "" || (scheme == "http" && port == "80") || (scheme == "https" && port == "443") {
 			return scheme + "://" + host
 		}
 		return scheme + "://" + host + ":" + port

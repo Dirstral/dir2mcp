@@ -231,6 +231,67 @@ func TestLoad_AllowedOriginsEnvSkipsWhitespaceToken(t *testing.T) {
 	})
 }
 
+func TestLoad_AllowedOriginsEnvDeduplicatesHTTPSDefaultPort(t *testing.T) {
+	tmp := t.TempDir()
+
+	withWorkingDir(t, tmp, func() {
+		t.Setenv("DIR2MCP_ALLOWED_ORIGINS", "https://example.com,https://example.com:443")
+		cfg, err := config.Load("")
+		if err != nil {
+			t.Fatalf("Load failed: %v", err)
+		}
+
+		count := 0
+		for _, origin := range cfg.AllowedOrigins {
+			if origin == "https://example.com" || origin == "https://example.com:443" {
+				count++
+			}
+		}
+		if count != 1 {
+			t.Fatalf("expected one normalized https example.com entry, got %d (%v)", count, cfg.AllowedOrigins)
+		}
+		assertContains(t, cfg.AllowedOrigins, "https://example.com")
+	})
+}
+
+func TestLoad_AllowedOriginsEnvDeduplicatesHTTPDefaultPort(t *testing.T) {
+	tmp := t.TempDir()
+
+	withWorkingDir(t, tmp, func() {
+		t.Setenv("DIR2MCP_ALLOWED_ORIGINS", "http://example.com,http://example.com:80")
+		cfg, err := config.Load("")
+		if err != nil {
+			t.Fatalf("Load failed: %v", err)
+		}
+
+		count := 0
+		for _, origin := range cfg.AllowedOrigins {
+			if origin == "http://example.com" || origin == "http://example.com:80" {
+				count++
+			}
+		}
+		if count != 1 {
+			t.Fatalf("expected one normalized http example.com entry, got %d (%v)", count, cfg.AllowedOrigins)
+		}
+		assertContains(t, cfg.AllowedOrigins, "http://example.com")
+	})
+}
+
+func TestLoad_AllowedOriginsEnvKeepsNonDefaultPortDistinct(t *testing.T) {
+	tmp := t.TempDir()
+
+	withWorkingDir(t, tmp, func() {
+		t.Setenv("DIR2MCP_ALLOWED_ORIGINS", "https://example.com,https://example.com:444")
+		cfg, err := config.Load("")
+		if err != nil {
+			t.Fatalf("Load failed: %v", err)
+		}
+
+		assertContains(t, cfg.AllowedOrigins, "https://example.com")
+		assertContains(t, cfg.AllowedOrigins, "https://example.com:444")
+	})
+}
+
 func assertContains(t *testing.T, values []string, want string) {
 	t.Helper()
 	for _, value := range values {
