@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -69,6 +70,7 @@ func TestUpCreatesSecretTokenAndConnectionFile(t *testing.T) {
 		Transport string            `json:"transport"`
 		URL       string            `json:"url"`
 		Headers   map[string]string `json:"headers"`
+		Public    bool              `json:"public"`
 		Session   struct {
 			UsesMCPSessionID     bool   `json:"uses_mcp_session_id"`
 			HeaderName           string `json:"header_name"`
@@ -95,6 +97,9 @@ func TestUpCreatesSecretTokenAndConnectionFile(t *testing.T) {
 	}
 	if connection.TokenFile == "" {
 		t.Fatal("expected token_file to be populated")
+	}
+	if connection.Public {
+		t.Fatal("expected public=false by default")
 	}
 	if !connection.Session.UsesMCPSessionID {
 		t.Fatal("expected session.uses_mcp_session_id=true")
@@ -277,6 +282,212 @@ func TestUpReturnsExitCode6OnIngestionFatal(t *testing.T) {
 	if !strings.Contains(stderr.String(), "ingestion failed") {
 		t.Fatalf("expected ingestion error in stderr, got: %s", stderr.String())
 	}
+}
+
+func TestUpDefaultListenStaysLoopbackWhenNotPublic(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("MISTRAL_API_KEY", "test-key")
+	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := cli.NewAppWithIO(&stdout, &stderr)
+
+	withWorkingDir(t, tmp, func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		code := app.RunWithContext(ctx, []string{"up"})
+		if code != 0 {
+			t.Fatalf("unexpected exit code: got=%d stderr=%s", code, stderr.String())
+		}
+	})
+
+	connection := readConnectionPayload(t, filepath.Join(tmp, ".dir2mcp", "connection.json"))
+	host := connectionHost(t, connection.URL)
+	if host != "127.0.0.1" {
+		t.Fatalf("expected loopback host for default mode, got %q (url=%s)", host, connection.URL)
+	}
+	if connection.Public {
+		t.Fatalf("expected connection.public=false by default, got true")
+	}
+}
+
+func TestUpPublicWithoutListenBindsAllInterfaces(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("MISTRAL_API_KEY", "test-key")
+	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := cli.NewAppWithIO(&stdout, &stderr)
+
+	withWorkingDir(t, tmp, func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		code := app.RunWithContext(ctx, []string{"up", "--public"})
+		if code != 0 {
+			t.Fatalf("unexpected exit code: got=%d stderr=%s", code, stderr.String())
+		}
+	})
+
+	connection := readConnectionPayload(t, filepath.Join(tmp, ".dir2mcp", "connection.json"))
+	host := connectionHost(t, connection.URL)
+	if host != "0.0.0.0" {
+		t.Fatalf("expected 0.0.0.0 host in public mode, got %q (url=%s)", host, connection.URL)
+	}
+	if !connection.Public {
+		t.Fatalf("expected connection.public=true in public mode, got false")
+	}
+}
+
+func TestUpPublicAuthNoneFailsWithoutForceInsecure(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("MISTRAL_API_KEY", "test-key")
+	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := cli.NewAppWithIO(&stdout, &stderr)
+
+	var code int
+	withWorkingDir(t, tmp, func() {
+		code = app.RunWithContext(context.Background(), []string{"up", "--public", "--auth", "none"})
+	})
+
+	if code != 2 {
+		t.Fatalf("unexpected exit code: got=%d want=2 stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "--public requires auth") {
+		t.Fatalf("expected public auth guardrail message, got: %s", stderr.String())
+	}
+}
+
+func TestUpPublicAuthNoneAllowedWithForceInsecure(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("MISTRAL_API_KEY", "test-key")
+	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := cli.NewAppWithIO(&stdout, &stderr)
+
+	withWorkingDir(t, tmp, func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		code := app.RunWithContext(ctx, []string{"up", "--public", "--auth", "none", "--force-insecure", "--json"})
+		if code != 0 {
+			t.Fatalf("unexpected exit code: got=%d stderr=%s", code, stderr.String())
+		}
+	})
+}
+
+func TestUpPublicRespectsExplicitListen(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("MISTRAL_API_KEY", "test-key")
+	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := cli.NewAppWithIO(&stdout, &stderr)
+
+	withWorkingDir(t, tmp, func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		code := app.RunWithContext(ctx, []string{"up", "--public", "--listen", "127.0.0.1:0"})
+		if code != 0 {
+			t.Fatalf("unexpected exit code: got=%d stderr=%s", code, stderr.String())
+		}
+	})
+
+	connection := readConnectionPayload(t, filepath.Join(tmp, ".dir2mcp", "connection.json"))
+	host := connectionHost(t, connection.URL)
+	if host != "127.0.0.1" {
+		t.Fatalf("expected explicit listen host to be preserved, got %q (url=%s)", host, connection.URL)
+	}
+	if !connection.Public {
+		t.Fatalf("expected connection.public=true when --public is set")
+	}
+}
+
+func TestUpPublicNDJSONServerStartedIncludesPublicField(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("MISTRAL_API_KEY", "test-key")
+	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := cli.NewAppWithIO(&stdout, &stderr)
+
+	withWorkingDir(t, tmp, func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		code := app.RunWithContext(ctx, []string{"up", "--public", "--json", "--read-only"})
+		if code != 0 {
+			t.Fatalf("unexpected exit code: got=%d stderr=%s", code, stderr.String())
+		}
+	})
+
+	lines := scanLines(t, stdout.String())
+	if len(lines) == 0 {
+		t.Fatal("expected NDJSON output")
+	}
+
+	foundServerStarted := false
+	for _, line := range lines {
+		var event map[string]interface{}
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			t.Fatalf("invalid NDJSON line: %q err=%v", line, err)
+		}
+		if event["event"] != "server_started" {
+			continue
+		}
+		foundServerStarted = true
+		data, ok := event["data"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("server_started event data has unexpected shape: %#v", event["data"])
+		}
+		publicValue, ok := data["public"].(bool)
+		if !ok {
+			t.Fatalf("expected server_started.data.public bool, got %#v", data["public"])
+		}
+		if !publicValue {
+			t.Fatalf("expected server_started.data.public=true, got false")
+		}
+	}
+
+	if !foundServerStarted {
+		t.Fatal("missing server_started event")
+	}
+}
+
+type connectionFilePayload struct {
+	URL    string `json:"url"`
+	Public bool   `json:"public"`
+}
+
+func readConnectionPayload(t *testing.T, path string) connectionFilePayload {
+	t.Helper()
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read connection file: %v", err)
+	}
+
+	var payload connectionFilePayload
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatalf("unmarshal connection file: %v", err)
+	}
+	return payload
+}
+
+func connectionHost(t *testing.T, rawURL string) string {
+	t.Helper()
+
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		t.Fatalf("parse connection URL: %v", err)
+	}
+	return parsed.Hostname()
 }
 
 func scanLines(t *testing.T, text string) []string {
