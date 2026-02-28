@@ -319,7 +319,7 @@ func (s *Service) Ask(ctx context.Context, question string, query model.SearchQu
 		query.Query = question
 	}
 	if query.K <= 0 {
-		query.K = 5
+		query.K = 10
 	}
 
 	hits, err := s.Search(ctx, query)
