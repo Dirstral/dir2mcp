@@ -71,7 +71,7 @@ func extractZipMembers(absPath, archiveRelPath string) ([]archiveMember, error) 
 	if err != nil {
 		return nil, fmt.Errorf("open zip: %w", err)
 	}
-	defer r.Close()
+	defer func() { _ = r.Close() }()
 
 	var members []archiveMember
 	for _, f := range r.File {
@@ -106,7 +106,7 @@ func extractTarMembers(absPath, archiveRelPath string) ([]archiveMember, error) 
 	if err != nil {
 		return nil, fmt.Errorf("open tar: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	var rd io.Reader = f
 	switch archiveFormat(archiveRelPath) {
@@ -115,7 +115,7 @@ func extractTarMembers(absPath, archiveRelPath string) ([]archiveMember, error) 
 		if err != nil {
 			return nil, fmt.Errorf("gzip reader: %w", err)
 		}
-		defer gr.Close()
+		defer func() { _ = gr.Close() }()
 		rd = gr
 	case "tar.bz2":
 		rd = bzip2.NewReader(f)
