@@ -20,6 +20,8 @@ type Config struct {
 	ProtocolVersion string
 	Public          bool
 	AuthMode        string
+	PathExcludes    []string
+	SecretPatterns  []string
 	// ResolvedAuthToken is a runtime-only token value injected by CLI wiring.
 	// It is not loaded from disk and should not be persisted.
 	ResolvedAuthToken string
@@ -37,8 +39,26 @@ func Default() Config {
 		ProtocolVersion: DefaultProtocolVersion,
 		Public:          false,
 		AuthMode:        "auto",
-		MistralAPIKey:   "",
-		MistralBaseURL:  "",
+		PathExcludes: []string{
+			"**/.git/**",
+			"**/.dir2mcp/**",
+			"**/node_modules/**",
+			"**/vendor/**",
+			"**/__pycache__/**",
+			"**/.env",
+			"**/*.pem",
+			"**/*.key",
+			"**/id_rsa",
+		},
+		SecretPatterns: []string{
+			`AKIA[0-9A-Z]{16}`,
+			`(?i)aws(.{0,20})?secret|([0-9a-zA-Z/+=]{40})`,
+			`(?i)(?:authorization\s*[:=]\s*bearer\s+|(?:access|id|refresh)_token\s*[:=]\s*)[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}`,
+			`(?i)token\s*[:=]\s*[A-Za-z0-9_.-]{20,}`,
+			`sk_[a-z0-9]{32}|api_[A-Za-z0-9]{32}`,
+		},
+		MistralAPIKey:  "",
+		MistralBaseURL: "",
 		AllowedOrigins: []string{
 			"http://localhost",
 			"http://127.0.0.1",
