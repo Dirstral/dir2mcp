@@ -279,10 +279,87 @@ func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretP
 		return nil
 	}
 
+	// Archive containers: extract and ingest each member as its own document.
+	// The archive document itself remains "skipped" (no direct text content).
+	if doc.DocType == "archive" && needsProcessing {
+		if err := s.processArchiveMembers(ctx, f, secretPatterns, forceReindex); err != nil {
+			return fmt.Errorf("process archive members: %w", err)
+		}
+		return nil
+	}
+
 	if !needsProcessing || doc.Status != "ok" {
 		return nil
 	}
 
+	if err := s.generateRepresentations(ctx, doc, content); err != nil {
+		return fmt.Errorf("generate representations: %w", err)
+	}
+	return nil
+}
+
+// processArchiveMembers extracts members from an archive and ingests each one
+// as an independent document. One bad member is logged and skipped without
+// aborting the rest.
+func (s *Service) processArchiveMembers(ctx context.Context, f DiscoveredFile, secretPatterns []*regexp.Regexp, forceReindex bool) error {
+	members, err := extractArchiveMembers(f.AbsPath, f.RelPath)
+	if err != nil {
+		s.getLogger().Printf("archive extract %s: %v", f.RelPath, err)
+		return nil // extraction failure is non-fatal; archive stays "skipped"
+	}
+	for _, m := range members {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := s.processDocumentFromContent(ctx, m.RelPath, m.Content, f.MTimeUnix, secretPatterns, forceReindex); err != nil {
+			s.getLogger().Printf("archive member %s: %v", m.RelPath, err)
+			// continue with next member
+		}
+	}
+	return nil
+}
+
+// processDocumentFromContent ingests a document whose content is already in
+// memory (e.g. an archive member). relPath is the virtual path stored in the
+// documents table; mtimeUnix is inherited from the parent archive.
+func (s *Service) processDocumentFromContent(ctx context.Context, relPath string, content []byte, mtimeUnix int64, secretPatterns []*regexp.Regexp, forceReindex bool) error {
+	docType := ClassifyDocType(relPath)
+	// skip nested archives (depth limit: no recursion by default)
+	if docType == "archive" || docType == "binary_ignored" || docType == "ignore" {
+		return nil
+	}
+
+	doc := model.Document{
+		RelPath:     relPath,
+		DocType:     docType,
+		SizeBytes:   int64(len(content)),
+		MTimeUnix:   mtimeUnix,
+		ContentHash: computeContentHash(content),
+		Status:      "ok",
+	}
+
+	if hasSecretMatch(contentSample(content), secretPatterns) {
+		doc.Status = "secret_excluded"
+	}
+
+	existingDoc, err := s.store.GetDocumentByPath(ctx, relPath)
+	if err != nil && !isNotFoundError(err) {
+		return fmt.Errorf("get existing document: %w", err)
+	}
+	needsProcessing := needsReprocessing(existingDoc.ContentHash, doc.ContentHash, forceReindex)
+
+	if err := s.store.UpsertDocument(ctx, doc); err != nil {
+		return fmt.Errorf("upsert document: %w", err)
+	}
+	if updated, err := s.store.GetDocumentByPath(ctx, relPath); err == nil {
+		doc.DocID = updated.DocID
+	} else if !isNotFoundError(err) {
+		return fmt.Errorf("fetch document after upsert: %w", err)
+	}
+
+	if !needsProcessing || doc.Status != "ok" {
+		return nil
+	}
 	if err := s.generateRepresentations(ctx, doc, content); err != nil {
 		return fmt.Errorf("generate representations: %w", err)
 	}
