@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,6 +20,7 @@ import (
 const (
 	toolNameSearch    = "dir2mcp.search"
 	toolNameAsk       = "dir2mcp.ask"
+	toolNameAskAudio  = "dir2mcp.ask_audio"
 	toolNameOpenFile  = "dir2mcp.open_file"
 	toolNameListFiles = "dir2mcp.list_files"
 	toolNameStats     = "dir2mcp.stats"
@@ -34,6 +36,7 @@ const (
 var toolOrder = []string{
 	toolNameSearch,
 	toolNameAsk,
+	toolNameAskAudio,
 	toolNameOpenFile,
 	toolNameListFiles,
 	toolNameStats,
@@ -61,8 +64,10 @@ type toolCallResult struct {
 }
 
 type toolContentItem struct {
-	Type string `json:"type"`
-	Text string `json:"text,omitempty"`
+	Type     string `json:"type"`
+	Text     string `json:"text,omitempty"`
+	Data     string `json:"data,omitempty"`
+	MIMEType string `json:"mimeType,omitempty"`
 }
 
 type toolExecutionError struct {
@@ -73,6 +78,10 @@ type toolExecutionError struct {
 
 type retrieverOpenFileWithMeta interface {
 	OpenFileWithMeta(ctx context.Context, relPath string, span model.Span, maxChars int) (string, bool, error)
+}
+
+type voiceAwareTTSSynthesizer interface {
+	SynthesizeWithVoice(ctx context.Context, text, voiceID string) ([]byte, error)
 }
 
 func (s *Server) buildToolRegistry() map[string]toolDefinition {
@@ -90,6 +99,13 @@ func (s *Server) buildToolRegistry() map[string]toolDefinition {
 			InputSchema:  askInputSchema(),
 			OutputSchema: askOutputSchema(),
 			handler:      s.handleAskTool,
+		},
+		toolNameAskAudio: {
+			Name:         toolNameAskAudio,
+			Description:  "RAG answer with optional ElevenLabs audio synthesis.",
+			InputSchema:  askAudioInputSchema(),
+			OutputSchema: askAudioOutputSchema(),
+			handler:      s.handleAskAudioTool,
 		},
 		toolNameOpenFile: {
 			Name:         toolNameOpenFile,
@@ -505,6 +521,181 @@ func (s *Server) handleAskTool(_ context.Context, args map[string]interface{}) (
 	}, nil
 }
 
+func (s *Server) handleAskAudioTool(ctx context.Context, args map[string]interface{}) (toolCallResult, *toolExecutionError) {
+	if err := assertNoUnknownArguments(args, map[string]struct{}{
+		"question":    {},
+		"k":           {},
+		"mode":        {},
+		"index":       {},
+		"path_prefix": {},
+		"file_glob":   {},
+		"doc_types":   {},
+		"voice_id":    {},
+	}); err != nil {
+		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
+	}
+
+	question, ok, err := parseRequiredString(args, "question")
+	if err != nil {
+		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
+	}
+	if !ok {
+		return toolCallResult{}, &toolExecutionError{Code: "MISSING_FIELD", Message: "question is required", Retryable: false}
+	}
+
+	k := DefaultSearchK
+	if rawK, exists := args["k"]; exists {
+		parsedK, parseErr := parseInteger(rawK, "k")
+		if parseErr != nil {
+			return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: parseErr.Error(), Retryable: false}
+		}
+		k = parsedK
+	}
+	if k <= 0 {
+		k = DefaultSearchK
+	}
+	if k > 50 {
+		return toolCallResult{}, &toolExecutionError{Code: "INVALID_RANGE", Message: "k must be between 1 and 50", Retryable: false}
+	}
+
+	mode, err := parseOptionalString(args, "mode")
+	if err != nil {
+		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
+	}
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	if mode == "" {
+		mode = "answer"
+	}
+	switch mode {
+	case "answer", "search_only":
+	default:
+		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: "mode must be one of answer,search_only", Retryable: false}
+	}
+
+	indexName, err := parseOptionalString(args, "index")
+	if err != nil {
+		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
+	}
+	indexName = strings.ToLower(strings.TrimSpace(indexName))
+	if indexName == "" {
+		indexName = "auto"
+	}
+	switch indexName {
+	case "auto", "text", "code", "both":
+	default:
+		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: "index must be one of auto,text,code,both", Retryable: false}
+	}
+
+	pathPrefix, err := parseOptionalString(args, "path_prefix")
+	if err != nil {
+		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
+	}
+	fileGlob, err := parseOptionalString(args, "file_glob")
+	if err != nil {
+		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
+	}
+	docTypes, err := parseOptionalStringSlice(args, "doc_types")
+	if err != nil {
+		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
+	}
+	voiceID, err := parseOptionalString(args, "voice_id")
+	if err != nil {
+		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
+	}
+
+	if s.retriever == nil {
+		return toolCallResult{}, &toolExecutionError{Code: "INDEX_NOT_READY", Message: "retriever not configured", Retryable: false}
+	}
+
+	askResult, askErr := s.retriever.Ask(ctx, question, model.SearchQuery{
+		Query:      question,
+		K:          k,
+		Index:      indexName,
+		PathPrefix: pathPrefix,
+		FileGlob:   fileGlob,
+		DocTypes:   docTypes,
+	})
+	if askErr != nil {
+		switch {
+		case errors.Is(askErr, model.ErrNotImplemented):
+			fallbackStructured := map[string]interface{}{
+				"question":          question,
+				"answer":            "",
+				"citations":         []interface{}{},
+				"hits":              []interface{}{},
+				"indexing_complete": false,
+			}
+			return toolCallResult{
+				Content: []toolContentItem{
+					{Type: "text", Text: "ask_audio is not available yet; use dir2mcp.search while ask generation is being implemented"},
+				},
+				StructuredContent: fallbackStructured,
+			}, nil
+		case errors.Is(askErr, model.ErrIndexNotReady), errors.Is(askErr, model.ErrIndexNotConfigured):
+			return toolCallResult{}, &toolExecutionError{Code: "INDEX_NOT_READY", Message: "index not ready", Retryable: true}
+		default:
+			return toolCallResult{}, &toolExecutionError{Code: "INTERNAL_ERROR", Message: "internal server error", Retryable: true}
+		}
+	}
+
+	if strings.TrimSpace(askResult.Question) == "" {
+		askResult.Question = question
+	}
+	structured := buildAskStructuredContent(askResult)
+
+	answerText := strings.TrimSpace(askResult.Answer)
+	if answerText == "" {
+		answerText = "no answer text returned"
+	}
+
+	if s.tts == nil {
+		text := answerText + "\n\nAudio synthesis is disabled. Set ELEVENLABS_API_KEY to enable dir2mcp.ask_audio voice output."
+		return toolCallResult{
+			Content: []toolContentItem{
+				{Type: "text", Text: text},
+			},
+			StructuredContent: structured,
+		}, nil
+	}
+
+	var (
+		audioBytes []byte
+		synthErr   error
+	)
+	if voiceID != "" {
+		if voiceAware, ok := s.tts.(voiceAwareTTSSynthesizer); ok {
+			audioBytes, synthErr = voiceAware.SynthesizeWithVoice(ctx, answerText, voiceID)
+		} else {
+			audioBytes, synthErr = s.tts.Synthesize(ctx, answerText)
+		}
+	} else {
+		audioBytes, synthErr = s.tts.Synthesize(ctx, answerText)
+	}
+
+	if synthErr != nil {
+		return toolCallResult{
+			Content: []toolContentItem{
+				{Type: "text", Text: answerText + "\n\nAudio synthesis failed, returning text-only response."},
+			},
+			StructuredContent: structured,
+		}, nil
+	}
+
+	encodedAudio := base64.StdEncoding.EncodeToString(audioBytes)
+	structured["audio"] = map[string]interface{}{
+		"mime_type": "audio/mpeg",
+		"data":      encodedAudio,
+	}
+
+	return toolCallResult{
+		Content: []toolContentItem{
+			{Type: "text", Text: answerText},
+			{Type: "audio", MIMEType: "audio/mpeg", Data: encodedAudio},
+		},
+		StructuredContent: structured,
+	}, nil
+}
+
 func (s *Server) handleOpenFileTool(ctx context.Context, args map[string]interface{}) (toolCallResult, *toolExecutionError) {
 	if err := assertNoUnknownArguments(args, map[string]struct{}{
 		"rel_path":   {},
@@ -841,6 +1032,38 @@ func normalizeFileStatus(status string) string {
 	}
 }
 
+func buildAskStructuredContent(result model.AskResult) map[string]interface{} {
+	citations := make([]map[string]interface{}, 0, len(result.Citations))
+	for _, citation := range result.Citations {
+		citations = append(citations, map[string]interface{}{
+			"chunk_id": citation.ChunkID,
+			"rel_path": citation.RelPath,
+			"span":     buildOpenFileSpan(citation.Span),
+		})
+	}
+
+	hits := make([]map[string]interface{}, 0, len(result.Hits))
+	for _, hit := range result.Hits {
+		hits = append(hits, map[string]interface{}{
+			"chunk_id": hit.ChunkID,
+			"rel_path": hit.RelPath,
+			"doc_type": hit.DocType,
+			"rep_type": hit.RepType,
+			"score":    hit.Score,
+			"snippet":  hit.Snippet,
+			"span":     buildOpenFileSpan(hit.Span),
+		})
+	}
+
+	return map[string]interface{}{
+		"question":          result.Question,
+		"answer":            result.Answer,
+		"citations":         citations,
+		"hits":              hits,
+		"indexing_complete": result.IndexingComplete,
+	}
+}
+
 func spanDefinitionSchema() map[string]interface{} {
 	return map[string]interface{}{
 		"type": "object",
@@ -977,6 +1200,34 @@ func askOutputSchema() map[string]interface{} {
 		"required":    []string{"question", "citations", "hits", "indexing_complete"},
 		"definitions": sharedDefinitions(),
 	}
+}
+
+func askAudioInputSchema() map[string]interface{} {
+	schema := askInputSchema()
+	properties, ok := schema["properties"].(map[string]interface{})
+	if !ok {
+		return askInputSchema()
+	}
+	properties["voice_id"] = map[string]interface{}{"type": "string", "minLength": 1}
+	return schema
+}
+
+func askAudioOutputSchema() map[string]interface{} {
+	schema := askOutputSchema()
+	properties, ok := schema["properties"].(map[string]interface{})
+	if !ok {
+		return askOutputSchema()
+	}
+	properties["audio"] = map[string]interface{}{
+		"type":                 "object",
+		"additionalProperties": false,
+		"properties": map[string]interface{}{
+			"mime_type": map[string]interface{}{"type": "string", "enum": []string{"audio/mpeg"}},
+			"data":      map[string]interface{}{"type": "string"},
+		},
+		"required": []string{"mime_type", "data"},
+	}
+	return schema
 }
 
 func openFileInputSchema() map[string]interface{} {
