@@ -1,37 +1,41 @@
-package cli
+package tests
 
-import "testing"
+import (
+	"testing"
+
+	"dir2mcp/internal/cli"
+)
 
 func TestPublicURLAddress_UsesConfiguredHostAndResolvedPort(t *testing.T) {
-	got := publicURLAddress("0.0.0.0:0", "127.0.0.1:54321")
+	got := cli.PublicURLAddress("0.0.0.0:0", "127.0.0.1:54321")
 	if got != "0.0.0.0:54321" {
 		t.Fatalf("unexpected public address: got=%q want=%q", got, "0.0.0.0:54321")
 	}
 }
 
 func TestPublicURLAddress_UsesConfiguredPortWhenResolvedPortUnavailable(t *testing.T) {
-	got := publicURLAddress("0.0.0.0:0", "listener-address")
+	got := cli.PublicURLAddress("0.0.0.0:0", "listener-address")
 	if got != "0.0.0.0:0" {
 		t.Fatalf("unexpected fallback address: got=%q want=%q", got, "0.0.0.0:0")
 	}
 }
 
 func TestPublicURLAddress_ExtractsTrailingPortFromMalformedResolvedAddress(t *testing.T) {
-	got := publicURLAddress("0.0.0.0:0", "bound on port:61234")
+	got := cli.PublicURLAddress("0.0.0.0:0", "bound on port:61234")
 	if got != "0.0.0.0:61234" {
 		t.Fatalf("unexpected recovered address: got=%q want=%q", got, "0.0.0.0:61234")
 	}
 }
 
 func TestPublicURLAddress_FallsBackToConfiguredWhenResolvedEmpty(t *testing.T) {
-	got := publicURLAddress("0.0.0.0:12345", "")
+	got := cli.PublicURLAddress("0.0.0.0:12345", "")
 	if got != "0.0.0.0:12345" {
 		t.Fatalf("unexpected configured fallback: got=%q want=%q", got, "0.0.0.0:12345")
 	}
 }
 
 func TestPublicURLAddress_UsesDefaultWhenBothAddressesEmpty(t *testing.T) {
-	got := publicURLAddress("", "")
+	got := cli.PublicURLAddress("", "")
 	if got != "0.0.0.0:0" {
 		t.Fatalf("unexpected default fallback: got=%q want=%q", got, "0.0.0.0:0")
 	}
@@ -52,7 +56,7 @@ func TestExtractPortFromAddress(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := extractPortFromAddress(tc.addr)
+			got := cli.ExtractPortFromAddress(tc.addr)
 			if got != tc.want {
 				t.Fatalf("unexpected extracted port: got=%q want=%q", got, tc.want)
 			}

@@ -1,4 +1,4 @@
-package retrieval
+package tests
 
 import (
 	"context"
@@ -11,6 +11,7 @@ import (
 
 	"dir2mcp/internal/index"
 	"dir2mcp/internal/model"
+	"dir2mcp/internal/retrieval"
 )
 
 type fakeRetrievalEmbedder struct {
@@ -64,7 +65,7 @@ func TestSearch_ReturnsRankedHitsWithFilters(t *testing.T) {
 		t.Fatalf("idx.Add failed: %v", err)
 	}
 
-	svc := NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
+	svc := retrieval.NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
 		"mistral-embed":   {1, 0},
 		"codestral-embed": {0, 1},
 	}}, nil)
@@ -99,7 +100,7 @@ func TestSearch_FileGlobFilter(t *testing.T) {
 		t.Fatalf("idx.Add failed: %v", err)
 	}
 
-	svc := NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
+	svc := retrieval.NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
 		"mistral-embed":   {1, 0},
 		"codestral-embed": {0, 1},
 	}}, nil)
@@ -121,7 +122,7 @@ func TestSearch_FileGlobFilter(t *testing.T) {
 
 func TestSearch_OverfetchMultiplier_DefaultAndConfigurable(t *testing.T) {
 	fi := &fakeRetrievalIndex{}
-	svc := NewService(nil, fi, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{}}, nil)
+	svc := retrieval.NewService(nil, fi, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{}}, nil)
 	// first search should use default multiplier (5)
 	if _, err := svc.Search(context.Background(), model.SearchQuery{Query: "x", K: 3}); err != nil {
 		t.Fatalf("Search error: %v", err)
@@ -160,7 +161,7 @@ func TestSearch_OverfetchMultiplier_DefaultAndConfigurable(t *testing.T) {
 // anyway, so we expect the result to be clamped to math.MaxInt.
 func TestSearch_OverflowProtection(t *testing.T) {
 	fi := &fakeRetrievalIndex{}
-	svc := NewService(nil, fi, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{}}, nil)
+	svc := retrieval.NewService(nil, fi, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{}}, nil)
 	// set multiplier to max allowed by the setter; the service doesn't crash
 	svc.SetOverfetchMultiplier(100)
 	// choose a k that's guaranteed to overflow when multiplied by 100
@@ -189,7 +190,7 @@ func TestSearch_BothMode_DedupesAndNormalizes(t *testing.T) {
 		t.Fatalf("codeIdx.Add failed: %v", err)
 	}
 
-	svc := NewService(nil, textIdx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
+	svc := retrieval.NewService(nil, textIdx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
 		"mistral-embed":   {1, 0},
 		"codestral-embed": {1, 0},
 	}}, nil)
@@ -231,7 +232,7 @@ func TestOpenFile_LineSpan(t *testing.T) {
 		t.Fatalf("write file failed: %v", err)
 	}
 
-	svc := NewService(nil, nil, nil, nil)
+	svc := retrieval.NewService(nil, nil, nil, nil)
 	svc.SetRootDir(root)
 	out, err := svc.OpenFile(context.Background(), "docs/a.md", model.Span{Kind: "lines", StartLine: 2, EndLine: 3}, 200)
 	if err != nil {
@@ -252,7 +253,7 @@ func TestOpenFile_PathExcluded(t *testing.T) {
 		t.Fatalf("write file failed: %v", err)
 	}
 
-	svc := NewService(nil, nil, nil, nil)
+	svc := retrieval.NewService(nil, nil, nil, nil)
 	svc.SetRootDir(root)
 	svc.SetPathExcludes([]string{"**/private/**"})
 	_, err := svc.OpenFile(context.Background(), "private/secret.txt", model.Span{}, 200)
@@ -271,7 +272,7 @@ func TestOpenFile_ContentSecretBlocked(t *testing.T) {
 		t.Fatalf("write file failed: %v", err)
 	}
 
-	svc := NewService(nil, nil, nil, nil)
+	svc := retrieval.NewService(nil, nil, nil, nil)
 	svc.SetRootDir(root)
 	_, err := svc.OpenFile(context.Background(), "docs/token.txt", model.Span{}, 200)
 	if !errors.Is(err, model.ErrForbidden) {
@@ -281,7 +282,7 @@ func TestOpenFile_ContentSecretBlocked(t *testing.T) {
 
 func TestOpenFile_PathTraversalBlocked(t *testing.T) {
 	root := t.TempDir()
-	svc := NewService(nil, nil, nil, nil)
+	svc := retrieval.NewService(nil, nil, nil, nil)
 	svc.SetRootDir(root)
 	_, err := svc.OpenFile(context.Background(), "../outside.txt", model.Span{}, 200)
 	if !errors.Is(err, model.ErrPathOutsideRoot) {
@@ -299,7 +300,7 @@ func TestOpenFile_PageSpan(t *testing.T) {
 		t.Fatalf("write file failed: %v", err)
 	}
 
-	svc := NewService(nil, nil, nil, nil)
+	svc := retrieval.NewService(nil, nil, nil, nil)
 	svc.SetRootDir(root)
 	out, err := svc.OpenFile(context.Background(), "docs/ocr.txt", model.Span{Kind: "page", Page: 2}, 200)
 	if err != nil {
@@ -321,7 +322,7 @@ func TestOpenFile_TimeSpan(t *testing.T) {
 		t.Fatalf("write file failed: %v", err)
 	}
 
-	svc := NewService(nil, nil, nil, nil)
+	svc := retrieval.NewService(nil, nil, nil, nil)
 	svc.SetRootDir(root)
 	out, err := svc.OpenFile(context.Background(), "audio/transcript.txt", model.Span{Kind: "time", StartMS: 2000, EndMS: 6000}, 200)
 	if err != nil {
@@ -334,7 +335,7 @@ func TestOpenFile_TimeSpan(t *testing.T) {
 }
 
 func TestMatchExcludePattern_Concurrent(t *testing.T) {
-	svc := NewService(nil, nil, nil, nil)
+	svc := retrieval.NewService(nil, nil, nil, nil)
 	pattern := "**/foo/**"
 	var wg sync.WaitGroup
 	const goroutines = 20
@@ -342,7 +343,7 @@ func TestMatchExcludePattern_Concurrent(t *testing.T) {
 	for i := 0; i < goroutines; i++ {
 		go func() {
 			defer wg.Done()
-			if !svc.matchExcludePattern(pattern, "a/foo/b") {
+			if !svc.MatchExcludePattern(pattern, "a/foo/b") {
 				t.Error("expected pattern to match")
 			}
 		}()
@@ -358,7 +359,7 @@ func TestOpenFile_PageSpan_FromMetadata(t *testing.T) {
 		t.Fatalf("mkdir failed: %v", err)
 	}
 
-	svc := NewService(nil, nil, nil, nil)
+	svc := retrieval.NewService(nil, nil, nil, nil)
 	svc.SetRootDir(root)
 	svc.SetChunkMetadata(1, model.SearchHit{
 		RelPath: "docs/ocr.txt",
@@ -381,7 +382,7 @@ func TestOpenFile_TimeSpan_FromMetadata(t *testing.T) {
 		t.Fatalf("mkdir failed: %v", err)
 	}
 
-	svc := NewService(nil, nil, nil, nil)
+	svc := retrieval.NewService(nil, nil, nil, nil)
 	svc.SetRootDir(root)
 	svc.SetChunkMetadata(1, model.SearchHit{
 		RelPath: "audio/transcript.txt",
@@ -421,9 +422,9 @@ func TestLooksLikeCodeQuery(t *testing.T) {
 	}
 
 	for _, c := range cases {
-		got := looksLikeCodeQuery(c.query)
+		got := retrieval.LooksLikeCodeQuery(c.query)
 		if got != c.expect {
-			t.Errorf("looksLikeCodeQuery(%q) = %v; want %v", c.query, got, c.expect)
+			t.Errorf("retrieval.LooksLikeCodeQuery(%q) = %v; want %v", c.query, got, c.expect)
 		}
 	}
 }

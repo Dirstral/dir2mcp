@@ -1,7 +1,9 @@
-package ingest
+package tests
 
 import (
 	"testing"
+
+	"dir2mcp/internal/ingest"
 )
 
 // Test hash computation functions
@@ -25,7 +27,7 @@ func TestComputeContentHash(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := computeContentHash(tt.content)
+			result := ingest.ComputeContentHash(tt.content)
 			if result != tt.expected {
 				t.Errorf("computeContentHash() = %v, want %v", result, tt.expected)
 			}
@@ -36,8 +38,8 @@ func TestComputeContentHash(t *testing.T) {
 func TestComputeRepHash(t *testing.T) {
 	// Should produce same hash as computeContentHash since they use same algorithm
 	content := []byte("test representation")
-	contentHash := computeContentHash(content)
-	repHash := computeRepHash(content)
+	contentHash := ingest.ComputeContentHash(content)
+	repHash := ingest.ComputeRepHash(content)
 
 	if contentHash != repHash {
 		t.Errorf("computeRepHash() = %v, want %v", repHash, contentHash)
@@ -91,7 +93,7 @@ func TestNeedsReprocessing(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := needsReprocessing(tt.oldHash, tt.newHash, tt.forceReindex)
+			result := ingest.NeedsReprocessing(tt.oldHash, tt.newHash, tt.forceReindex)
 			if result != tt.expected {
 				t.Errorf("needsReprocessing() = %v, want %v", result, tt.expected)
 			}
@@ -161,7 +163,7 @@ func TestClassifyDocType(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := ClassifyDocType(tt.relPath)
+			result := ingest.ClassifyDocType(tt.relPath)
 			if result != tt.expected {
 				t.Errorf("ClassifyDocType(%q) = %v, want %v", tt.relPath, result, tt.expected)
 			}
@@ -195,17 +197,17 @@ func TestCompileSecretPatterns(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := compileSecretPatterns(tt.patterns)
+			result, err := ingest.CompileSecretPatterns(tt.patterns)
 			if tt.wantError {
 				if err == nil {
-					t.Errorf("compileSecretPatterns() expected error, got nil")
+					t.Errorf("ingest.CompileSecretPatterns() expected error, got nil")
 				}
 			} else {
 				if err != nil {
-					t.Errorf("compileSecretPatterns() unexpected error: %v", err)
+					t.Errorf("ingest.CompileSecretPatterns() unexpected error: %v", err)
 				}
 				if len(result) != len(tt.patterns) {
-					t.Errorf("compileSecretPatterns() returned %d patterns, want %d", len(result), len(tt.patterns))
+					t.Errorf("ingest.CompileSecretPatterns() returned %d patterns, want %d", len(result), len(tt.patterns))
 				}
 			}
 		})
@@ -214,7 +216,7 @@ func TestCompileSecretPatterns(t *testing.T) {
 
 // Test secret matching
 func TestHasSecretMatch(t *testing.T) {
-	patterns, err := compileSecretPatterns([]string{
+	patterns, err := ingest.CompileSecretPatterns([]string{
 		`AKIA[0-9A-Z]{16}`, // AWS Access Key
 		`sk_[a-z0-9]{32}`,  // API key format
 	})
@@ -251,7 +253,7 @@ func TestHasSecretMatch(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := hasSecretMatch(tt.content, patterns)
+			result := ingest.HasSecretMatch(tt.content, patterns)
 			if result != tt.expected {
 				t.Errorf("hasSecretMatch() = %v, want %v", result, tt.expected)
 			}
@@ -307,7 +309,7 @@ func TestMatchesAnyPathExclude(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := matchesAnyPathExclude(tt.relPath, excludes)
+			result := ingest.MatchesAnyPathExclude(tt.relPath, excludes)
 			if result != tt.expected {
 				t.Errorf("matchesAnyPathExclude(%q) = %v, want %v", tt.relPath, result, tt.expected)
 			}
@@ -363,7 +365,7 @@ func TestMatchesGlobPattern(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := matchesGlobPattern(tt.filePath, tt.pattern)
+			result := ingest.MatchesGlobPattern(tt.filePath, tt.pattern)
 			if result != tt.expected {
 				t.Errorf("matchesGlobPattern(%q, %q) = %v, want %v", tt.filePath, tt.pattern, result, tt.expected)
 			}

@@ -58,3 +58,13 @@ func TestMergeAllowedOrigins_EnvAndCLIChainKeepsDefaults(t *testing.T) {
 		t.Fatalf("expected localhost to be deduplicated, got %d (%v)", localhostCount, merged)
 	}
 }
+
+func assertContains(t *testing.T, values []string, want string) {
+	t.Helper()
+	for _, value := range values {
+		if value == want {
+			return
+		}
+	}
+	t.Fatalf("expected %q in %v", want, values)
+}

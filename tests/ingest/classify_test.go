@@ -6,7 +6,7 @@ import (
 	"dir2mcp/internal/ingest"
 )
 
-func TestClassifyDocType(t *testing.T) {
+func TestClassifyDocType_Smoke(t *testing.T) {
 	tests := []struct {
 		path string
 		want string

@@ -6,6 +6,7 @@ type Document struct {
 	DocID       int64
 	RelPath     string
 	DocType     string
+	SourceType  string
 	SizeBytes   int64
 	MTimeUnix   int64
 	ContentHash string

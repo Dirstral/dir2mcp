@@ -1,4 +1,4 @@
-package mistral
+package tests
 
 import (
 	"context"
@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"dir2mcp/internal/mistral"
 	"dir2mcp/internal/model"
 )
 
@@ -60,7 +61,7 @@ func TestExtract_OCRPagesJoinedByFormFeed(t *testing.T) {
 			t.Errorf("decode request: %v", err)
 			return newJSONResponse(http.StatusBadRequest, ""), nil
 		}
-		if req["model"] != DefaultOCRModel {
+		if req["model"] != mistral.DefaultOCRModel {
 			clientErr = true
 			t.Errorf("unexpected model: %#v", req["model"])
 			return newJSONResponse(http.StatusBadRequest, ""), nil
@@ -69,7 +70,7 @@ func TestExtract_OCRPagesJoinedByFormFeed(t *testing.T) {
 		return newJSONResponse(http.StatusOK, `{"pages":[{"markdown":"first page"},{"markdown":"second page"}]}`), nil
 	})
 
-	c := NewClient("https://api.mistral.ai", "key")
+	c := mistral.NewClient("https://api.mistral.ai", "key")
 	c.HTTPClient = &http.Client{Transport: rt}
 	got, err := c.Extract(context.Background(), "docs/file.pdf", []byte("pdf-bytes"))
 	if err != nil {
@@ -87,7 +88,7 @@ func TestExtract_MapsUnauthorizedToProviderAuthError(t *testing.T) {
 	rt := roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		return newJSONResponse(http.StatusUnauthorized, "unauthorized"), nil
 	})
-	c := NewClient("https://api.mistral.ai", "key")
+	c := mistral.NewClient("https://api.mistral.ai", "key")
 	c.HTTPClient = &http.Client{Transport: rt}
 	_, err := c.Extract(context.Background(), "scan.png", []byte("img"))
 	if err == nil {
@@ -103,7 +104,7 @@ func TestExtract_MapsUnauthorizedToProviderAuthError(t *testing.T) {
 }
 
 func TestExtract_MissingAPIKey(t *testing.T) {
-	c := NewClient("http://example.test", "")
+	c := mistral.NewClient("http://example.test", "")
 	_, err := c.Extract(context.Background(), "a.pdf", []byte("x"))
 	if err == nil {
 		t.Fatalf("expected error")
@@ -115,7 +116,7 @@ func TestExtract_MissingAPIKey(t *testing.T) {
 }
 
 func TestExtract_UnsupportedExtension(t *testing.T) {
-	c := NewClient("http://example.test", "key")
+	c := mistral.NewClient("http://example.test", "key")
 	_, err := c.Extract(context.Background(), "file.txt", []byte("data"))
 	if err == nil {
 		t.Fatalf("expected error for unsupported extension")
@@ -143,7 +144,7 @@ func TestExtract_RetryableErrorsAreRetried(t *testing.T) {
 		return newJSONResponse(http.StatusOK, `{"pages":[{"markdown":"ok"}]}`), nil
 	})
 
-	c := NewClient("https://api.mistral.ai", "key")
+	c := mistral.NewClient("https://api.mistral.ai", "key")
 	c.HTTPClient = &http.Client{Transport: rt}
 	c.MaxRetries = 3
 	ctx := context.Background()
@@ -169,7 +170,7 @@ func TestExtract_RetryStopsOnNonRetryableOrMax(t *testing.T) {
 		return newJSONResponse(http.StatusOK, `{"pages":[{"markdown":"ok"}]}`), nil
 	})
 
-	c := NewClient("https://api.mistral.ai", "key")
+	c := mistral.NewClient("https://api.mistral.ai", "key")
 	c.HTTPClient = &http.Client{Transport: rt}
 	c.MaxRetries = 5
 	_, err := c.Extract(context.Background(), "file.pdf", []byte("data"))
@@ -188,7 +189,7 @@ func TestExtract_PayloadTooLargeFailsFast(t *testing.T) {
 		return newJSONResponse(http.StatusOK, `{"pages":[{"markdown":"ok"}]}`), nil
 	})
 
-	c := NewClient("https://api.mistral.ai", "key")
+	c := mistral.NewClient("https://api.mistral.ai", "key")
 	c.HTTPClient = &http.Client{Transport: rt}
 	c.MaxOCRPayloadBytes = 64
 
@@ -232,7 +233,7 @@ func TestExtract_CustomModel(t *testing.T) {
 		return newJSONResponse(http.StatusOK, `{"pages":[{"markdown":"ok"}]}`), nil
 	})
 
-	c := NewClient("https://api.mistral.ai", "key")
+	c := mistral.NewClient("https://api.mistral.ai", "key")
 	c.HTTPClient = &http.Client{Transport: rt}
 	c.DefaultOCRModel = testModel
 	if _, err := c.Extract(context.Background(), "x.pdf", []byte("data")); err != nil {
