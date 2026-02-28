@@ -53,6 +53,17 @@ For the hackathon demo we are not building a custom web frontend.
 - Agent calls MCP tools over remote MCP (SSE/streamable HTTP)
 - Optional: keep `ask_audio` for direct tool-level TTS experiments
 
+### ElevenLabs approval settings (hosted demo)
+
+For predictable live-demo behavior, auto-approve only read-only knowledge tools:
+
+- `dir2mcp.search`
+- `dir2mcp.ask`
+- `dir2mcp.ask_audio`
+- `dir2mcp.open_file`
+- `dir2mcp.list_files`
+- `dir2mcp.stats`
+
 ## MCP setup by client
 
 Recommended servers:
