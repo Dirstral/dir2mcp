@@ -224,7 +224,7 @@ func TestSQLiteStore_UpsertChunkTask_TrimsRelPath(t *testing.T) {
 }
 
 func TestSQLiteStore_ClearDocumentContentHashes(t *testing.T) {
-	st := NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
 	defer func() { _ = st.Close() }()
 	ctx := context.Background()
 	if err := st.Init(ctx); err != nil {

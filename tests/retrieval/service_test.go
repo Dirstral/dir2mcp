@@ -76,7 +76,7 @@ func TestAsk_GeneratorErrorLogged(t *testing.T) {
 		t.Fatalf("idx.Add failed: %v", err)
 	}
 
-	svc := NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{"mistral-embed": {1, 0}}}, &fakeGenerator{out: "unused", err: errors.New("oh no")})
+	svc := retrieval.NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{"mistral-embed": {1, 0}}}, &fakeGenerator{out: "unused", err: errors.New("oh no")})
 	svc.SetLogger(log.New(buf, "", 0))
 	svc.SetChunkMetadata(1, model.SearchHit{RelPath: "doc.txt", DocType: "md", Snippet: "hi"})
 
@@ -473,7 +473,7 @@ func TestAsk_FallbackAndCitations(t *testing.T) {
 	if err := idx.Add(1, []float32{1, 0}); err != nil {
 		t.Fatalf("idx.Add failed: %v", err)
 	}
-	svc := NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
+	svc := retrieval.NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
 		"mistral-embed": {1, 0},
 	}}, nil)
 	svc.SetChunkMetadata(1, model.SearchHit{
@@ -508,7 +508,7 @@ func TestAsk_UsesGeneratorWhenAvailable(t *testing.T) {
 	if err := idx.Add(1, []float32{1, 0}); err != nil {
 		t.Fatalf("idx.Add failed: %v", err)
 	}
-	svc := NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
+	svc := retrieval.NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
 		"mistral-embed": {1, 0},
 	}}, &fakeGenerator{out: "Generated answer with [docs/a.md]"})
 	svc.SetChunkMetadata(1, model.SearchHit{
@@ -534,7 +534,7 @@ func TestAsk_AppendsMissingAttributions(t *testing.T) {
 	if err := idx.Add(2, []float32{0.9, 0.1}); err != nil {
 		t.Fatalf("idx.Add failed: %v", err)
 	}
-	svc := NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
+	svc := retrieval.NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
 		"mistral-embed": {1, 0},
 	}}, &fakeGenerator{out: "Generated summary without explicit source tags."})
 	svc.SetChunkMetadata(1, model.SearchHit{
@@ -568,7 +568,7 @@ func TestAsk_AppendsOnlyMissingAttributions(t *testing.T) {
 	if err := idx.Add(2, []float32{0.9, 0.1}); err != nil {
 		t.Fatalf("idx.Add failed: %v", err)
 	}
-	svc := NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
+	svc := retrieval.NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
 		"mistral-embed": {1, 0},
 	}}, &fakeGenerator{out: "Generated summary with [docs/a.md] already present."})
 	svc.SetChunkMetadata(1, model.SearchHit{
