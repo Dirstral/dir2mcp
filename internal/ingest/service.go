@@ -343,10 +343,13 @@ func (s *Service) processArchiveMembers(ctx context.Context, f DiscoveredFile, s
 // documents table; mtimeUnix is inherited from the parent archive.
 func (s *Service) processDocumentFromContent(ctx context.Context, relPath string, content []byte, mtimeUnix int64, secretPatterns []*regexp.Regexp, forceReindex bool) error {
 	docType := ClassifyDocType(relPath)
-	// skip nested archives (depth limit: no recursion by default)
-	if docType == "archive" || docType == "binary_ignored" || docType == "ignore" {
+	// Never ingest binary or ignored artifacts from inside archives.
+	if docType == "binary_ignored" || docType == "ignore" {
 		return nil
 	}
+	// Nested archive files are persisted as skipped document rows, but are not
+	// recursively extracted.
+	skipExtraction := docType == "archive"
 
 	doc := model.Document{
 		RelPath:     relPath,
@@ -356,8 +359,11 @@ func (s *Service) processDocumentFromContent(ctx context.Context, relPath string
 		ContentHash: computeContentHash(content),
 		Status:      "ok",
 	}
+	if skipExtraction {
+		doc.Status = "skipped"
+	}
 
-	if hasSecretMatch(contentSample(content), secretPatterns) {
+	if !skipExtraction && hasSecretMatch(contentSample(content), secretPatterns) {
 		doc.Status = "secret_excluded"
 	}
 
