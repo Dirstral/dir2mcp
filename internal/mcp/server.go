@@ -40,6 +40,7 @@ type Server struct {
 	retriever model.Retriever
 	store     model.Store
 	indexing  *appstate.IndexingState
+	tts       TTSSynthesizer
 	tools     map[string]toolDefinition
 
 	sessionMu sync.RWMutex
@@ -82,6 +83,10 @@ func (e validationError) Error() string {
 
 type ServerOption func(*Server)
 
+type TTSSynthesizer interface {
+	Synthesize(ctx context.Context, text string) ([]byte, error)
+}
+
 func WithStore(store model.Store) ServerOption {
 	return func(s *Server) {
 		s.store = store
@@ -91,6 +96,12 @@ func WithStore(store model.Store) ServerOption {
 func WithIndexingState(state *appstate.IndexingState) ServerOption {
 	return func(s *Server) {
 		s.indexing = state
+	}
+}
+
+func WithTTS(tts TTSSynthesizer) ServerOption {
+	return func(s *Server) {
+		s.tts = tts
 	}
 }
 

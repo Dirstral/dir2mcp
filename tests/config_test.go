@@ -71,11 +71,12 @@ func TestLoad_DotEnvLocalOverridesDotEnv(t *testing.T) {
 
 func TestLoad_UsesDotEnvWhenEnvIsMissing_ElevenLabs(t *testing.T) {
 	tmp := t.TempDir()
-	writeFile(t, filepath.Join(tmp, ".env"), "ELEVENLABS_API_KEY=el_from_dotenv\nELEVENLABS_BASE_URL=https://el-dotenv.local\n")
+	writeFile(t, filepath.Join(tmp, ".env"), "ELEVENLABS_API_KEY=el_from_dotenv\nELEVENLABS_BASE_URL=https://el-dotenv.local\nELEVENLABS_VOICE_ID=voice-from-dotenv\n")
 
 	withWorkingDir(t, tmp, func() {
 		t.Setenv("ELEVENLABS_API_KEY", "")
 		t.Setenv("ELEVENLABS_BASE_URL", "")
+		t.Setenv("ELEVENLABS_VOICE_ID", "")
 		cfg, err := config.Load("")
 		if err != nil {
 			t.Fatalf("Load failed: %v", err)
@@ -86,16 +87,20 @@ func TestLoad_UsesDotEnvWhenEnvIsMissing_ElevenLabs(t *testing.T) {
 		if cfg.ElevenLabsBaseURL != "https://el-dotenv.local" {
 			t.Fatalf("unexpected elevenlabs base URL: %q", cfg.ElevenLabsBaseURL)
 		}
+		if cfg.ElevenLabsTTSVoiceID != "voice-from-dotenv" {
+			t.Fatalf("unexpected elevenlabs voice id: %q", cfg.ElevenLabsTTSVoiceID)
+		}
 	})
 }
 
 func TestLoad_EnvOverridesDotEnv_ElevenLabs(t *testing.T) {
 	tmp := t.TempDir()
-	writeFile(t, filepath.Join(tmp, ".env"), "ELEVENLABS_API_KEY=el_from_dotenv\nELEVENLABS_BASE_URL=https://el-dotenv.local\n")
+	writeFile(t, filepath.Join(tmp, ".env"), "ELEVENLABS_API_KEY=el_from_dotenv\nELEVENLABS_BASE_URL=https://el-dotenv.local\nELEVENLABS_VOICE_ID=voice-from-dotenv\n")
 
 	withWorkingDir(t, tmp, func() {
 		t.Setenv("ELEVENLABS_API_KEY", "el_from_env")
 		t.Setenv("ELEVENLABS_BASE_URL", "https://el-env.local")
+		t.Setenv("ELEVENLABS_VOICE_ID", "voice-from-env")
 		cfg, err := config.Load("")
 		if err != nil {
 			t.Fatalf("Load failed: %v", err)
@@ -106,17 +111,21 @@ func TestLoad_EnvOverridesDotEnv_ElevenLabs(t *testing.T) {
 		if cfg.ElevenLabsBaseURL != "https://el-env.local" {
 			t.Fatalf("unexpected elevenlabs base URL: %q", cfg.ElevenLabsBaseURL)
 		}
+		if cfg.ElevenLabsTTSVoiceID != "voice-from-env" {
+			t.Fatalf("unexpected elevenlabs voice id: %q", cfg.ElevenLabsTTSVoiceID)
+		}
 	})
 }
 
 func TestLoad_DotEnvLocalOverridesDotEnv_ElevenLabs(t *testing.T) {
 	tmp := t.TempDir()
-	writeFile(t, filepath.Join(tmp, ".env"), "ELEVENLABS_API_KEY=el_env_file\nELEVENLABS_BASE_URL=https://el-env-file.local\n")
-	writeFile(t, filepath.Join(tmp, ".env.local"), "ELEVENLABS_API_KEY=el_env_local\nELEVENLABS_BASE_URL=https://el-env-local.local\n")
+	writeFile(t, filepath.Join(tmp, ".env"), "ELEVENLABS_API_KEY=el_env_file\nELEVENLABS_BASE_URL=https://el-env-file.local\nELEVENLABS_VOICE_ID=voice-env-file\n")
+	writeFile(t, filepath.Join(tmp, ".env.local"), "ELEVENLABS_API_KEY=el_env_local\nELEVENLABS_BASE_URL=https://el-env-local.local\nELEVENLABS_VOICE_ID=voice-env-local\n")
 
 	withWorkingDir(t, tmp, func() {
 		t.Setenv("ELEVENLABS_API_KEY", "")
 		t.Setenv("ELEVENLABS_BASE_URL", "")
+		t.Setenv("ELEVENLABS_VOICE_ID", "")
 		cfg, err := config.Load("")
 		if err != nil {
 			t.Fatalf("Load failed: %v", err)
@@ -126,6 +135,24 @@ func TestLoad_DotEnvLocalOverridesDotEnv_ElevenLabs(t *testing.T) {
 		}
 		if cfg.ElevenLabsBaseURL != "https://el-env-local.local" {
 			t.Fatalf("unexpected elevenlabs base URL: %q", cfg.ElevenLabsBaseURL)
+		}
+		if cfg.ElevenLabsTTSVoiceID != "voice-env-local" {
+			t.Fatalf("unexpected elevenlabs voice id: %q", cfg.ElevenLabsTTSVoiceID)
+		}
+	})
+}
+
+func TestLoad_DefaultElevenLabsVoiceID(t *testing.T) {
+	tmp := t.TempDir()
+
+	withWorkingDir(t, tmp, func() {
+		t.Setenv("ELEVENLABS_VOICE_ID", "")
+		cfg, err := config.Load("")
+		if err != nil {
+			t.Fatalf("Load failed: %v", err)
+		}
+		if cfg.ElevenLabsTTSVoiceID != "JBFqnCBsd6RMkjVDRZzb" {
+			t.Fatalf("unexpected default elevenlabs voice id: %q", cfg.ElevenLabsTTSVoiceID)
 		}
 	})
 }
