@@ -75,7 +75,10 @@ func runConfigPrint(_ *cobra.Command, _ []string) error {
 	if stateDir == "" {
 		stateDir = filepath.Join(rootDir, ".dir2mcp")
 	}
-	stateDir, _ = filepath.Abs(stateDir)
+	stateDir, err = filepath.Abs(stateDir)
+	if err != nil {
+		return err
+	}
 
 	cfg, err := config.Load(config.Options{
 		ConfigPath:     globalFlags.ConfigPath,

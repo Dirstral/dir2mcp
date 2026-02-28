@@ -25,7 +25,10 @@ func runAsk(_ *cobra.Command, args []string) error {
 	if stateDir == "" {
 		stateDir = filepath.Join(rootDir, ".dir2mcp")
 	}
-	stateDir, _ = filepath.Abs(stateDir)
+	stateDir, err = filepath.Abs(stateDir)
+	if err != nil {
+		return err
+	}
 
 	cfg, err := config.Load(config.Options{
 		ConfigPath:      globalFlags.ConfigPath,
@@ -45,7 +48,11 @@ func runAsk(_ *cobra.Command, args []string) error {
 	defer engine.Close()
 
 	question := args[0]
-	result, err := engine.Ask(question, retrieval.AskOptions{K: 10})
+	k := cfg.RAG.KDefault
+	if k <= 0 {
+		k = 10
+	}
+	result, err := engine.Ask(question, retrieval.AskOptions{K: k})
 	if err != nil {
 		return err
 	}

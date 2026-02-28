@@ -28,7 +28,6 @@ ingest:
     mode: ocr_auto
   audio:
     mode: auto
-    cache: true
   archives:
     mode: deep
   follow_symlinks: false

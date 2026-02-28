@@ -24,7 +24,10 @@ func runStatus(_ *cobra.Command, _ []string) error {
 	if stateDir == "" {
 		stateDir = filepath.Join(rootDir, ".dir2mcp")
 	}
-	stateDir, _ = filepath.Abs(stateDir)
+	stateDir, err = filepath.Abs(stateDir)
+	if err != nil {
+		return err
+	}
 
 	corpusPath := filepath.Join(stateDir, "corpus.json")
 	data, err := os.ReadFile(corpusPath)

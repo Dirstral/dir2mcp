@@ -8,10 +8,6 @@ build:
 up: build
 	./dir2mcp up
 
-# Run tests
-.PHONY: test
-test:
-	go test ./...
 .PHONY: help fmt vet lint test check ci
 
 help:

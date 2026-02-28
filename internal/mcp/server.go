@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"net/http"
+	"time"
 
 	"github.com/Dirstral/dir2mcp/internal/config"
 )
@@ -37,5 +38,12 @@ func (s *Server) Serve(listener net.Listener) error {
 		w.WriteHeader(http.StatusNotImplemented)
 		_, _ = w.Write([]byte("MCP server not implemented yet"))
 	})
-	return http.Serve(listener, mux)
+	srv := &http.Server{
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+	return srv.Serve(listener)
 }
