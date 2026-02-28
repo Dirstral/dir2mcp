@@ -18,7 +18,7 @@
       {
         "rel_path": "internal/mcp/server.go",
         "score": 0.87,
-        "snippet": "func corsMiddleware(next http.Handler, allowedOrigins []string) http.Handler ...",
+        "snippet": "func (s *Server) corsMiddleware(next http.Handler) http.Handler ...",
         "span": { "kind": "lines", "start_line": 125, "end_line": 144 }
       },
       {
@@ -157,7 +157,7 @@ It's a Go project with a `go.mod` file. Would you like me to look deeper into an
 
 [Tool Result]
   {
-    "content": "// authenticate checks the Bearer token.\nfunc (s *Server) authenticate(r *http.Request) bool {\n\tauthHeader := strings.TrimSpace(r.Header.Get(\"Authorization\"))\n\tif authHeader == \"\" {\n\t\treturn false\n\t}\n\tconst prefix = \"Bearer \"\n\tif !strings.HasPrefix(authHeader, prefix) {\n\t\treturn false\n\t}\n\ttoken := strings.TrimSpace(authHeader[len(prefix):])\n\treturn subtle.ConstantTimeCompare([]byte(token), []byte(s.authToken)) == 1\n}"
+    "content": "// authorize checks the Bearer token.\nfunc (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {\n\tif strings.EqualFold(s.cfg.AuthMode, \"none\") {\n\t\treturn true\n\t}\n\texpectedToken := s.authToken\n\tauthHeader := strings.TrimSpace(r.Header.Get(\"Authorization\"))\n\tconst bearerPrefix = \"bearer \"\n\tif len(authHeader) < len(bearerPrefix) || strings.ToLower(authHeader[:len(bearerPrefix)]) != bearerPrefix {\n\t\twriteError(w, http.StatusUnauthorized, nil, -32000, \"missing or invalid bearer token\", \"UNAUTHORIZED\", false)\n\t\treturn false\n\t}\n\tprovidedToken := strings.TrimSpace(authHeader[len(bearerPrefix):])\n\tif expectedToken == \"\" || providedToken == \"\" {\n\t\twriteError(w, http.StatusUnauthorized, nil, -32000, \"missing or invalid bearer token\", \"UNAUTHORIZED\", false)\n\t\treturn false\n\t}\n\tif subtle.ConstantTimeCompare([]byte(providedToken), []byte(expectedToken)) != 1 {\n\t\twriteError(w, http.StatusUnauthorized, nil, -32000, \"missing or invalid bearer token\", \"UNAUTHORIZED\", false)\n\t\treturn false\n\t}\n\treturn true\n}"
   }
 ```
 
