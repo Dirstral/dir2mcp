@@ -158,6 +158,54 @@ func TestArchiveIngest_ZipSlipRejected(t *testing.T) {
 	}
 }
 
+// TestArchiveIngest_MembersNotTombstonedOnRescan verifies that archive members
+// survive a second scan without being tombstoned. This is a regression test
+// for a bug where virtual paths (e.g. "docs.zip/notes.txt") were absent from
+// the seen map and got deleted by markMissingAsDeleted.
+func TestArchiveIngest_MembersNotTombstonedOnRescan(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+
+	archiveData := buildZip(t, map[string]string{
+		"notes.txt": "hello from zip",
+		"code.go":   "package main\nfunc main() {}",
+	})
+	if err := os.WriteFile(filepath.Join(root, "docs.zip"), archiveData, 0o600); err != nil {
+		t.Fatalf("write archive: %v", err)
+	}
+
+	// Use a single store across both scans so tombstoning is observable.
+	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	if err := st.Init(ctx); err != nil {
+		t.Fatalf("store init: %v", err)
+	}
+
+	cfg := config.Default()
+	cfg.RootDir = root
+	svc := ingest.NewService(cfg, st)
+
+	// First scan — members should be ingested.
+	if err := svc.Run(ctx); err != nil {
+		t.Fatalf("first Run: %v", err)
+	}
+	paths1 := docPaths(t, st)
+	if !paths1["docs.zip/notes.txt"] || !paths1["docs.zip/code.go"] {
+		t.Fatalf("first scan: expected archive members; got %v", paths1)
+	}
+
+	// Second scan — same archive, no changes. Members must survive.
+	if err := svc.Run(ctx); err != nil {
+		t.Fatalf("second Run: %v", err)
+	}
+	paths2 := docPaths(t, st)
+	if !paths2["docs.zip/notes.txt"] {
+		t.Errorf("docs.zip/notes.txt tombstoned after re-scan; got paths: %v", paths2)
+	}
+	if !paths2["docs.zip/code.go"] {
+		t.Errorf("docs.zip/code.go tombstoned after re-scan; got paths: %v", paths2)
+	}
+}
+
 // TestArchiveIngest_NestedArchiveNotRecursed verifies that archive members
 // which are themselves archives are not recursively extracted (depth limit 1).
 func TestArchiveIngest_NestedArchiveNotRecursed(t *testing.T) {
