@@ -1,0 +1,38 @@
+# macOS
+.DS_Store
+
+# dir2mcp local runtime state
+.dir2mcp/
+
+# Secrets and local env
+secret.token
+*.token
+.env
+.env.*
+!.env.example
+
+# Go build/test artifacts
+bin/
+dist/
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+coverage.out
+.coverprofile
+
+# Logs
+*.log
+
+# IDE/editor local settings
+.vscode/
+.idea/
+.fleet/
+# swap/backup files created by Vim and other editors
+*~
+*.swp
+*.swo
+# include hidden Vim swap variants
+.*.sw*
