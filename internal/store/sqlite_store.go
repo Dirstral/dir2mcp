@@ -694,7 +694,7 @@ func (s *SQLiteStore) ListFiles(ctx context.Context, prefix, glob string, limit,
 	normalizedPrefix := normalizePrefix(prefix)
 
 	query := `SELECT doc_id, rel_path, doc_type, size_bytes, mtime_unix, content_hash, status, deleted FROM documents`
-	where := make([]string, 0, 2)
+	where := []string{"deleted = 0"}
 	args := make([]any, 0, 4)
 	if normalizedPrefix != "" {
 		where = append(where, `rel_path LIKE ? ESCAPE '\'`)
@@ -704,9 +704,7 @@ func (s *SQLiteStore) ListFiles(ctx context.Context, prefix, glob string, limit,
 		where = append(where, "rel_path GLOB ?")
 		args = append(args, glob)
 	}
-	if len(where) > 0 {
-		query += " WHERE " + strings.Join(where, " AND ")
-	}
+	query += " WHERE " + strings.Join(where, " AND ")
 	query += " ORDER BY rel_path LIMIT ? OFFSET ?"
 	args = append(args, limit, offset)
 
