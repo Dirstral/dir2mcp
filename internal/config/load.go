@@ -33,6 +33,8 @@ type Overrides struct {
 // Returns error suitable for exit code 2 when invalid.
 func Load(opts Options) (*Config, error) {
 	cfg := Default()
+	cfg.RootDir = opts.RootDir
+	cfg.StateDir = opts.StateDir
 
 	configPath := opts.ConfigPath
 	if !filepath.IsAbs(configPath) && opts.RootDir != "" {

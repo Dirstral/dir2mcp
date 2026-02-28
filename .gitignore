@@ -17,6 +17,7 @@ dist/
 /dir2mcp
 .gocache/
 .gomodcache/
+.golangci-lint-cache/
 *.exe
 *.dll
 *.so

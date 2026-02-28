@@ -1,28 +1,97 @@
 package tests
 
 import (
+	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
+
+	"dir2mcp/internal/model"
+	"dir2mcp/internal/retrieval"
 )
 
-// This file contains placeholder tests demonstrating the expected behaviour of
-// the open_file handler with respect to secret-aware exclusions. When the
-// actual implementation is written, these tests should be updated to import
-// the relevant package and invoke the real functions.
-
 func TestOpenFile_SecretsBlocked(t *testing.T) {
-	// setup a dummy config with default secret_patterns and path_excludes
-	// and a fake filesystem with files containing known-secret patterns.
-	t.Skip("implement after open_file exists")
+	root := t.TempDir()
+	path := filepath.Join(root, "docs", "secret.txt")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir failed: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("token = AAAAAAAAAAAAAAAAAAAAAAAAA"), 0o644); err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+
+	svc := retrieval.NewService(nil, nil, nil, nil)
+	svc.SetRootDir(root)
+	_, err := svc.OpenFile(context.Background(), "docs/secret.txt", model.Span{}, 200)
+	if !errors.Is(err, model.ErrForbidden) {
+		t.Fatalf("expected forbidden on secret content, got %v", err)
+	}
+}
+
+// TestOpenFile_NonSecretsAllowed confirms that non-secret content is not
+// blocked by the service.  It mirrors the setup in
+// TestOpenFile_SecretsBlocked but writes a benign file and asserts the
+// retrieval succeeds and returns the expected data.
+func TestOpenFile_NonSecretsAllowed(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "docs", "readme.txt")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir failed: %v", err)
+	}
+	content := "hello world"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+
+	svc := retrieval.NewService(nil, nil, nil, nil)
+	svc.SetRootDir(root)
+	out, err := svc.OpenFile(context.Background(), "docs/readme.txt", model.Span{}, 200)
+	if err != nil {
+		t.Fatalf("expected no error on benign content, got %v", err)
+	}
+	if !strings.Contains(out, content) {
+		t.Fatalf("returned content did not contain expected text, got %q", out)
+	}
 }
 
 func TestOpenFile_PathExcludeOverrides(t *testing.T) {
-	// example: configure security.path_excludes = ["**/private/**"] and
-	// ensure open_file returns an error/empty when accessing "private/secret.txt".
-	t.Skip("implement after open_file exists")
+	root := t.TempDir()
+	path := filepath.Join(root, "private", "secret.txt")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir failed: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("non-secret but excluded"), 0o644); err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+
+	svc := retrieval.NewService(nil, nil, nil, nil)
+	svc.SetRootDir(root)
+	svc.SetPathExcludes([]string{"**/private/**"})
+	_, err := svc.OpenFile(context.Background(), "private/secret.txt", model.Span{}, 200)
+	if !errors.Is(err, model.ErrForbidden) {
+		t.Fatalf("expected forbidden on path exclude, got %v", err)
+	}
 }
 
 func TestOpenFile_ContentPatternOverride(t *testing.T) {
-	// override security.secret_patterns with a custom regex and verify that
-	// matching content is censored.
-	t.Skip("implement after open_file exists")
+	root := t.TempDir()
+	path := filepath.Join(root, "docs", "data.txt")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir failed: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("custom-sensitive-value"), 0o644); err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+
+	svc := retrieval.NewService(nil, nil, nil, nil)
+	svc.SetRootDir(root)
+	if err := svc.SetSecretPatterns([]string{"custom-sensitive-value"}); err != nil {
+		t.Fatalf("SetSecretPatterns failed: %v", err)
+	}
+	_, err := svc.OpenFile(context.Background(), "docs/data.txt", model.Span{}, 200)
+	if !errors.Is(err, model.ErrForbidden) {
+		t.Fatalf("expected forbidden on custom content pattern, got %v", err)
+	}
 }

@@ -23,7 +23,10 @@ func stringIn(s string, allowed []string) bool {
 
 // Config holds the full resolved configuration.
 // Precedence: CLI flags > env vars > .dir2mcp.yaml > defaults (SPEC §16.1).
+// RootDir and StateDir are set at load time from Options; not in YAML.
 type Config struct {
+	RootDir  string `yaml:"-"` // Set from Options at load
+	StateDir  string `yaml:"-"` // Set from Options at load
 	Version  int     `yaml:"version"`
 	Mistral  Mistral `yaml:"mistral"`
 	RAG      RAG     `yaml:"rag"`
