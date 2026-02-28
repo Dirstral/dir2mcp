@@ -16,8 +16,8 @@ import (
 
 type fakeChunkSource struct {
 	tasks        []model.ChunkTask
-	embedded     []int64
-	failedLabels []int64
+	embedded     []uint64
+	failedLabels []uint64
 	failedReason string
 	// markFailedErr, if non-nil, is returned from MarkFailed.
 	markFailedErr error
@@ -29,12 +29,12 @@ func (s *fakeChunkSource) NextPending(_ context.Context, _ int, _ string) ([]mod
 	return out, nil
 }
 
-func (s *fakeChunkSource) MarkEmbedded(_ context.Context, labels []int64) error {
+func (s *fakeChunkSource) MarkEmbedded(_ context.Context, labels []uint64) error {
 	s.embedded = append(s.embedded, labels...)
 	return nil
 }
 
-func (s *fakeChunkSource) MarkFailed(_ context.Context, labels []int64, reason string) error {
+func (s *fakeChunkSource) MarkFailed(_ context.Context, labels []uint64, reason string) error {
 	s.failedLabels = append(s.failedLabels, labels...)
 	s.failedReason = reason
 	return s.markFailedErr
@@ -89,14 +89,14 @@ func TestEmbeddingWorker_RunOnce_Success(t *testing.T) {
 		},
 	}
 
-	indexed := make(map[int64]model.ChunkMetadata)
+	indexed := make(map[uint64]model.ChunkMetadata)
 	worker := &index.EmbeddingWorker{
 		Source:       source,
 		Index:        idx,
 		Embedder:     embedder,
 		BatchSize:    2,
 		ModelForText: "mistral-embed",
-		OnIndexedChunk: func(label int64, metadata model.ChunkMetadata) {
+		OnIndexedChunk: func(label uint64, metadata model.ChunkMetadata) {
 			indexed[label] = metadata
 		},
 	}
@@ -203,18 +203,19 @@ func TestEmbeddingWorker_RunOnce_EmbeddingTransient(t *testing.T) {
 }
 
 // panicEmbedder is used to ensure that Embed is never called when a
-// negative label is detected before embedding begins.
+// zero/invalid label is detected before embedding begins; zeros are treated as
+// corrupt by the worker.
 type panicEmbedder struct{}
 
 func (p *panicEmbedder) Embed(_ context.Context, _ string, _ []string) ([][]float32, error) {
-	panic("embedder should not be invoked for negative-label batches")
+	panic("embedder should not be invoked for zero-label batches")
 }
 
 func TestEmbeddingWorker_RunOnce_NegativeLabel(t *testing.T) {
 	t.Run("single-negative", func(t *testing.T) {
-		// single negative label
+		// single zero/invalid label
 		source := &fakeChunkSource{
-			tasks: []model.ChunkTask{model.NewChunkTask(-5, "oops", "", model.ChunkMetadata{})},
+			tasks: []model.ChunkTask{model.NewChunkTask(0, "oops", "", model.ChunkMetadata{})},
 		}
 
 		worker := &index.EmbeddingWorker{
@@ -244,12 +245,12 @@ func TestEmbeddingWorker_RunOnce_NegativeLabel(t *testing.T) {
 	})
 
 	t.Run("mixed-batch", func(t *testing.T) {
-		// mix of positive then negative; embedder still must not be called and
-		// MarkFailed must not be called with the negative ID.
+		// mix of positive then zero; embedder still must not be called and
+		// MarkFailed must not be called with the corrupt ID.
 		source := &fakeChunkSource{
 			tasks: []model.ChunkTask{
 				model.NewChunkTask(10, "ok", "", model.ChunkMetadata{}),
-				model.NewChunkTask(-1, "bad", "", model.ChunkMetadata{}),
+				model.NewChunkTask(0, "bad", "", model.ChunkMetadata{}),
 			},
 		}
 

@@ -8,9 +8,23 @@ import (
 // ClassifyDocType maps a path to an ingestion document type.
 func ClassifyDocType(relPath string) string {
 	base := strings.ToLower(filepath.Base(relPath))
+
+	// treat plain ".env" and dot-separated variants as sensitive and
+	// skip them during ingestion. these often contain secrets/credentials
+	// so we classify them as "ignore". previously they were marked as
+	// "data" which risked accidental indexing; other variants would fall
+	// through to extension-based logic yielding "binary_ignored".
+	// note: the exact filename ".env" is caught by the equality check
+	// (base == ".env"), whereas names like ".env.local" use HasPrefix.
+	if base == ".env" || strings.HasPrefix(base, ".env.") {
+		return "ignore"
+	}
+
 	switch base {
 	case "dockerfile", "makefile", "jenkinsfile":
 		return "code"
+	case "readme", "license", "changelog":
+		return "text"
 	case "go.mod", "go.sum", "package.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml":
 		return "data"
 	}

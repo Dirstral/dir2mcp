@@ -3,11 +3,13 @@ package mistral
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -21,6 +23,14 @@ const (
 	defaultMaxRetries     = 3
 	defaultInitialBackoff = 250 * time.Millisecond
 	defaultMaxBackoff     = 2 * time.Second
+	// Bound OCR request payload size (data URL + base64) to avoid oversized
+	// requests that frequently fail upstream or time out in transit.
+	defaultMaxOCRPayloadBytes = 20 * 1024 * 1024
+
+	// DefaultOCRModel is the default Mistral model used for OCR requests when
+	// no other model is specified.  Consumers may override the value on the
+	// Client struct if they need to target a different version in the future.
+	DefaultOCRModel = "mistral-ocr-latest"
 )
 
 // Client provides Mistral API integrations.
@@ -44,6 +54,14 @@ type Client struct {
 	MaxRetries     int
 	InitialBackoff time.Duration
 	MaxBackoff     time.Duration
+	// MaxOCRPayloadBytes bounds the encoded OCR payload size (bytes) before
+	// issuing an OCR request. Values <= 0 fall back to defaultMaxOCRPayloadBytes.
+	MaxOCRPayloadBytes int
+
+	// DefaultOCRModel will be sent to the OCR endpoint if the caller does not
+	// specify an explicit model.  It is initialized to DefaultOCRModel by
+	// NewClient and can be mutated by callers to customize behaviour.
+	DefaultOCRModel string
 }
 
 // NewClient constructs a client with safe default retry/timeout settings.
@@ -55,13 +73,17 @@ func NewClient(baseURL, apiKey string) *Client {
 	}
 
 	return &Client{
-		BaseURL:        strings.TrimRight(baseURL, "/"),
-		APIKey:         apiKey,
-		HTTPClient:     &http.Client{Timeout: defaultRequestTimeout},
-		BatchSize:      defaultBatchSize,
-		MaxRetries:     defaultMaxRetries,
-		InitialBackoff: defaultInitialBackoff,
-		MaxBackoff:     defaultMaxBackoff,
+		BaseURL:            strings.TrimRight(baseURL, "/"),
+		APIKey:             apiKey,
+		HTTPClient:         &http.Client{Timeout: defaultRequestTimeout},
+		BatchSize:          defaultBatchSize,
+		MaxRetries:         defaultMaxRetries,
+		InitialBackoff:     defaultInitialBackoff,
+		MaxBackoff:         defaultMaxBackoff,
+		MaxOCRPayloadBytes: defaultMaxOCRPayloadBytes,
+		// ensure we always have a sensible default even if callers forget to
+		// set a model explicitly later on.
+		DefaultOCRModel: DefaultOCRModel,
 	}
 }
 
@@ -118,6 +140,25 @@ type embedDataItem struct {
 
 type embedResponse struct {
 	Data []embedDataItem `json:"data"`
+}
+
+type ocrRequest struct {
+	Model    string      `json:"model"`
+	Document ocrDocument `json:"document"`
+}
+
+type ocrDocument struct {
+	Type        string `json:"type"`
+	DocumentURL string `json:"document_url"`
+}
+
+type ocrResponse struct {
+	Pages []struct {
+		Markdown string `json:"markdown"`
+		Text     string `json:"text"`
+	} `json:"pages"`
+	Text     string `json:"text"`
+	Markdown string `json:"markdown"`
 }
 
 func (c *Client) embedBatchWithRetry(ctx context.Context, modelName string, inputs []string) ([][]float32, error) {
@@ -332,10 +373,206 @@ func (c *Client) wait(ctx context.Context, d time.Duration) error {
 }
 
 func (c *Client) Extract(ctx context.Context, relPath string, data []byte) (string, error) {
-	_ = ctx
-	_ = relPath
-	_ = data
-	return "", model.ErrNotImplemented
+	// the public entrypoint simply delegates to a retry-capable helper. the
+	// retry logic mirrors embedBatchWithRetry so that network/rate-limit/5xx
+	// conditions are automatically retried up to configured limits.
+	return c.extractWithRetry(ctx, relPath, data)
+}
+
+// extractWithRetry wraps extractOnce with retry logic similar to
+// embedBatchWithRetry.  Only provider errors marked Retryable will be
+// retried, up to Client.MaxRetries attempts with exponential backoff.
+// The helper intentionally mirrors the structure of embedBatchWithRetry so
+// behaviour is consistent between embedding and OCR operations.
+func (c *Client) extractWithRetry(ctx context.Context, relPath string, data []byte) (string, error) {
+	maxAttempts := c.MaxRetries
+	if maxAttempts <= 0 {
+		maxAttempts = 1
+	}
+
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		out, err := c.extractOnce(ctx, relPath, data)
+		if err == nil {
+			return out, nil
+		}
+		lastErr = err
+
+		var providerErr *model.ProviderError
+		if !errors.As(err, &providerErr) || !providerErr.Retryable || attempt == maxAttempts-1 {
+			return "", err
+		}
+
+		backoff := c.backoffForAttempt(attempt)
+		if waitErr := c.wait(ctx, backoff); waitErr != nil {
+			return "", waitErr
+		}
+	}
+
+	return "", lastErr
+}
+
+// extractOnce contains the previous implementation of Extract and performs a
+// single attempt without any retry behaviour.  The logic is kept separate so
+// that extractWithRetry can invoke it repeatedly.
+func (c *Client) extractOnce(ctx context.Context, relPath string, data []byte) (string, error) {
+	if strings.TrimSpace(c.APIKey) == "" {
+		return "", &model.ProviderError{
+			Code:      "MISTRAL_AUTH",
+			Message:   "missing Mistral API key",
+			Retryable: false,
+		}
+	}
+	if len(data) == 0 {
+		return "", &model.ProviderError{
+			Code:      "MISTRAL_FAILED",
+			Message:   "ocr input is empty",
+			Retryable: false,
+		}
+	}
+
+	ext := strings.ToLower(filepath.Ext(strings.TrimSpace(relPath)))
+	var mimeType string
+	switch ext {
+	case ".pdf":
+		mimeType = "application/pdf"
+	case ".png":
+		mimeType = "image/png"
+	case ".jpg", ".jpeg":
+		mimeType = "image/jpeg"
+	case ".webp":
+		mimeType = "image/webp"
+	default:
+		// report supported file types explicitly; falling back to a generic MIME
+		// value risks the upstream API rejecting the request and makes debugging
+		// harder.
+		return "", &model.ProviderError{
+			Code:      "MISTRAL_FAILED",
+			Message:   fmt.Sprintf("unsupported file extension for OCR: %s", ext),
+			Retryable: false,
+		}
+	}
+
+	ocrModel := c.DefaultOCRModel
+	if strings.TrimSpace(ocrModel) == "" {
+		ocrModel = DefaultOCRModel
+	}
+	maxPayloadBytes := c.MaxOCRPayloadBytes
+	if maxPayloadBytes <= 0 {
+		maxPayloadBytes = defaultMaxOCRPayloadBytes
+	}
+	estimatedPayloadBytes := len("data:"+mimeType+";base64,") + base64.StdEncoding.EncodedLen(len(data))
+	if estimatedPayloadBytes > maxPayloadBytes {
+		return "", &model.ProviderError{
+			Code:      "MISTRAL_FAILED",
+			Message:   fmt.Sprintf("ocr payload too large (%d bytes, limit %d): reduce file size or increase MaxOCRPayloadBytes", estimatedPayloadBytes, maxPayloadBytes),
+			Retryable: false,
+		}
+	}
+	payload := ocrRequest{
+		Model: ocrModel,
+		Document: ocrDocument{
+			Type:        "document_url",
+			DocumentURL: "data:" + mimeType + ";base64," + base64.StdEncoding.EncodeToString(data),
+		},
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return "", &model.ProviderError{
+			Code:      "MISTRAL_FAILED",
+			Message:   "failed to marshal ocr request",
+			Retryable: false,
+			Cause:     err,
+		}
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/v1/ocr", bytes.NewReader(body))
+	if err != nil {
+		return "", &model.ProviderError{
+			Code:      "MISTRAL_FAILED",
+			Message:   "failed to build ocr request",
+			Retryable: false,
+			Cause:     err,
+		}
+	}
+	req.Header.Set("Authorization", "Bearer "+c.APIKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	client := c.HTTPClient
+	if client == nil {
+		client = &http.Client{Timeout: defaultRequestTimeout}
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", &model.ProviderError{
+			Code:      "MISTRAL_FAILED",
+			Message:   "ocr request failed",
+			Retryable: true,
+			Cause:     err,
+		}
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		errMsg := strings.TrimSpace(string(bodyBytes))
+		if errMsg == "" {
+			errMsg = "upstream returned non-200 response"
+		}
+		switch {
+		case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
+			return "", &model.ProviderError{Code: "MISTRAL_AUTH", Message: errMsg, Retryable: false, StatusCode: resp.StatusCode}
+		case resp.StatusCode == http.StatusTooManyRequests:
+			return "", &model.ProviderError{Code: "MISTRAL_RATE_LIMIT", Message: errMsg, Retryable: true, StatusCode: resp.StatusCode}
+		case resp.StatusCode >= http.StatusInternalServerError:
+			return "", &model.ProviderError{Code: "MISTRAL_FAILED", Message: errMsg, Retryable: true, StatusCode: resp.StatusCode}
+		default:
+			return "", &model.ProviderError{Code: "MISTRAL_FAILED", Message: errMsg, Retryable: false, StatusCode: resp.StatusCode}
+		}
+	}
+
+	var parsed ocrResponse
+	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+		return "", &model.ProviderError{
+			Code:      "MISTRAL_FAILED",
+			Message:   "failed to decode ocr response",
+			Retryable: false,
+			Cause:     err,
+		}
+	}
+
+	if len(parsed.Pages) > 0 {
+		parts := make([]string, 0, len(parsed.Pages))
+		for _, p := range parsed.Pages {
+			pageText := strings.TrimSpace(p.Markdown)
+			if pageText == "" {
+				pageText = strings.TrimSpace(p.Text)
+			}
+			if pageText == "" {
+				continue
+			}
+			parts = append(parts, pageText)
+		}
+		if len(parts) > 0 {
+			return strings.Join(parts, "\f"), nil
+		}
+	}
+
+	if text := strings.TrimSpace(parsed.Markdown); text != "" {
+		return text, nil
+	}
+	if text := strings.TrimSpace(parsed.Text); text != "" {
+		return text, nil
+	}
+
+	return "", &model.ProviderError{
+		Code:      "MISTRAL_FAILED",
+		Message:   "ocr response had no text content",
+		Retryable: false,
+	}
 }
 
 func (c *Client) Transcribe(ctx context.Context, relPath string, data []byte) (string, error) {

@@ -23,7 +23,7 @@ type Representation struct {
 }
 
 type Chunk struct {
-	ChunkID         int64
+	ChunkID         uint64
 	RepID           int64
 	Ordinal         int
 	Text            string
@@ -53,7 +53,7 @@ type SearchQuery struct {
 }
 
 type SearchHit struct {
-	ChunkID int64
+	ChunkID uint64
 	RelPath string
 	DocType string
 	RepType string
@@ -63,7 +63,7 @@ type SearchHit struct {
 }
 
 type ChunkMetadata struct {
-	ChunkID int64
+	ChunkID uint64
 	RelPath string
 	DocType string
 	RepType string
@@ -87,9 +87,10 @@ func (m ChunkMetadata) ToSearchHit() SearchHit {
 
 // ChunkTask represents a pending unit of work that needs an embedding.
 //
-// Label corresponds to the chunk_id in the SQLite schema and follows the
-// package convention of using signed int64 identifiers. Metadata is a small
-// subset of SearchHit information that is relevant when processing the task
+// Label corresponds to the chunk_id in the SQLite schema and is always a
+// positive integer; the type was changed to uint64 for consistency with the
+// ANN index which also uses unsigned labels. Metadata is a small subset of
+// SearchHit information that is relevant when processing the task
 // (the score field is omitted since it isn’t applicable).
 //
 // Historically the identifier lived only in the Label field; adding
@@ -103,7 +104,7 @@ func (m ChunkMetadata) ToSearchHit() SearchHit {
 // construct values in tests or mocks but NewChunkTask should be used by
 // production code whenever possible.
 type ChunkTask struct {
-	Label     int64
+	Label     uint64
 	Text      string
 	IndexKind string
 	Metadata  ChunkMetadata
@@ -115,7 +116,7 @@ type ChunkTask struct {
 // values conflict, which is suitable for use by store code and tests where
 // a mismatch indicates a programmer error. Callers that prefer an error
 // return can instead construct a value and call Validate.
-func NewChunkTask(label int64, text, indexKind string, meta ChunkMetadata) ChunkTask {
+func NewChunkTask(label uint64, text, indexKind string, meta ChunkMetadata) ChunkTask {
 	if meta.ChunkID == 0 {
 		meta.ChunkID = label
 	} else if label != meta.ChunkID {
@@ -139,7 +140,7 @@ func (t ChunkTask) Validate() error {
 }
 
 type Citation struct {
-	ChunkID int64
+	ChunkID uint64
 	RelPath string
 	Span    Span
 }

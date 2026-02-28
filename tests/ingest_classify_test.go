@@ -27,6 +27,12 @@ func TestClassifyDocType(t *testing.T) {
 		{path: "Makefile", want: "code"},
 		{path: "Jenkinsfile", want: "code"},
 		{path: "go.mod", want: "data"},
+		// dot-env files hold secrets; classification changed to ignore
+		{path: ".env", want: "ignore"},
+		{path: ".env.local", want: "ignore"},
+		{path: ".env.production", want: "ignore"},
+		// should not treat .envrc (and similar) as data
+		{path: ".envrc", want: "binary_ignored"},
 	}
 
 	for _, tc := range tests {
