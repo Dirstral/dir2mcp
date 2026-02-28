@@ -62,6 +62,37 @@ func TestCORS_PreflightReturns204(t *testing.T) {
 	}
 }
 
+func TestCORS_OptionsWithoutPreflightHeadersFallsThrough(t *testing.T) {
+	cfg := config.Default()
+	cfg.AuthMode = "none"
+	cfg.AllowedOrigins = []string{"https://elevenlabs.io"}
+
+	server := httptest.NewServer(mcp.NewServer(cfg, nil).Handler())
+	defer server.Close()
+
+	req, err := http.NewRequest(http.MethodOptions, server.URL+cfg.MCPPath, nil)
+	if err != nil {
+		t.Fatalf("create request: %v", err)
+	}
+	req.Header.Set("Origin", "https://elevenlabs.io")
+	// Intentionally omit Access-Control-Request-* headers so this is not
+	// treated as a CORS preflight request.
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do request: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("status=%d want=%d", resp.StatusCode, http.StatusMethodNotAllowed)
+	}
+
+	if allow := resp.Header.Get("Allow"); allow != http.MethodPost {
+		t.Fatalf("Allow=%q want=%q", allow, http.MethodPost)
+	}
+}
+
 func TestCORS_DisallowedOriginNoHeaders(t *testing.T) {
 	cfg := config.Default()
 	cfg.AuthMode = "none"
