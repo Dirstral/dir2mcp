@@ -319,6 +319,118 @@ func TestLoad_AllowedOriginsEnvKeepsNonDefaultPortDistinct(t *testing.T) {
 	})
 }
 
+func TestDefault_RateLimitValues(t *testing.T) {
+	cfg := config.Default()
+	if cfg.RateLimitRPS != 60 {
+		t.Fatalf("RateLimitRPS=%d want=%d", cfg.RateLimitRPS, 60)
+	}
+	if cfg.RateLimitBurst != 20 {
+		t.Fatalf("RateLimitBurst=%d want=%d", cfg.RateLimitBurst, 20)
+	}
+}
+
+func TestLoad_RateLimitEnvOverrides(t *testing.T) {
+	tmp := t.TempDir()
+
+	withWorkingDir(t, tmp, func() {
+		t.Setenv("DIR2MCP_RATE_LIMIT_RPS", "75")
+		t.Setenv("DIR2MCP_RATE_LIMIT_BURST", "25")
+
+		cfg, err := config.Load("")
+		if err != nil {
+			t.Fatalf("Load failed: %v", err)
+		}
+
+		if cfg.RateLimitRPS != 75 {
+			t.Fatalf("RateLimitRPS=%d want=%d", cfg.RateLimitRPS, 75)
+		}
+		if cfg.RateLimitBurst != 25 {
+			t.Fatalf("RateLimitBurst=%d want=%d", cfg.RateLimitBurst, 25)
+		}
+	})
+}
+
+func TestLoad_RateLimitEnvInvalidValuesIgnored(t *testing.T) {
+	tmp := t.TempDir()
+
+	withWorkingDir(t, tmp, func() {
+		t.Setenv("DIR2MCP_RATE_LIMIT_RPS", "not-a-number")
+		t.Setenv("DIR2MCP_RATE_LIMIT_BURST", "-1")
+
+		cfg, err := config.Load("")
+		if err != nil {
+			t.Fatalf("Load failed: %v", err)
+		}
+
+		if cfg.RateLimitRPS != 60 {
+			t.Fatalf("RateLimitRPS=%d want default %d", cfg.RateLimitRPS, 60)
+		}
+		if cfg.RateLimitBurst != 20 {
+			t.Fatalf("RateLimitBurst=%d want default %d", cfg.RateLimitBurst, 20)
+		}
+	})
+}
+
+func TestLoad_RateLimitEnvAllowsZeroToDisable(t *testing.T) {
+	tmp := t.TempDir()
+
+	withWorkingDir(t, tmp, func() {
+		t.Setenv("DIR2MCP_RATE_LIMIT_RPS", "0")
+		t.Setenv("DIR2MCP_RATE_LIMIT_BURST", "0")
+
+		cfg, err := config.Load("")
+		if err != nil {
+			t.Fatalf("Load failed: %v", err)
+		}
+
+		if cfg.RateLimitRPS != 0 {
+			t.Fatalf("RateLimitRPS=%d want=%d", cfg.RateLimitRPS, 0)
+		}
+		if cfg.RateLimitBurst != 0 {
+			t.Fatalf("RateLimitBurst=%d want=%d", cfg.RateLimitBurst, 0)
+		}
+	})
+}
+
+func TestDefault_TrustedProxies(t *testing.T) {
+	cfg := config.Default()
+	assertContains(t, cfg.TrustedProxies, "127.0.0.1/32")
+	assertContains(t, cfg.TrustedProxies, "::1/128")
+}
+
+func TestLoad_TrustedProxiesEnvAppendsAndNormalizes(t *testing.T) {
+	tmp := t.TempDir()
+
+	withWorkingDir(t, tmp, func() {
+		t.Setenv("DIR2MCP_TRUSTED_PROXIES", "10.0.0.0/8,203.0.113.7")
+		cfg, err := config.Load("")
+		if err != nil {
+			t.Fatalf("Load failed: %v", err)
+		}
+
+		assertContains(t, cfg.TrustedProxies, "127.0.0.1/32")
+		assertContains(t, cfg.TrustedProxies, "::1/128")
+		assertContains(t, cfg.TrustedProxies, "10.0.0.0/8")
+		assertContains(t, cfg.TrustedProxies, "203.0.113.7/32")
+	})
+}
+
+func TestLoad_TrustedProxiesEnvSkipsMalformedValues(t *testing.T) {
+	tmp := t.TempDir()
+
+	withWorkingDir(t, tmp, func() {
+		t.Setenv("DIR2MCP_TRUSTED_PROXIES", "bad-value,10.0.0.0/8,300.1.1.1")
+		cfg, err := config.Load("")
+		if err != nil {
+			t.Fatalf("Load failed: %v", err)
+		}
+
+		assertContains(t, cfg.TrustedProxies, "10.0.0.0/8")
+		assertNotContains(t, cfg.TrustedProxies, "bad-value")
+		assertNotContains(t, cfg.TrustedProxies, "300.1.1.1")
+	})
+}
+
 func assertContains(t *testing.T, values []string, want string) {
 	t.Helper()
 	for _, value := range values {

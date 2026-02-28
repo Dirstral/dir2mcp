@@ -28,6 +28,8 @@ const (
 	maxRequestBody         = 1 << 20
 	sessionTTL             = 24 * time.Hour
 	sessionCleanupInterval = time.Hour
+	rateLimitCleanupEvery  = 5 * time.Minute
+	rateLimitBucketMaxAge  = 10 * time.Minute
 )
 
 // DefaultSearchK is used when tools/call search arguments omit k or provide
@@ -45,6 +47,8 @@ type Server struct {
 
 	sessionMu sync.RWMutex
 	sessions  map[string]time.Time
+
+	rateLimiter *ipRateLimiter
 }
 
 type rpcRequest struct {
@@ -120,6 +124,9 @@ func NewServer(cfg config.Config, retriever model.Retriever, opts ...ServerOptio
 	if s.indexing == nil {
 		s.indexing = appstate.NewIndexingState(appstate.ModeIncremental)
 	}
+	if cfg.Public && cfg.RateLimitRPS > 0 && cfg.RateLimitBurst > 0 {
+		s.rateLimiter = newIPRateLimiter(float64(cfg.RateLimitRPS), cfg.RateLimitBurst, cfg.TrustedProxies)
+	}
 	s.tools = s.buildToolRegistry()
 	return s
 }
@@ -176,6 +183,9 @@ func (s *Server) RunOnListener(ctx context.Context, ln net.Listener) error {
 	defer cancel()
 
 	go s.runSessionCleanup(runCtx)
+	if s.rateLimiter != nil {
+		go s.runRateLimitCleanup(runCtx)
+	}
 
 	server := &http.Server{
 		Handler:           s.Handler(),
@@ -206,6 +216,14 @@ func (s *Server) RunOnListener(ctx context.Context, ln net.Listener) error {
 }
 
 func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
+	if s.rateLimiter != nil {
+		if !s.rateLimiter.allow(realIP(r, s.rateLimiter)) {
+			w.Header().Set("Retry-After", "1")
+			writeError(w, http.StatusTooManyRequests, nil, -32000, "rate limit exceeded", "RATE_LIMIT_EXCEEDED", true)
+			return
+		}
+	}
+
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -477,6 +495,20 @@ func (s *Server) runSessionCleanup(ctx context.Context) {
 			return
 		case now := <-ticker.C:
 			s.cleanupExpiredSessions(now)
+		}
+	}
+}
+
+func (s *Server) runRateLimitCleanup(ctx context.Context) {
+	ticker := time.NewTicker(rateLimitCleanupEvery)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.rateLimiter.cleanup(rateLimitBucketMaxAge)
 		}
 	}
 }
