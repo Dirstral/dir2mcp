@@ -207,7 +207,7 @@ func TestSearch_BothMode_DedupesAndNormalizes(t *testing.T) {
 	if len(hits) != 3 {
 		t.Fatalf("expected 3 deduped hits, got %d", len(hits))
 	}
-	seen := map[int64]bool{}
+	seen := map[uint64]bool{}
 	for _, hit := range hits {
 		if seen[hit.ChunkID] {
 			t.Fatalf("duplicate chunk in merged results: %d", hit.ChunkID)

@@ -13,10 +13,11 @@ func computeContentHash(content []byte) string {
 }
 
 // computeRepHash computes a stable sha256 hash of representation content.
-// This is used for incremental indexing to detect if a representation has changed.
+// Historically this duplicated the logic of computeContentHash, but the
+// algorithms are identical.  Delegate to computeContentHash so there’s a
+// single authoritative implementation of the sha256+hex logic.
 func computeRepHash(content []byte) string {
-	sum := sha256.Sum256(content)
-	return hex.EncodeToString(sum[:])
+	return computeContentHash(content)
 }
 
 // needsReprocessing determines if a document needs to be reprocessed based on

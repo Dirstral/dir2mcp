@@ -38,7 +38,7 @@ func TestComputeRepHash(t *testing.T) {
 	content := []byte("test representation")
 	contentHash := computeContentHash(content)
 	repHash := computeRepHash(content)
-	
+
 	if contentHash != repHash {
 		t.Errorf("computeRepHash() = %v, want %v", repHash, contentHash)
 	}
@@ -46,11 +46,11 @@ func TestComputeRepHash(t *testing.T) {
 
 func TestNeedsReprocessing(t *testing.T) {
 	tests := []struct {
-		name          string
-		oldHash       string
-		newHash       string
-		forceReindex  bool
-		expected      bool
+		name         string
+		oldHash      string
+		newHash      string
+		forceReindex bool
+		expected     bool
 	}{
 		{
 			name:         "new document (no old hash)",
@@ -112,41 +112,46 @@ func TestClassifyDocType(t *testing.T) {
 		{"javascript file", "app.js", "code"},
 		{"typescript file", "component.ts", "code"},
 		{"rust file", "lib.rs", "code"},
-		
+		// uppercase extensions and nested paths should still detect as code
+		{"upper-case go", "MAIN.GO", "code"},
+		{"upper-case python", "Script.PY", "code"},
+		{"nested go", "src/lib/utils.go", "code"},
+
 		// Markdown
 		{"markdown", "README.md", "md"},
 		{"markdown alt", "docs.markdown", "md"},
-		
+		{"nested markdown", "docs/README.md", "md"},
+
 		// Text
 		{"text file", "notes.txt", "text"},
 		{"readme no ext", "README", "text"},
 		{"license no ext", "LICENSE", "text"},
-		
+
 		// Data/config
 		{"json", "package.json", "data"},
 		{"yaml", "config.yaml", "data"},
 		{"toml", "Cargo.toml", "data"},
 		{"env", ".env", "data"},
-		
+
 		// HTML
 		{"html", "index.html", "html"},
-		
+
 		// PDF
 		{"pdf", "document.pdf", "pdf"},
-		
+
 		// Images
 		{"png", "image.png", "image"},
 		{"jpg", "photo.jpg", "image"},
 		{"jpeg", "photo.jpeg", "image"},
-		
+
 		// Audio
 		{"mp3", "song.mp3", "audio"},
 		{"wav", "recording.wav", "audio"},
-		
+
 		// Archives
 		{"zip", "archive.zip", "archive"},
 		{"tar", "backup.tar", "archive"},
-		
+
 		// Binary
 		{"binary", "app.exe", "binary_ignored"},
 		{"dll", "library.dll", "binary_ignored"},
@@ -208,8 +213,8 @@ func TestCompileSecretPatterns(t *testing.T) {
 // Test secret matching
 func TestHasSecretMatch(t *testing.T) {
 	patterns, err := compileSecretPatterns([]string{
-		`AKIA[0-9A-Z]{16}`,           // AWS Access Key
-		`sk_[a-z0-9]{32}`,             // API key format
+		`AKIA[0-9A-Z]{16}`, // AWS Access Key
+		`sk_[a-z0-9]{32}`,  // API key format
 	})
 	if err != nil {
 		t.Fatalf("Failed to compile patterns: %v", err)

@@ -3,9 +3,9 @@ package ingest
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -27,11 +27,25 @@ const (
 
 // RepresentationGenerator handles creation of representations from documents
 type RepresentationGenerator struct {
-	store model.Store
+	store representationStore
+}
+
+type representationStore interface {
+	UpsertRepresentation(ctx context.Context, rep model.Representation) (int64, error)
+	InsertChunkWithSpans(ctx context.Context, chunk model.Chunk, spans []model.Span) (int64, error)
+	SoftDeleteChunksFromOrdinal(ctx context.Context, repID int64, fromOrdinal int) error
 }
 
 // NewRepresentationGenerator creates a new representation generator
-func NewRepresentationGenerator(store model.Store) *RepresentationGenerator {
+//
+// The provided store must be non-nil.  A nil store would otherwise lead to a
+// nil-pointer panic later when methods like GenerateRawText are invoked.  By
+// validating up-front we fail fast with a clear message helping callers
+// diagnose the issue.
+func NewRepresentationGenerator(store representationStore) *RepresentationGenerator {
+	if store == nil {
+		panic("NewRepresentationGenerator: nil model.Store provided")
+	}
 	return &RepresentationGenerator{
 		store: store,
 	}
@@ -39,12 +53,20 @@ func NewRepresentationGenerator(store model.Store) *RepresentationGenerator {
 
 // GenerateRawText creates a raw_text representation for text-based documents.
 // It reads the file content, normalizes to UTF-8, and stores it as a representation.
-// 
+//
 // According to SPEC §7.4:
 // - For code/text/md/data/html doc types
 // - Normalize to UTF-8 with \n line endings
 // - Route code → index_kind=code, others → index_kind=text
 func (rg *RepresentationGenerator) GenerateRawText(ctx context.Context, doc model.Document, absPath string) error {
+	// Guard against huge files to avoid OOM.  We mirror the same limit used by
+	// discovery since raw-text ingestion should follow the same policy.
+	if fi, err := os.Stat(absPath); err != nil {
+		return fmt.Errorf("stat file %s: %w", doc.RelPath, err)
+	} else if fi.Size() > defaultMaxFileSizeBytes {
+		return fmt.Errorf("file %s too large (%d bytes); limit %d", doc.RelPath, fi.Size(), defaultMaxFileSizeBytes)
+	}
+
 	// Read file content
 	content, err := os.ReadFile(absPath)
 	if err != nil {
@@ -52,36 +74,10 @@ func (rg *RepresentationGenerator) GenerateRawText(ctx context.Context, doc mode
 	}
 
 	// Validate and normalize UTF-8
-	normalizedContent, err := normalizeUTF8(content)
-	if err != nil {
-		return fmt.Errorf("normalize UTF-8 for %s: %w", doc.RelPath, err)
-	}
+	normalizedContent := normalizeUTF8(content)
 
 	// Compute representation hash
 	repHash := computeRepHash(normalizedContent)
-
-	// Check if this representation already exists and is unchanged
-	existingReps, err := rg.store.ListRepresentations(ctx, doc.DocID)
-	if err != nil && !isNotFoundError(err) {
-		return fmt.Errorf("list representations for doc %d: %w", doc.DocID, err)
-	}
-
-	for _, existing := range existingReps {
-		if existing.RepType == RepTypeRawText && existing.RepHash == repHash && !existing.Deleted {
-			// Representation unchanged, skip
-			return nil
-		}
-	}
-
-	// Create metadata JSON
-	metaJSON := map[string]interface{}{
-		"encoding": "utf-8",
-		"normalized": true,
-	}
-	metaBytes, err := json.Marshal(metaJSON)
-	if err != nil {
-		return fmt.Errorf("marshal metadata: %w", err)
-	}
 
 	// Create representation
 	rep := model.Representation{
@@ -89,40 +85,60 @@ func (rg *RepresentationGenerator) GenerateRawText(ctx context.Context, doc mode
 		RepType:     RepTypeRawText,
 		RepHash:     repHash,
 		CreatedUnix: time.Now().Unix(),
-		MetaJSON:    string(metaBytes),
 		Deleted:     false,
 	}
 
 	// Store representation
-	if err := rg.store.UpsertRepresentation(ctx, rep, normalizedContent); err != nil {
+	repID, err := rg.store.UpsertRepresentation(ctx, rep)
+	if err != nil {
 		return fmt.Errorf("upsert representation: %w", err)
+	}
+
+	segments := chunkRawTextByDocType(doc.DocType, string(normalizedContent))
+	if err := rg.upsertChunksForRepresentation(ctx, repID, indexKindForDocType(doc.DocType), segments); err != nil {
+		return err
 	}
 
 	return nil
 }
 
+func (rg *RepresentationGenerator) upsertChunksForRepresentation(ctx context.Context, repID int64, indexKind string, segments []chunkSegment) error {
+	for i, seg := range segments {
+		chunk := model.Chunk{
+			RepID:           repID,
+			Ordinal:         i,
+			Text:            seg.Text,
+			TextHash:        computeRepHash([]byte(seg.Text)),
+			IndexKind:       indexKind,
+			EmbeddingStatus: "pending",
+		}
+		if _, err := rg.store.InsertChunkWithSpans(ctx, chunk, []model.Span{seg.Span}); err != nil {
+			return fmt.Errorf("insert chunk %d: %w", i, err)
+		}
+	}
+	if err := rg.store.SoftDeleteChunksFromOrdinal(ctx, repID, len(segments)); err != nil {
+		return fmt.Errorf("soft delete stale chunks: %w", err)
+	}
+	return nil
+}
+
 // normalizeUTF8 ensures content is valid UTF-8 and normalizes line endings to \n
-func normalizeUTF8(content []byte) ([]byte, error) {
-	// Check if already valid UTF-8
+// Invalid byte sequences are replaced with the Unicode replacement character
+// and the resulting slice is returned.  The previous signature returned an
+// error that was never produced; simplifying to a single return value makes
+// callers easier to work with.
+func normalizeUTF8(content []byte) []byte {
+	// Salvage any invalid UTF-8 by replacing with U+FFFD.
 	if !utf8.Valid(content) {
-		// Try to salvage by replacing invalid sequences
-		// This is a simple approach - could be enhanced with encoding detection
-		content = []byte(string(content))
+		out := strings.ToValidUTF8(string(content), "\uFFFD")
+		content = []byte(out)
 	}
 
 	// Normalize line endings: convert \r\n and \r to \n
 	content = bytes.ReplaceAll(content, []byte("\r\n"), []byte("\n"))
 	content = bytes.ReplaceAll(content, []byte("\r"), []byte("\n"))
 
-	return content, nil
-}
-
-// isNotFoundError checks if an error indicates a "not found" condition
-// This is a placeholder - should be implemented based on actual error types
-func isNotFoundError(err error) bool {
-	// This would need to check for specific error types from the store
-	// For now, return false to be conservative
-	return false
+	return content
 }
 
 // ShouldGenerateRawText determines if a document should have raw_text representation.
@@ -139,4 +155,174 @@ func ShouldGenerateRawText(docType string) bool {
 	default:
 		return false
 	}
+}
+
+type chunkSegment struct {
+	Text string
+	Span model.Span
+}
+
+func indexKindForDocType(docType string) string {
+	if docType == "code" {
+		return "code"
+	}
+	return "text"
+}
+
+func chunkRawTextByDocType(docType, content string) []chunkSegment {
+	if docType == "code" {
+		return chunkCodeByLines(content, 200, 30)
+	}
+	return chunkTextByChars(content, 2500, 250, 200)
+}
+
+func chunkOCRByPages(content string) []chunkSegment {
+	pages := strings.Split(content, "\f")
+	out := make([]chunkSegment, 0, len(pages))
+	for i, page := range pages {
+		page = strings.TrimSpace(page)
+		if page == "" {
+			continue
+		}
+		out = append(out, chunkSegment{
+			Text: page,
+			Span: model.Span{
+				Kind: "page",
+				Page: i + 1,
+			},
+		})
+	}
+	return out
+}
+
+func chunkCodeByLines(content string, maxLines, overlapLines int) []chunkSegment {
+	if maxLines <= 0 {
+		maxLines = 200
+	}
+	if overlapLines < 0 {
+		overlapLines = 0
+	}
+	if overlapLines >= maxLines {
+		overlapLines = maxLines - 1
+	}
+
+	lines := strings.Split(content, "\n")
+	if len(lines) == 0 {
+		return nil
+	}
+
+	step := maxLines - overlapLines
+	if step <= 0 {
+		step = 1
+	}
+
+	out := make([]chunkSegment, 0, (len(lines)/step)+1)
+	for start := 0; start < len(lines); start += step {
+		end := start + maxLines
+		if end > len(lines) {
+			end = len(lines)
+		}
+		if start >= end {
+			break
+		}
+		text := strings.Join(lines[start:end], "\n")
+		text = strings.TrimSpace(text)
+		if text == "" {
+			continue
+		}
+		out = append(out, chunkSegment{
+			Text: text,
+			Span: model.Span{
+				Kind:      "lines",
+				StartLine: start + 1,
+				EndLine:   end,
+			},
+		})
+		if end == len(lines) {
+			break
+		}
+	}
+	return out
+}
+
+func chunkTextByChars(content string, maxChars, overlapChars, minChars int) []chunkSegment {
+	if maxChars <= 0 {
+		maxChars = 2500
+	}
+	if overlapChars < 0 {
+		overlapChars = 0
+	}
+	if overlapChars >= maxChars {
+		overlapChars = maxChars - 1
+	}
+	if minChars <= 0 {
+		minChars = 1
+	}
+
+	runes := []rune(content)
+	if len(runes) == 0 {
+		return nil
+	}
+
+	step := maxChars - overlapChars
+	if step <= 0 {
+		step = 1
+	}
+
+	// Precompute line starts (rune offsets) for line-span mapping.
+	lineStarts := []int{0}
+	for i, r := range runes {
+		if r == '\n' {
+			lineStarts = append(lineStarts, i+1)
+		}
+	}
+
+	out := make([]chunkSegment, 0, (len(runes)/step)+1)
+	for start := 0; start < len(runes); start += step {
+		end := start + maxChars
+		if end > len(runes) {
+			end = len(runes)
+		}
+		if start >= end {
+			break
+		}
+
+		segmentRunes := runes[start:end]
+		segmentText := strings.TrimSpace(string(segmentRunes))
+		if len([]rune(segmentText)) < minChars && end != len(runes) {
+			continue
+		}
+		if segmentText == "" {
+			continue
+		}
+
+		startLine := lineNumberForOffset(lineStarts, start)
+		endLine := lineNumberForOffset(lineStarts, end-1)
+		out = append(out, chunkSegment{
+			Text: segmentText,
+			Span: model.Span{
+				Kind:      "lines",
+				StartLine: startLine,
+				EndLine:   endLine,
+			},
+		})
+		if end == len(runes) {
+			break
+		}
+	}
+	return out
+}
+
+func lineNumberForOffset(lineStarts []int, offset int) int {
+	if offset <= 0 {
+		return 1
+	}
+	line := 1
+	for i := 1; i < len(lineStarts); i++ {
+		if offset < lineStarts[i] {
+			break
+		}
+		line = i + 1
+	}
+	return line
 }

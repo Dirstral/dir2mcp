@@ -11,6 +11,10 @@ func ClassifyDocType(relPath string) string {
 	switch base {
 	case "dockerfile", "makefile", "jenkinsfile":
 		return "code"
+	case ".env":
+		return "data"
+	case "readme", "license", "changelog":
+		return "text"
 	case "go.mod", "go.sum", "package.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml":
 		return "data"
 	}

@@ -126,7 +126,11 @@ func NewAppWithIO(stdout, stderr io.Writer) *App {
 		stdout: stdout,
 		stderr: stderr,
 		newIngestor: func(cfg config.Config, st model.Store) model.Ingestor {
-			return ingest.NewService(cfg, st)
+			svc := ingest.NewService(cfg, st)
+			if strings.TrimSpace(cfg.MistralAPIKey) != "" {
+				svc.SetOCR(mistral.NewClient(cfg.MistralBaseURL, cfg.MistralAPIKey))
+			}
+			return svc
 		},
 	}
 }
@@ -413,6 +417,9 @@ func (a *App) runReindex(ctx context.Context) int {
 		}
 	}()
 	ing := ingest.NewService(config.Default(), st)
+	if cfg, err := config.Load(".dir2mcp.yaml"); err == nil && strings.TrimSpace(cfg.MistralAPIKey) != "" {
+		ing.SetOCR(mistral.NewClient(cfg.MistralBaseURL, cfg.MistralAPIKey))
+	}
 	err := ing.Reindex(ctx)
 	if errors.Is(err, model.ErrNotImplemented) {
 		writeln(a.stdout, "reindex skeleton: ingestion pipeline not implemented yet")

@@ -2,13 +2,15 @@ package ingest
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
+	"database/sql"
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
+	"strings"
+	"time"
 
 	"dir2mcp/internal/appstate"
 	"dir2mcp/internal/config"
@@ -19,6 +21,8 @@ type Service struct {
 	cfg           config.Config
 	store         model.Store
 	indexingState *appstate.IndexingState
+	repGen        *RepresentationGenerator
+	ocr           model.OCR
 }
 
 type documentDeleteMarker interface {
@@ -26,14 +30,22 @@ type documentDeleteMarker interface {
 }
 
 func NewService(cfg config.Config, store model.Store) *Service {
-	return &Service{
+	svc := &Service{
 		cfg:   cfg,
 		store: store,
 	}
+	if rs, ok := store.(representationStore); ok {
+		svc.repGen = NewRepresentationGenerator(rs)
+	}
+	return svc
 }
 
 func (s *Service) SetIndexingState(state *appstate.IndexingState) {
 	s.indexingState = state
+}
+
+func (s *Service) SetOCR(ocr model.OCR) {
+	s.ocr = ocr
 }
 
 func (s *Service) Run(ctx context.Context) error {
@@ -74,6 +86,8 @@ func (s *Service) runScan(ctx context.Context) error {
 		return err
 	}
 
+	forceReindex := s.indexingState != nil && s.indexingState.Snapshot().Mode == appstate.ModeFull
+
 	seen := make(map[string]struct{}, len(discovered))
 	for _, f := range discovered {
 		if err := ctx.Err(); err != nil {
@@ -86,39 +100,69 @@ func (s *Service) runScan(ctx context.Context) error {
 			continue
 		}
 
-		doc, buildErr := s.buildDocument(ctx, f, compiledSecrets)
-		if buildErr != nil {
+		if err := s.processDocument(ctx, f, compiledSecrets, forceReindex); err != nil {
 			s.addErrors(1)
-			doc = model.Document{
-				RelPath:   f.RelPath,
-				DocType:   ClassifyDocType(f.RelPath),
-				SizeBytes: f.SizeBytes,
-				MTimeUnix: f.MTimeUnix,
-				Status:    "error",
-				Deleted:   false,
-			}
-		}
-
-		if err := s.store.UpsertDocument(ctx, doc); err != nil {
-			s.addErrors(1)
+			// record that we saw the file even if processing failed so
+			// markMissingAsDeleted does not treat it as removed
+			seen[f.RelPath] = struct{}{}
 			continue
 		}
 		seen[f.RelPath] = struct{}{}
-
-		switch doc.Status {
-		case "ok":
-			s.addIndexed(1)
-		case "skipped", "secret_excluded":
-			s.addSkipped(1)
-		case "error":
-			s.addErrors(1)
-		}
 	}
 
 	return s.markMissingAsDeleted(ctx, existing, seen)
 }
 
-func (s *Service) buildDocument(_ context.Context, f DiscoveredFile, secretPatterns []*regexp.Regexp) (model.Document, error) {
+func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretPatterns []*regexp.Regexp, forceReindex bool) error {
+	doc, content, buildErr := s.buildDocumentWithContent(f, secretPatterns)
+	if buildErr != nil {
+		doc = model.Document{
+			RelPath:   f.RelPath,
+			DocType:   ClassifyDocType(f.RelPath),
+			SizeBytes: f.SizeBytes,
+			MTimeUnix: f.MTimeUnix,
+			Status:    "error",
+			Deleted:   false,
+		}
+		if err := s.store.UpsertDocument(ctx, doc); err != nil {
+			return fmt.Errorf("upsert error document: %w", err)
+		}
+		// s.addErrors(1) is intentionally omitted here; runScan already
+		// increments the error counter for any non-nil return value.
+		return buildErr
+	}
+
+	existingDoc, err := s.store.GetDocumentByPath(ctx, doc.RelPath)
+	if err != nil && !isNotFoundError(err) {
+		return fmt.Errorf("get existing document: %w", err)
+	}
+
+	needsProcessing := needsReprocessing(existingDoc.ContentHash, doc.ContentHash, forceReindex)
+	if err := s.store.UpsertDocument(ctx, doc); err != nil {
+		return fmt.Errorf("upsert document: %w", err)
+	}
+
+	switch doc.Status {
+	case "ok":
+		s.addIndexed(1)
+	case "skipped", "secret_excluded":
+		s.addSkipped(1)
+	case "error":
+		s.addErrors(1)
+		return nil
+	}
+
+	if !needsProcessing || doc.Status != "ok" {
+		return nil
+	}
+
+	if err := s.generateRepresentations(ctx, doc, f.AbsPath, content); err != nil {
+		return fmt.Errorf("generate representations: %w", err)
+	}
+	return nil
+}
+
+func (s *Service) buildDocumentWithContent(f DiscoveredFile, secretPatterns []*regexp.Regexp) (model.Document, []byte, error) {
 	docType := ClassifyDocType(f.RelPath)
 	doc := model.Document{
 		RelPath:   f.RelPath,
@@ -131,21 +175,20 @@ func (s *Service) buildDocument(_ context.Context, f DiscoveredFile, secretPatte
 
 	content, err := os.ReadFile(f.AbsPath)
 	if err != nil {
-		return doc, fmt.Errorf("read %s: %w", f.RelPath, err)
+		return doc, nil, fmt.Errorf("read %s: %w", f.RelPath, err)
 	}
-	sum := sha256.Sum256(content)
-	doc.ContentHash = hex.EncodeToString(sum[:])
+	doc.ContentHash = computeContentHash(content)
 
 	if docType == "archive" || docType == "binary_ignored" {
 		doc.Status = "skipped"
-		return doc, nil
+		return doc, content, nil
 	}
 
 	if hasSecretMatch(contentSample(content), secretPatterns) {
 		doc.Status = "secret_excluded"
 	}
 
-	return doc, nil
+	return doc, content, nil
 }
 
 func contentSample(content []byte) []byte {
@@ -239,4 +282,112 @@ func (s *Service) addErrors(delta int64) {
 	if s.indexingState != nil {
 		s.indexingState.AddErrors(delta)
 	}
+}
+
+func (s *Service) addRepresentations(delta int64) {
+	if s.indexingState != nil {
+		s.indexingState.AddRepresentations(delta)
+	}
+}
+
+func (s *Service) generateRepresentations(ctx context.Context, doc model.Document, absPath string, content []byte) error {
+	if s.repGen == nil {
+		return nil
+	}
+
+	if ShouldGenerateRawText(doc.DocType) {
+		if err := s.repGen.GenerateRawText(ctx, doc, absPath); err != nil {
+			return err
+		}
+		s.addRepresentations(1)
+		return nil
+	}
+
+	if (doc.DocType == "pdf" || doc.DocType == "image") && s.ocr != nil {
+		if err := s.generateOCRMarkdownRepresentation(ctx, doc, content); err != nil {
+			return err
+		}
+		s.addRepresentations(1)
+	}
+	return nil
+}
+
+func isNotFoundError(err error) bool {
+	if err == nil {
+		return false
+	}
+	// common filesystem sentinel
+	if errors.Is(err, os.ErrNotExist) {
+		return true
+	}
+	// sqlite/sql driver returns sql.ErrNoRows for missing rows
+	if errors.Is(err, sql.ErrNoRows) {
+		return true
+	}
+	// some store implementations may define their own sentinel error
+	// for a missing row/document/representation.  Add a clause here to
+	// avoid treating those as fatal.
+	if errors.Is(err, model.ErrNotFound) {
+		return true
+	}
+	return false
+}
+
+func (s *Service) generateOCRMarkdownRepresentation(ctx context.Context, doc model.Document, content []byte) error {
+	if s.repGen == nil || s.ocr == nil {
+		return nil
+	}
+
+	ocrText, err := s.readOrComputeOCR(ctx, doc, content)
+	if err != nil {
+		return err
+	}
+
+	ocrText = strings.TrimSpace(ocrText)
+	if ocrText == "" {
+		return nil
+	}
+
+	rep := model.Representation{
+		DocID:       doc.DocID,
+		RepType:     RepTypeOCRMarkdown,
+		RepHash:     computeRepHash([]byte(ocrText)),
+		CreatedUnix: time.Now().Unix(),
+		Deleted:     false,
+	}
+	repID, err := s.repGen.store.UpsertRepresentation(ctx, rep)
+	if err != nil {
+		return fmt.Errorf("upsert ocr representation: %w", err)
+	}
+
+	segments := chunkOCRByPages(ocrText)
+	if len(segments) == 0 {
+		return nil
+	}
+	if err := s.repGen.upsertChunksForRepresentation(ctx, repID, "text", segments); err != nil {
+		return fmt.Errorf("persist ocr chunks: %w", err)
+	}
+	return nil
+}
+
+func (s *Service) readOrComputeOCR(ctx context.Context, doc model.Document, content []byte) (string, error) {
+	cacheDir := filepath.Join(s.cfg.StateDir, "cache", "ocr")
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		return "", fmt.Errorf("create ocr cache dir: %w", err)
+	}
+	cachePath := filepath.Join(cacheDir, computeContentHash(content)+".md")
+	if cached, err := os.ReadFile(cachePath); err == nil {
+		return string(cached), nil
+	}
+
+	ocrText, err := s.ocr.Extract(ctx, doc.RelPath, content)
+	if err != nil {
+		return "", fmt.Errorf("ocr extract %s: %w", doc.RelPath, err)
+	}
+
+	ocrBytes := []byte(strings.ReplaceAll(strings.ReplaceAll(ocrText, "\r\n", "\n"), "\r", "\n"))
+	if err := os.WriteFile(cachePath, ocrBytes, 0o644); err != nil {
+		return "", fmt.Errorf("write ocr cache: %w", err)
+	}
+	return string(ocrBytes), nil
 }

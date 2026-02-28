@@ -3,11 +3,13 @@ package mistral
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -118,6 +120,25 @@ type embedDataItem struct {
 
 type embedResponse struct {
 	Data []embedDataItem `json:"data"`
+}
+
+type ocrRequest struct {
+	Model    string      `json:"model"`
+	Document ocrDocument `json:"document"`
+}
+
+type ocrDocument struct {
+	Type        string `json:"type"`
+	DocumentURL string `json:"document_url"`
+}
+
+type ocrResponse struct {
+	Pages []struct {
+		Markdown string `json:"markdown"`
+		Text     string `json:"text"`
+	} `json:"pages"`
+	Text     string `json:"text"`
+	Markdown string `json:"markdown"`
 }
 
 func (c *Client) embedBatchWithRetry(ctx context.Context, modelName string, inputs []string) ([][]float32, error) {
@@ -332,10 +353,138 @@ func (c *Client) wait(ctx context.Context, d time.Duration) error {
 }
 
 func (c *Client) Extract(ctx context.Context, relPath string, data []byte) (string, error) {
-	_ = ctx
-	_ = relPath
-	_ = data
-	return "", model.ErrNotImplemented
+	if strings.TrimSpace(c.APIKey) == "" {
+		return "", &model.ProviderError{
+			Code:      "MISTRAL_AUTH",
+			Message:   "missing Mistral API key",
+			Retryable: false,
+		}
+	}
+	if len(data) == 0 {
+		return "", &model.ProviderError{
+			Code:      "MISTRAL_FAILED",
+			Message:   "ocr input is empty",
+			Retryable: false,
+		}
+	}
+
+	ext := strings.ToLower(filepath.Ext(strings.TrimSpace(relPath)))
+	mimeType := "application/octet-stream"
+	switch ext {
+	case ".pdf":
+		mimeType = "application/pdf"
+	case ".png":
+		mimeType = "image/png"
+	case ".jpg", ".jpeg":
+		mimeType = "image/jpeg"
+	case ".webp":
+		mimeType = "image/webp"
+	}
+
+	payload := ocrRequest{
+		Model: "mistral-ocr-latest",
+		Document: ocrDocument{
+			Type:        "document_url",
+			DocumentURL: "data:" + mimeType + ";base64," + base64.StdEncoding.EncodeToString(data),
+		},
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return "", &model.ProviderError{
+			Code:      "MISTRAL_FAILED",
+			Message:   "failed to marshal ocr request",
+			Retryable: false,
+			Cause:     err,
+		}
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/v1/ocr", bytes.NewReader(body))
+	if err != nil {
+		return "", &model.ProviderError{
+			Code:      "MISTRAL_FAILED",
+			Message:   "failed to build ocr request",
+			Retryable: false,
+			Cause:     err,
+		}
+	}
+	req.Header.Set("Authorization", "Bearer "+c.APIKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	client := c.HTTPClient
+	if client == nil {
+		client = &http.Client{Timeout: defaultRequestTimeout}
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", &model.ProviderError{
+			Code:      "MISTRAL_FAILED",
+			Message:   "ocr request failed",
+			Retryable: true,
+			Cause:     err,
+		}
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		errMsg := strings.TrimSpace(string(bodyBytes))
+		if errMsg == "" {
+			errMsg = "upstream returned non-200 response"
+		}
+		switch {
+		case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
+			return "", &model.ProviderError{Code: "MISTRAL_AUTH", Message: errMsg, Retryable: false, StatusCode: resp.StatusCode}
+		case resp.StatusCode == http.StatusTooManyRequests:
+			return "", &model.ProviderError{Code: "MISTRAL_RATE_LIMIT", Message: errMsg, Retryable: true, StatusCode: resp.StatusCode}
+		case resp.StatusCode >= http.StatusInternalServerError:
+			return "", &model.ProviderError{Code: "MISTRAL_FAILED", Message: errMsg, Retryable: true, StatusCode: resp.StatusCode}
+		default:
+			return "", &model.ProviderError{Code: "MISTRAL_FAILED", Message: errMsg, Retryable: false, StatusCode: resp.StatusCode}
+		}
+	}
+
+	var parsed ocrResponse
+	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+		return "", &model.ProviderError{
+			Code:      "MISTRAL_FAILED",
+			Message:   "failed to decode ocr response",
+			Retryable: false,
+			Cause:     err,
+		}
+	}
+
+	if len(parsed.Pages) > 0 {
+		parts := make([]string, 0, len(parsed.Pages))
+		for _, p := range parsed.Pages {
+			pageText := strings.TrimSpace(p.Markdown)
+			if pageText == "" {
+				pageText = strings.TrimSpace(p.Text)
+			}
+			if pageText == "" {
+				continue
+			}
+			parts = append(parts, pageText)
+		}
+		if len(parts) > 0 {
+			return strings.Join(parts, "\f"), nil
+		}
+	}
+
+	if text := strings.TrimSpace(parsed.Markdown); text != "" {
+		return text, nil
+	}
+	if text := strings.TrimSpace(parsed.Text); text != "" {
+		return text, nil
+	}
+
+	return "", &model.ProviderError{
+		Code:      "MISTRAL_FAILED",
+		Message:   "ocr response had no text content",
+		Retryable: false,
+	}
 }
 
 func (c *Client) Transcribe(ctx context.Context, relPath string, data []byte) (string, error) {

@@ -2,61 +2,74 @@ package ingest
 
 import (
 	"bytes"
+	"context"
+	"fmt"
+	"os"
+	"strings"
 	"testing"
+
+	"dir2mcp/internal/model"
 )
+
+func TestNewRepresentationGeneratorNil(t *testing.T) {
+	// ensure constructor fails early when given a nil store
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatalf("expected panic for nil store")
+		} else if !strings.Contains(fmt.Sprint(r), "nil model.Store") {
+			t.Fatalf("unexpected panic message: %v", r)
+		}
+	}()
+	_ = NewRepresentationGenerator(nil)
+}
 
 func TestNormalizeUTF8(t *testing.T) {
 	tests := []struct {
 		name     string
 		input    []byte
 		expected []byte
-		wantErr  bool
 	}{
 		{
 			name:     "already valid UTF-8 with LF",
 			input:    []byte("hello\nworld"),
 			expected: []byte("hello\nworld"),
-			wantErr:  false,
 		},
 		{
 			name:     "CRLF to LF",
 			input:    []byte("hello\r\nworld"),
 			expected: []byte("hello\nworld"),
-			wantErr:  false,
 		},
 		{
 			name:     "CR to LF",
 			input:    []byte("hello\rworld"),
 			expected: []byte("hello\nworld"),
-			wantErr:  false,
 		},
 		{
 			name:     "mixed line endings",
 			input:    []byte("line1\r\nline2\rline3\nline4"),
 			expected: []byte("line1\nline2\nline3\nline4"),
-			wantErr:  false,
 		},
 		{
 			name:     "empty content",
 			input:    []byte{},
 			expected: []byte{},
-			wantErr:  false,
 		},
 		{
 			name:     "valid UTF-8 with special chars",
 			input:    []byte("Hello 世界 🌍"),
 			expected: []byte("Hello 世界 🌍"),
-			wantErr:  false,
+		},
+		{
+			name:  "invalid UTF-8 sequence",
+			input: []byte{0xff, 0xfe, 0x00},
+			// invalid bytes should be replaced with U+FFFD then null preserved
+			expected: []byte{0xEF, 0xBF, 0xBD, 0x00},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := normalizeUTF8(tt.input)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("normalizeUTF8() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
+			result := normalizeUTF8(tt.input)
 			if !bytes.Equal(result, tt.expected) {
 				t.Errorf("normalizeUTF8() = %q, want %q", result, tt.expected)
 			}
@@ -76,7 +89,7 @@ func TestShouldGenerateRawText(t *testing.T) {
 		{"markdown", "md", true},
 		{"data", "data", true},
 		{"html", "html", true},
-		
+
 		// Should NOT generate raw_text
 		{"pdf", "pdf", false},
 		{"image", "image", false},
@@ -119,37 +132,132 @@ func TestRepTypeConstants(t *testing.T) {
 	}
 }
 
-// Mock implementation for integration testing
-// (This would be in a separate test file in practice)
-type mockStore struct {
-	documents       map[string]mockDocument
-	representations map[int64][]mockRepresentation
-}
-
-type mockDocument struct {
-	DocID       int64
-	RelPath     string
-	ContentHash string
-	Status      string
-}
-
-type mockRepresentation struct {
-	RepID   int64
-	DocID   int64
-	RepType string
-	RepHash string
-}
-
 // Example integration test structure (implementation would be in a separate file)
 func TestRepresentationGeneratorIntegration(t *testing.T) {
-	// This would test the full flow with a mock store
-	t.Skip("Integration test - implement with actual mock store")
-	
-	// Example test flow:
-	// 1. Create mock store
-	// 2. Create document
-	// 3. Generate raw_text representation
-	// 4. Verify representation was stored correctly
-	// 5. Generate again (should be skipped due to unchanged hash)
-	// 6. Verify no duplicate representation
+	st := &fakeRepStore{}
+	rg := NewRepresentationGenerator(st)
+	doc := model.Document{
+		DocID:   1,
+		RelPath: "main.go",
+		DocType: "code",
+	}
+
+	tmp := t.TempDir() + "/main.go"
+	content := "package main\n\nfunc main() {}\n"
+	if err := os.WriteFile(tmp, []byte(content), 0o644); err != nil {
+		t.Fatalf("write temp file: %v", err)
+	}
+
+	if err := rg.GenerateRawText(context.Background(), doc, tmp); err != nil {
+		t.Fatalf("GenerateRawText failed: %v", err)
+	}
+	if st.upsertCount != 1 {
+		t.Fatalf("expected 1 representation upsert, got %d", st.upsertCount)
+	}
+	if len(st.chunks) == 0 {
+		t.Fatalf("expected chunks to be inserted")
+	}
+	if st.softDeleteCall == 0 {
+		t.Fatalf("expected stale-chunk cleanup call")
+	}
+}
+
+func TestGenerateRawTextTooLarge(t *testing.T) {
+	st := &fakeRepStore{}
+	rg := NewRepresentationGenerator(st)
+	doc := model.Document{DocID: 1, RelPath: "large.txt", DocType: "text"}
+
+	// create a file just above the defaultMaxFileSizeBytes limit
+	tmp := t.TempDir() + "/large.txt"
+	f, err := os.Create(tmp)
+	if err != nil {
+		t.Fatalf("create temp file: %v", err)
+	}
+	if err := f.Truncate(defaultMaxFileSizeBytes + 1); err != nil {
+		if closeErr := f.Close(); closeErr != nil {
+			t.Fatalf("close temp file after truncate failure: %v", closeErr)
+		}
+		t.Fatalf("truncate file: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close temp file: %v", err)
+	}
+
+	err = rg.GenerateRawText(context.Background(), doc, tmp)
+	if err == nil {
+		t.Fatalf("expected error for oversized file")
+	}
+	if !strings.Contains(err.Error(), "too large") {
+		t.Fatalf("unexpected error message: %v", err)
+	}
+}
+
+func TestChunkCodeByLines(t *testing.T) {
+	content := strings.Repeat("line\n", 260)
+	chunks := chunkCodeByLines(content, 200, 30)
+	if len(chunks) < 2 {
+		t.Fatalf("expected at least 2 chunks, got %d", len(chunks))
+	}
+	if chunks[0].Span.Kind != "lines" {
+		t.Fatalf("expected lines span kind, got %q", chunks[0].Span.Kind)
+	}
+	if chunks[0].Span.StartLine != 1 || chunks[0].Span.EndLine != 200 {
+		t.Fatalf("unexpected first chunk span: %+v", chunks[0].Span)
+	}
+	if chunks[1].Span.StartLine != 171 {
+		t.Fatalf("expected overlap start line 171, got %d", chunks[1].Span.StartLine)
+	}
+}
+
+func TestChunkTextByChars(t *testing.T) {
+	content := strings.Repeat("abcdefghijklmnopqrstuvwxyz", 200)
+	chunks := chunkTextByChars(content, 250, 25, 50)
+	if len(chunks) < 2 {
+		t.Fatalf("expected multiple chunks, got %d", len(chunks))
+	}
+	for i, c := range chunks {
+		if len([]rune(c.Text)) > 250 {
+			t.Fatalf("chunk %d exceeds max chars: %d", i, len([]rune(c.Text)))
+		}
+		if c.Span.Kind != "lines" {
+			t.Fatalf("chunk %d has unexpected span kind %q", i, c.Span.Kind)
+		}
+	}
+}
+
+type fakeRepStore struct {
+	upsertCount    int
+	nextRepID      int64
+	chunks         []model.Chunk
+	softDeleteCall int
+}
+
+func (s *fakeRepStore) UpsertRepresentation(_ context.Context, rep model.Representation) (int64, error) {
+	s.upsertCount++
+	if s.nextRepID == 0 {
+		s.nextRepID = 1
+	}
+	if rep.DocID <= 0 {
+		return 0, fmt.Errorf("invalid doc id")
+	}
+	return s.nextRepID, nil
+}
+
+func (s *fakeRepStore) InsertChunkWithSpans(_ context.Context, chunk model.Chunk, spans []model.Span) (int64, error) {
+	if chunk.RepID <= 0 {
+		return 0, fmt.Errorf("invalid rep id")
+	}
+	if len(spans) != 1 {
+		return 0, fmt.Errorf("expected one span")
+	}
+	s.chunks = append(s.chunks, chunk)
+	return int64(len(s.chunks)), nil
+}
+
+func (s *fakeRepStore) SoftDeleteChunksFromOrdinal(_ context.Context, repID int64, fromOrdinal int) error {
+	if repID <= 0 || fromOrdinal < 0 {
+		return fmt.Errorf("invalid soft delete args")
+	}
+	s.softDeleteCall++
+	return nil
 }

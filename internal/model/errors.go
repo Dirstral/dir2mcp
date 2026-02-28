@@ -6,6 +6,11 @@ var (
 	// ErrNotImplemented marks skeleton methods that still need subsystem work.
 	ErrNotImplemented = errors.New("not implemented")
 
+	// ErrNotFound is used by store implementations to indicate a requested
+	// record (document, representation, chunk, etc.) does not exist.  Higher
+	// layers may treat this the same as sql.ErrNoRows.
+	ErrNotFound = errors.New("not found")
+
 	// ErrIndexNotReady is returned by a Retriever when the index exists but
 	// has not yet finished building or loading.
 	ErrIndexNotReady = errors.New("index not ready")

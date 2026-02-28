@@ -177,8 +177,8 @@ func (s *SQLiteStore) UpsertChunkTask(ctx context.Context, task model.ChunkTask)
 	if err := task.Validate(); err != nil {
 		return err
 	}
-	if task.Label <= 0 {
-		return errors.New("task label must be a positive integer")
+	if task.Label == 0 {
+		return errors.New("task label must be a non-zero positive integer")
 	}
 
 	relPath, err := normalizeRelPath(task.Metadata.RelPath)
@@ -376,6 +376,31 @@ func (s *SQLiteStore) InsertChunkWithSpans(ctx context.Context, chunk model.Chun
 	}
 
 	return chunkID, nil
+}
+
+func (s *SQLiteStore) SoftDeleteChunksFromOrdinal(ctx context.Context, repID int64, fromOrdinal int) error {
+	if repID <= 0 {
+		return errors.New("rep_id must be > 0")
+	}
+	if fromOrdinal < 0 {
+		return errors.New("from_ordinal must be >= 0")
+	}
+
+	db, err := s.ensureDB(ctx)
+	if err != nil {
+		return err
+	}
+	defer s.ReleaseDB()
+
+	_, err = db.ExecContext(
+		ctx,
+		`UPDATE chunks
+		 SET deleted = 1
+		 WHERE rep_id = ? AND ordinal >= ?`,
+		repID,
+		fromOrdinal,
+	)
+	return err
 }
 
 func (s *SQLiteStore) GetChunksByRepID(ctx context.Context, repID int64) ([]model.Chunk, error) {
@@ -645,7 +670,7 @@ func (s *SQLiteStore) NextPending(ctx context.Context, limit int, indexKind stri
 	}
 
 	args := []any{"pending"}
-	query := `SELECT chunk_id, rel_path, doc_type, rep_type, text, index_kind FROM chunks WHERE embedding_status = ? AND deleted = 0`
+	query := `SELECT chunk_id, rel_path, doc_type, rep_type, text, index_kind FROM chunks WHERE embedding_status = ? AND deleted = 0 AND chunk_id > 0`
 	if strings.TrimSpace(indexKind) != "" {
 		query += " AND index_kind = ?"
 		args = append(args, indexKind)
@@ -672,8 +697,12 @@ func (s *SQLiteStore) NextPending(ctx context.Context, limit int, indexKind stri
 		if err := rows.Scan(&chunkID, &relPath, &docType, &repType, &text, &idxKind); err != nil {
 			return nil, err
 		}
-		tasks = append(tasks, model.NewChunkTask(chunkID, text, idxKind, model.ChunkMetadata{
-			ChunkID: chunkID,
+		if chunkID <= 0 {
+			return nil, fmt.Errorf("invalid non-positive chunk_id from database: %d", chunkID)
+		}
+		uid := uint64(chunkID)
+		tasks = append(tasks, model.NewChunkTask(uid, text, idxKind, model.ChunkMetadata{
+			ChunkID: uid,
 			RelPath: relPath,
 			DocType: docType,
 			RepType: repType,
@@ -700,7 +729,7 @@ func (s *SQLiteStore) ListEmbeddedChunkMetadata(ctx context.Context, indexKind s
 	args := []any{"ok"}
 	query := `SELECT chunk_id, rel_path, doc_type, rep_type, text, index_kind
 	          FROM chunks
-	          WHERE embedding_status = ? AND deleted = 0`
+	          WHERE embedding_status = ? AND deleted = 0 AND chunk_id > 0`
 	if strings.TrimSpace(indexKind) != "" {
 		query += ` AND index_kind = ?`
 		args = append(args, indexKind)
@@ -727,12 +756,16 @@ func (s *SQLiteStore) ListEmbeddedChunkMetadata(ctx context.Context, indexKind s
 		if err := rows.Scan(&chunkID, &relPath, &docType, &repType, &text, &kind); err != nil {
 			return nil, err
 		}
+		if chunkID <= 0 {
+			return nil, fmt.Errorf("invalid non-positive chunk_id from database: %d", chunkID)
+		}
+		uid := uint64(chunkID)
 		out = append(out, model.ChunkTask{
-			Label:     chunkID,
+			Label:     uid,
 			Text:      text,
 			IndexKind: kind,
 			Metadata: model.ChunkMetadata{
-				ChunkID: chunkID,
+				ChunkID: uid,
 				RelPath: relPath,
 				DocType: docType,
 				RepType: repType,
@@ -744,15 +777,15 @@ func (s *SQLiteStore) ListEmbeddedChunkMetadata(ctx context.Context, indexKind s
 	return out, rows.Err()
 }
 
-func (s *SQLiteStore) MarkEmbedded(ctx context.Context, labels []int64) error {
+func (s *SQLiteStore) MarkEmbedded(ctx context.Context, labels []uint64) error {
 	return s.markEmbeddingStatus(ctx, labels, "ok", "")
 }
 
-func (s *SQLiteStore) MarkFailed(ctx context.Context, labels []int64, reason string) error {
+func (s *SQLiteStore) MarkFailed(ctx context.Context, labels []uint64, reason string) error {
 	return s.markEmbeddingStatus(ctx, labels, "error", reason)
 }
 
-func (s *SQLiteStore) markEmbeddingStatus(ctx context.Context, labels []int64, status, reason string) error {
+func (s *SQLiteStore) markEmbeddingStatus(ctx context.Context, labels []uint64, status, reason string) error {
 	if len(labels) == 0 {
 		return nil
 	}
@@ -775,7 +808,7 @@ func (s *SQLiteStore) markEmbeddingStatus(ctx context.Context, labels []int64, s
 	defer func() { _ = stmt.Close() }()
 
 	for _, label := range labels {
-		if _, err := stmt.ExecContext(ctx, status, reason, label); err != nil {
+		if _, err := stmt.ExecContext(ctx, status, reason, int64(label)); err != nil {
 			return err
 		}
 	}

@@ -14,8 +14,8 @@ import (
 
 type ChunkSource interface {
 	NextPending(ctx context.Context, limit int, indexKind string) ([]model.ChunkTask, error)
-	MarkEmbedded(ctx context.Context, labels []int64) error
-	MarkFailed(ctx context.Context, labels []int64, reason string) error
+	MarkEmbedded(ctx context.Context, labels []uint64) error
+	MarkFailed(ctx context.Context, labels []uint64, reason string) error
 }
 
 type EmbeddingWorker struct {
@@ -25,7 +25,7 @@ type EmbeddingWorker struct {
 	ModelForText   string
 	ModelForCode   string
 	BatchSize      int
-	OnIndexedChunk func(label int64, metadata model.ChunkMetadata)
+	OnIndexedChunk func(label uint64, metadata model.ChunkMetadata)
 
 	// Logger is optional; if non‑nil its Printf method will be used for
 	// informational messages. When nil the standard library's log package
@@ -75,26 +75,33 @@ func (w *EmbeddingWorker) RunOnce(ctx context.Context, indexKind string) (int, e
 	}
 
 	modelName := w.modelForKind(indexKind)
-	inputs := make([]string, len(tasks))
-	labels := make([]int64, len(tasks))
-	for idx, task := range tasks {
+	validTasks := make([]model.ChunkTask, 0, len(tasks))
+	inputs := make([]string, 0, len(tasks))
+	labels := make([]uint64, 0, len(tasks))
+	invalidFound := false
+	for _, task := range tasks {
 		// always prefer the metadata value; Label exists only for API
 		// compatibility and must mirror Metadata.ChunkID.  The prior
 		// validation loop already checked this invariant, but using the
 		// metadata field directly removes the need to reference Label at
 		// every call site.
 		chunkID := task.Metadata.ChunkID
-		// validate chunk ID early so we can fail fast before expending
-		// resources on embedding or indexing.  A negative ID indicates a
-		// corrupt or otherwise unusable chunk.  We mark it failed and then
-		// return a fatal error so the Run loop does not treat it as retryable.
-		if chunkID < 0 {
-			reason := "negative label not supported"
+		// chunkID is unsigned; zero is invalid and is treated as corrupt.
+		if chunkID == 0 {
+			reason := "zero label not supported"
 			w.logf("corrupt chunk skipped: %s label=%d", reason, chunkID)
-			return 0, fmt.Errorf("%w: %s", ErrFatal, reason)
+			invalidFound = true
+			continue
 		}
-		inputs[idx] = task.Text
-		labels[idx] = chunkID
+		validTasks = append(validTasks, task)
+		inputs = append(inputs, task.Text)
+		labels = append(labels, chunkID)
+	}
+	if invalidFound {
+		return 0, fmt.Errorf("%w: zero label not supported", ErrFatal)
+	}
+	if len(validTasks) == 0 {
+		return 0, nil
 	}
 
 	vectors, err := w.Embedder.Embed(ctx, modelName, inputs)
@@ -115,7 +122,7 @@ func (w *EmbeddingWorker) RunOnce(ctx context.Context, indexKind string) (int, e
 		}
 		return 0, err
 	}
-	if len(vectors) != len(tasks) {
+	if len(vectors) != len(validTasks) {
 		reason := "embedding vector count mismatch"
 		if mfErr := w.Source.MarkFailed(ctx, labels, reason); mfErr != nil {
 			w.logf("mark failed update error: %v (reason: %s) labels=%v", mfErr, reason, labels)
@@ -123,8 +130,8 @@ func (w *EmbeddingWorker) RunOnce(ctx context.Context, indexKind string) (int, e
 		return 0, errors.New(reason)
 	}
 
-	for idx := range tasks {
-		if addErr := w.Index.Add(uint64(tasks[idx].Metadata.ChunkID), vectors[idx]); addErr != nil {
+	for idx := range validTasks {
+		if addErr := w.Index.Add(validTasks[idx].Metadata.ChunkID, vectors[idx]); addErr != nil {
 			if idx > 0 {
 				if err := w.Source.MarkEmbedded(ctx, labels[:idx]); err != nil {
 					w.logf("mark embedded warning: failed to mark %d chunks as embedded before index error: %v labels=%v", idx, err, labels[:idx])
@@ -136,7 +143,7 @@ func (w *EmbeddingWorker) RunOnce(ctx context.Context, indexKind string) (int, e
 			return idx, addErr
 		}
 		if w.OnIndexedChunk != nil {
-			w.OnIndexedChunk(tasks[idx].Metadata.ChunkID, tasks[idx].Metadata)
+			w.OnIndexedChunk(validTasks[idx].Metadata.ChunkID, validTasks[idx].Metadata)
 		}
 	}
 

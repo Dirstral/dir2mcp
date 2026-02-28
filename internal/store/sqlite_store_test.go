@@ -62,7 +62,7 @@ func TestSQLiteStore_PendingChunkLifecycle(t *testing.T) {
 		t.Fatalf("unexpected task fields: %#v", tasks)
 	}
 
-	if err := st.MarkEmbedded(ctx, []int64{101}); err != nil {
+	if err := st.MarkEmbedded(ctx, []uint64{101}); err != nil {
 		t.Fatalf("MarkEmbedded failed: %v", err)
 	}
 	tasks, err = st.NextPending(ctx, 10, "text")
@@ -111,17 +111,16 @@ func TestSQLiteStore_UpsertChunkTask_RequiresPositiveLabel(t *testing.T) {
 		t.Fatalf("Init failed: %v", err)
 	}
 
-	for _, lbl := range []int{0, -1, -100} {
-		err := st.UpsertChunkTask(ctx, model.NewChunkTask(int64(lbl), "text", "text", model.ChunkMetadata{
-			ChunkID: int64(lbl),
-			RelPath: "foo",
-		}))
-		if err == nil {
-			t.Fatalf("expected error for label %d, got nil", lbl)
-		}
-		if !strings.Contains(err.Error(), "positive") {
-			t.Fatalf("unexpected error message for label %d: %v", lbl, err)
-		}
+	// zero label should be rejected
+	err := st.UpsertChunkTask(ctx, model.NewChunkTask(0, "text", "text", model.ChunkMetadata{
+		ChunkID: 0,
+		RelPath: "foo",
+	}))
+	if err == nil {
+		t.Fatal("expected error for label 0, got nil")
+	}
+	if err != nil && !strings.Contains(err.Error(), "non-zero") {
+		t.Fatalf("unexpected error message for zero label: %v", err)
 	}
 
 	// positive label should succeed
