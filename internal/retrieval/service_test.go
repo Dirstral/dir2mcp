@@ -6,6 +6,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -15,6 +16,18 @@ import (
 
 type fakeRetrievalEmbedder struct {
 	vectorsByModel map[string][]float32
+}
+
+type fakeGenerator struct {
+	out string
+	err error
+}
+
+func (g *fakeGenerator) Generate(_ context.Context, _ string) (string, error) {
+	if g.err != nil {
+		return "", g.err
+	}
+	return g.out, nil
 }
 
 // fakeRetrievalIndex allows inspection of the 'k' value passed to Search.
@@ -423,5 +436,97 @@ func TestLooksLikeCodeQuery(t *testing.T) {
 		if got != c.expect {
 			t.Errorf("looksLikeCodeQuery(%q) = %v; want %v", c.query, got, c.expect)
 		}
+	}
+}
+
+func TestAsk_FallbackAndCitations(t *testing.T) {
+	idx := index.NewHNSWIndex("")
+	if err := idx.Add(1, []float32{1, 0}); err != nil {
+		t.Fatalf("idx.Add failed: %v", err)
+	}
+	svc := NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
+		"mistral-embed": {1, 0},
+	}}, nil)
+	svc.SetChunkMetadata(1, model.SearchHit{
+		RelPath: "docs/a.md",
+		Snippet: "alpha snippet",
+		Span:    model.Span{Kind: "lines", StartLine: 10, EndLine: 12},
+	})
+
+	got, err := svc.Ask(context.Background(), "what is alpha?", model.SearchQuery{K: 1})
+	if err != nil {
+		t.Fatalf("Ask failed: %v", err)
+	}
+	if got.Question != "what is alpha?" {
+		t.Fatalf("unexpected question in result: %q", got.Question)
+	}
+	if len(got.Hits) != 1 {
+		t.Fatalf("expected 1 hit, got %d", len(got.Hits))
+	}
+	if len(got.Citations) != 1 {
+		t.Fatalf("expected 1 citation, got %d", len(got.Citations))
+	}
+	if got.Citations[0].RelPath != "docs/a.md" {
+		t.Fatalf("unexpected citation path: %q", got.Citations[0].RelPath)
+	}
+	if got.Answer == "" || !strings.Contains(got.Answer, "alpha snippet") {
+		t.Fatalf("expected fallback answer to include snippet, got %q", got.Answer)
+	}
+}
+
+func TestAsk_UsesGeneratorWhenAvailable(t *testing.T) {
+	idx := index.NewHNSWIndex("")
+	if err := idx.Add(1, []float32{1, 0}); err != nil {
+		t.Fatalf("idx.Add failed: %v", err)
+	}
+	svc := NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
+		"mistral-embed": {1, 0},
+	}}, &fakeGenerator{out: "Generated answer with [docs/a.md]"})
+	svc.SetChunkMetadata(1, model.SearchHit{
+		RelPath: "docs/a.md",
+		Snippet: "alpha snippet",
+		Span:    model.Span{Kind: "lines", StartLine: 1, EndLine: 2},
+	})
+
+	got, err := svc.Ask(context.Background(), "q", model.SearchQuery{K: 1})
+	if err != nil {
+		t.Fatalf("Ask failed: %v", err)
+	}
+	if got.Answer != "Generated answer with [docs/a.md]" {
+		t.Fatalf("expected generated answer, got %q", got.Answer)
+	}
+}
+
+func TestAsk_AppendsMissingAttributions(t *testing.T) {
+	idx := index.NewHNSWIndex("")
+	if err := idx.Add(1, []float32{1, 0}); err != nil {
+		t.Fatalf("idx.Add failed: %v", err)
+	}
+	if err := idx.Add(2, []float32{0.9, 0.1}); err != nil {
+		t.Fatalf("idx.Add failed: %v", err)
+	}
+	svc := NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
+		"mistral-embed": {1, 0},
+	}}, &fakeGenerator{out: "Generated summary without explicit source tags."})
+	svc.SetChunkMetadata(1, model.SearchHit{
+		RelPath: "docs/a.md",
+		Snippet: "alpha snippet",
+		Span:    model.Span{Kind: "lines", StartLine: 1, EndLine: 2},
+	})
+	svc.SetChunkMetadata(2, model.SearchHit{
+		RelPath: "docs/b.md",
+		Snippet: "beta snippet",
+		Span:    model.Span{Kind: "lines", StartLine: 3, EndLine: 4},
+	})
+
+	got, err := svc.Ask(context.Background(), "q", model.SearchQuery{K: 2})
+	if err != nil {
+		t.Fatalf("Ask failed: %v", err)
+	}
+	if !strings.Contains(got.Answer, "Sources:") {
+		t.Fatalf("expected answer to include sources suffix, got %q", got.Answer)
+	}
+	if !strings.Contains(got.Answer, "[docs/a.md]") || !strings.Contains(got.Answer, "[docs/b.md]") {
+		t.Fatalf("expected answer to include missing source tags, got %q", got.Answer)
 	}
 }

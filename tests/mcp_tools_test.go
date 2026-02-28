@@ -340,10 +340,81 @@ func TestMCPToolsCallListFiles_StoreFailureReturnsStoreCorrupt(t *testing.T) {
 	assertToolCallErrorCode(t, resp, "STORE_CORRUPT")
 }
 
+func TestMCPToolsCallAsk_ReturnsStructuredAnswerAndCitations(t *testing.T) {
+	cfg := config.Default()
+	cfg.AuthMode = "none"
+
+	server := httptest.NewServer(
+		mcp.NewServer(cfg, &fakeAskRetriever{}).Handler(),
+	)
+	defer server.Close()
+
+	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
+	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":13,"method":"tools/call","params":{"name":"dir2mcp.ask","arguments":{"question":"what is alpha?","k":3,"index":"both"}}}`)
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+
+	if resp.StatusCode != http.StatusOK {
+		payload, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status=%d want=%d body=%s", resp.StatusCode, http.StatusOK, string(payload))
+	}
+
+	var envelope struct {
+		Result struct {
+			IsError           bool                   `json:"isError"`
+			StructuredContent map[string]interface{} `json:"structuredContent"`
+			Content           []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"result"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if envelope.Result.IsError {
+		t.Fatalf("expected ask success, got isError=true: %#v", envelope.Result.StructuredContent)
+	}
+	if envelope.Result.StructuredContent["question"] != "what is alpha?" {
+		t.Fatalf("unexpected question field: %#v", envelope.Result.StructuredContent["question"])
+	}
+	if envelope.Result.StructuredContent["answer"] != "alpha answer" {
+		t.Fatalf("unexpected answer field: %#v", envelope.Result.StructuredContent["answer"])
+	}
+	if _, ok := envelope.Result.StructuredContent["citations"].([]interface{}); !ok {
+		t.Fatalf("expected citations array, got %#v", envelope.Result.StructuredContent["citations"])
+	}
+}
+
 // failingListFilesStore is a minimal store stub that forces ListFiles to
 // return a configured error for error-path testing.
 type failingListFilesStore struct {
 	err error
+}
+
+type fakeAskRetriever struct{}
+
+func (f *fakeAskRetriever) Search(_ context.Context, _ model.SearchQuery) ([]model.SearchHit, error) {
+	return []model.SearchHit{}, nil
+}
+
+func (f *fakeAskRetriever) Ask(_ context.Context, question string, query model.SearchQuery) (model.AskResult, error) {
+	return model.AskResult{
+		Question:         question,
+		Answer:           "alpha answer",
+		Citations:        []model.Citation{{ChunkID: 1, RelPath: "docs/a.md", Span: model.Span{Kind: "lines", StartLine: 1, EndLine: 2}}},
+		Hits:             []model.SearchHit{{ChunkID: 1, RelPath: "docs/a.md", Snippet: "alpha"}},
+		IndexingComplete: true,
+	}, nil
+}
+
+func (f *fakeAskRetriever) OpenFile(_ context.Context, _ string, _ model.Span, _ int) (string, error) {
+	return "", model.ErrNotImplemented
+}
+
+func (f *fakeAskRetriever) Stats(_ context.Context) (model.Stats, error) {
+	return model.Stats{}, nil
 }
 
 func (s *failingListFilesStore) Init(_ context.Context) error {

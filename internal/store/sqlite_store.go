@@ -426,6 +426,20 @@ func (s *SQLiteStore) SoftDeleteChunksFromOrdinal(ctx context.Context, repID int
 	return err
 }
 
+// ClearDocumentContentHashes resets documents.content_hash for all rows.
+// Reindex flows can use this to force "changed" semantics even when files are
+// unchanged on disk.
+func (s *SQLiteStore) ClearDocumentContentHashes(ctx context.Context) error {
+	db, err := s.ensureDB(ctx)
+	if err != nil {
+		return err
+	}
+	defer s.ReleaseDB()
+
+	_, err = db.ExecContext(ctx, `UPDATE documents SET content_hash = ''`)
+	return err
+}
+
 // WithTx begins a new database transaction and passes a transaction-bound
 // representation store to the supplied callback. If the callback returns an
 // error the transaction is rolled back; otherwise it is committed.  The

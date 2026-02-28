@@ -287,10 +287,50 @@ func (s *Service) Search(ctx context.Context, query model.SearchQuery) ([]model.
 }
 
 func (s *Service) Ask(ctx context.Context, question string, query model.SearchQuery) (model.AskResult, error) {
-	_ = ctx
-	_ = question
-	_ = query
-	return model.AskResult{}, model.ErrNotImplemented
+	question = strings.TrimSpace(question)
+	if question == "" {
+		return model.AskResult{}, errors.New("question is required")
+	}
+
+	if strings.TrimSpace(query.Query) == "" {
+		query.Query = question
+	}
+	if query.K <= 0 {
+		query.K = 5
+	}
+
+	hits, err := s.Search(ctx, query)
+	if err != nil {
+		return model.AskResult{}, err
+	}
+
+	citations := make([]model.Citation, 0, len(hits))
+	for _, hit := range hits {
+		citations = append(citations, model.Citation{
+			ChunkID: hit.ChunkID,
+			RelPath: hit.RelPath,
+			Span:    hit.Span,
+		})
+	}
+
+	answer := buildFallbackAnswer(question, hits)
+	if s.gen != nil && len(hits) > 0 {
+		prompt := buildRAGPrompt(question, hits)
+		if generated, genErr := s.gen.Generate(ctx, prompt); genErr == nil {
+			if trimmed := strings.TrimSpace(generated); trimmed != "" {
+				answer = trimmed
+			}
+		}
+	}
+	answer = ensureAnswerAttributions(answer, citations)
+
+	return model.AskResult{
+		Question:         question,
+		Answer:           answer,
+		Citations:        citations,
+		Hits:             hits,
+		IndexingComplete: true,
+	}, nil
 }
 
 func (s *Service) OpenFile(ctx context.Context, relPath string, span model.Span, maxChars int) (string, error) {
@@ -660,6 +700,97 @@ func looksLikeCodeQuery(query string) bool {
 		indicators++
 	}
 	return indicators >= 2
+}
+
+func buildFallbackAnswer(question string, hits []model.SearchHit) string {
+	if len(hits) == 0 {
+		return "No relevant context found in the indexed corpus."
+	}
+
+	lines := make([]string, 0, len(hits)+1)
+	lines = append(lines, fmt.Sprintf("Question: %s", question))
+	lines = append(lines, "Top context:")
+	limit := len(hits)
+	if limit > 5 {
+		limit = 5
+	}
+	for i := 0; i < limit; i++ {
+		h := hits[i]
+		snippet := strings.TrimSpace(h.Snippet)
+		if snippet == "" {
+			snippet = "(no snippet)"
+		}
+		lines = append(lines, fmt.Sprintf("- %s: %s", h.RelPath, snippet))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func buildRAGPrompt(question string, hits []model.SearchHit) string {
+	var b strings.Builder
+	b.WriteString("Answer the question using only the provided context.\n")
+	b.WriteString("Include concise source attributions in the form [rel_path].\n\n")
+	b.WriteString("Question:\n")
+	b.WriteString(question)
+	b.WriteString("\n\nContext:\n")
+
+	limit := len(hits)
+	if limit > 8 {
+		limit = 8
+	}
+	for i := 0; i < limit; i++ {
+		h := hits[i]
+		b.WriteString("- [")
+		b.WriteString(h.RelPath)
+		b.WriteString("] ")
+		if strings.TrimSpace(h.Snippet) == "" {
+			b.WriteString("(no snippet)\n")
+			continue
+		}
+		b.WriteString(strings.TrimSpace(h.Snippet))
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+func ensureAnswerAttributions(answer string, citations []model.Citation) string {
+	answer = strings.TrimSpace(answer)
+	if answer == "" || len(citations) == 0 {
+		return answer
+	}
+
+	orderedSources := make([]string, 0, len(citations))
+	seen := make(map[string]struct{}, len(citations))
+	for _, c := range citations {
+		rel := strings.TrimSpace(c.RelPath)
+		if rel == "" {
+			continue
+		}
+		if _, ok := seen[rel]; ok {
+			continue
+		}
+		seen[rel] = struct{}{}
+		orderedSources = append(orderedSources, rel)
+	}
+	if len(orderedSources) == 0 {
+		return answer
+	}
+
+	missing := make([]string, 0, len(orderedSources))
+	for _, rel := range orderedSources {
+		tag := "[" + rel + "]"
+		if !strings.Contains(answer, tag) {
+			missing = append(missing, tag)
+		}
+	}
+	if len(missing) == 0 {
+		return answer
+	}
+
+	limit := len(missing)
+	if limit > 5 {
+		limit = 5
+	}
+	return answer + "\n\nSources: " + strings.Join(missing[:limit], ", ")
 }
 
 func matchFilters(hit model.SearchHit, query model.SearchQuery) bool {

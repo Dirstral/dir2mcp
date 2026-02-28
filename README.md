@@ -170,6 +170,12 @@ make test
 make check
 ```
 
+Performance benchmark (large corpus retrieval path):
+
+```bash
+go test -bench BenchmarkSearchBothLargeCorpus -run ^$ ./internal/retrieval
+```
+
 Notes:
 - `make lint` requires `golangci-lint` installed locally.
 - CI runs lint + build + vet + test on pushes and PRs to `main`.

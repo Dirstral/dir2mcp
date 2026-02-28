@@ -9,6 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"os"
 	"os/signal"
@@ -62,6 +63,14 @@ type App struct {
 
 type indexingStateAware interface {
 	SetIndexingState(state *appstate.IndexingState)
+}
+
+type contentHashResetter interface {
+	ClearDocumentContentHashes(ctx context.Context) error
+}
+
+type embeddedChunkLister interface {
+	ListEmbeddedChunkMetadata(ctx context.Context, indexKind string, limit, offset int) ([]model.ChunkTask, error)
 }
 
 type RuntimeHooks struct {
@@ -119,6 +128,28 @@ type ndjsonEvent struct {
 type ndjsonEmitter struct {
 	enabled bool
 	out     io.Writer
+}
+
+type corpusSnapshot struct {
+	Timestamp    string           `json:"ts"`
+	Indexing     corpusIndexing   `json:"indexing"`
+	DocCounts    map[string]int64 `json:"doc_counts"`
+	TotalDocs    int64            `json:"total_docs"`
+	CodeRatio    float64          `json:"code_ratio"`
+	CacheableFor string           `json:"cacheable_for,omitempty"`
+}
+
+type corpusIndexing struct {
+	Mode            string `json:"mode"`
+	Running         bool   `json:"running"`
+	Scanned         int64  `json:"scanned"`
+	Indexed         int64  `json:"indexed"`
+	Skipped         int64  `json:"skipped"`
+	Deleted         int64  `json:"deleted"`
+	Representations int64  `json:"representations"`
+	ChunksTotal     int64  `json:"chunks_total"`
+	EmbeddedOK      int64  `json:"embedded_ok"`
+	Errors          int64  `json:"errors"`
 }
 
 func NewApp() *App {
@@ -293,21 +324,43 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 		return exitIndexLoadFailure
 	}
 
-	ix := index.NewHNSWIndex(filepath.Join(cfg.StateDir, "vectors_text.hnsw"))
+	textIndexPath := filepath.Join(cfg.StateDir, "vectors_text.hnsw")
+	codeIndexPath := filepath.Join(cfg.StateDir, "vectors_code.hnsw")
+
+	textIx := index.NewHNSWIndex(textIndexPath)
 	defer func() {
-		_ = ix.Close()
+		_ = textIx.Close()
 	}()
-	if err := ix.Load(filepath.Join(cfg.StateDir, "vectors_text.hnsw")); err != nil &&
+	if err := textIx.Load(textIndexPath); err != nil &&
 		!errors.Is(err, model.ErrNotImplemented) &&
 		!errors.Is(err, os.ErrNotExist) {
-		writef(a.stderr, "load index: %v\n", err)
+		writef(a.stderr, "load text index: %v\n", err)
+		return exitIndexLoadFailure
+	}
+
+	codeIx := index.NewHNSWIndex(codeIndexPath)
+	defer func() {
+		_ = codeIx.Close()
+	}()
+	if err := codeIx.Load(codeIndexPath); err != nil &&
+		!errors.Is(err, model.ErrNotImplemented) &&
+		!errors.Is(err, os.ErrNotExist) {
+		writef(a.stderr, "load code index: %v\n", err)
 		return exitIndexLoadFailure
 	}
 
 	client := mistral.NewClient(cfg.MistralBaseURL, cfg.MistralAPIKey)
-	ret := retrieval.NewService(st, ix, client, client)
+	ret := retrieval.NewService(st, textIx, client, client)
+	ret.SetCodeIndex(codeIx)
 	ret.SetRootDir(cfg.RootDir)
+	preloadedChunks, err := preloadEmbeddedChunkMetadata(ctx, st, ret)
+	if err != nil {
+		writef(a.stderr, "bootstrap embedded chunk metadata: %v\n", err)
+	}
 	indexingState := appstate.NewIndexingState(appstate.ModeIncremental)
+	if preloadedChunks > 0 {
+		indexingState.AddEmbeddedOK(int64(preloadedChunks))
+	}
 	mcpServer := mcp.NewServer(cfg, ret, mcp.WithStore(st), mcp.WithIndexingState(indexingState))
 	ing := a.newIngestor(cfg, st)
 	if stateAware, ok := ing.(indexingStateAware); ok {
@@ -329,6 +382,27 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	defer func() {
 		_ = ln.Close()
 	}()
+	persistence := index.NewPersistenceManager(
+		[]index.IndexedFile{
+			{Path: textIndexPath, Index: textIx},
+			{Path: codeIndexPath, Index: codeIx},
+		},
+		15*time.Second,
+		func(saveErr error) { writef(a.stderr, "index autosave warning: %v\n", saveErr) },
+	)
+	persistence.Start(runCtx)
+	defer func() {
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer stopCancel()
+		if stopErr := persistence.StopAndSave(stopCtx); stopErr != nil && !errors.Is(stopErr, context.Canceled) {
+			writef(a.stderr, "final index save warning: %v\n", stopErr)
+		}
+	}()
+
+	embedErrCh := make(chan error, 2)
+	if !opts.readOnly {
+		startEmbeddingWorkers(runCtx, st, textIx, codeIx, client, ret, indexingState, embedErrCh)
+	}
 	mcpAddr := ln.Addr().String()
 	if cfg.Public {
 		mcpAddr = publicURLAddress(cfg.ListenAddr, mcpAddr)
@@ -373,6 +447,8 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	}
 
 	ingestErrCh := make(chan error, 1)
+	go runCorpusWriter(runCtx, cfg.StateDir, st, indexingState, a.stderr)
+
 	if opts.readOnly {
 		close(ingestErrCh)
 	} else {
@@ -407,9 +483,11 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 		case ingestErr, ok := <-ingestErrCh:
 			if !ok {
 				ingestErrCh = nil
+				_ = writeCorpusSnapshot(runCtx, cfg.StateDir, st, indexingState)
 				continue
 			}
 			if ingestErr == nil {
+				_ = writeCorpusSnapshot(runCtx, cfg.StateDir, st, indexingState)
 				continue
 			}
 			writef(a.stderr, "ingestion failed: %v\n", ingestErr)
@@ -421,8 +499,113 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 				"message": ingestErr.Error(),
 			})
 			return exitIngestionFatal
+		case embedErr := <-embedErrCh:
+			if embedErr == nil {
+				continue
+			}
+			writef(a.stderr, "embedding worker warning: %v\n", embedErr)
+			emitter.Emit("error", "embed_error", map[string]interface{}{
+				"message": embedErr.Error(),
+			})
 		}
 	}
+}
+
+func preloadEmbeddedChunkMetadata(ctx context.Context, source embeddedChunkLister, ret *retrieval.Service) (int, error) {
+	if source == nil || ret == nil {
+		return 0, nil
+	}
+	const pageSize = 500
+	total := 0
+	kinds := []string{"text", "code"}
+	for _, kind := range kinds {
+		offset := 0
+		for {
+			tasks, err := source.ListEmbeddedChunkMetadata(ctx, kind, pageSize, offset)
+			if err != nil {
+				if errors.Is(err, model.ErrNotImplemented) {
+					break
+				}
+				return total, err
+			}
+			for _, task := range tasks {
+				ret.SetChunkMetadataForIndex(kind, task.Metadata.ChunkID, model.SearchHit{
+					ChunkID: task.Metadata.ChunkID,
+					RelPath: task.Metadata.RelPath,
+					DocType: task.Metadata.DocType,
+					RepType: task.Metadata.RepType,
+					Snippet: task.Metadata.Snippet,
+					Span:    task.Metadata.Span,
+				})
+				total++
+			}
+			if len(tasks) < pageSize {
+				break
+			}
+			offset += len(tasks)
+		}
+	}
+	return total, nil
+}
+
+func startEmbeddingWorkers(
+	ctx context.Context,
+	st *store.SQLiteStore,
+	textIndex model.Index,
+	codeIndex model.Index,
+	embedder model.Embedder,
+	ret *retrieval.Service,
+	indexingState *appstate.IndexingState,
+	errCh chan<- error,
+) {
+	if st == nil || embedder == nil {
+		return
+	}
+
+	start := func(kind string, ix model.Index) {
+		if ix == nil {
+			return
+		}
+		workerKind := kind
+		worker := &index.EmbeddingWorker{
+			Source:       st,
+			Index:        ix,
+			Embedder:     embedder,
+			ModelForText: "mistral-embed",
+			ModelForCode: "codestral-embed",
+			BatchSize:    32,
+			Logger:       log.Default(),
+			OnIndexedChunk: func(label uint64, metadata model.ChunkMetadata) {
+				if ret != nil {
+					ret.SetChunkMetadataForIndex(workerKind, label, model.SearchHit{
+						ChunkID: metadata.ChunkID,
+						RelPath: metadata.RelPath,
+						DocType: metadata.DocType,
+						RepType: metadata.RepType,
+						Snippet: metadata.Snippet,
+						Span:    metadata.Span,
+					})
+				}
+				if indexingState != nil {
+					indexingState.AddEmbeddedOK(1)
+				}
+			},
+		}
+
+		go func() {
+			err := worker.Run(ctx, 750*time.Millisecond, workerKind)
+			if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return
+			}
+			select {
+			case errCh <- fmt.Errorf("%s worker: %w", workerKind, err):
+			default:
+			}
+		}()
+	}
+
+	start("text", textIndex)
+	start("code", codeIndex)
 }
 
 func (a *App) runStatus() int {
@@ -454,12 +637,34 @@ func (a *App) runReindex(ctx context.Context) int {
 	if baseDir == "" {
 		baseDir = ".dir2mcp"
 	}
+	textIndexPath := filepath.Join(baseDir, "vectors_text.hnsw")
+	codeIndexPath := filepath.Join(baseDir, "vectors_code.hnsw")
+	if err := os.MkdirAll(baseDir, 0o755); err != nil {
+		writef(a.stderr, "create state dir: %v\n", err)
+		return exitRootInaccessible
+	}
 	st := store.NewSQLiteStore(filepath.Join(baseDir, "meta.sqlite"))
 	defer func() {
 		if closeErr := st.Close(); closeErr != nil {
 			writef(a.stderr, "close store: %v\n", closeErr)
 		}
 	}()
+	if err := st.Init(ctx); err != nil && !errors.Is(err, model.ErrNotImplemented) {
+		writef(a.stderr, "initialize metadata store: %v\n", err)
+		return exitIndexLoadFailure
+	}
+	if resetter, ok := interface{}(st).(contentHashResetter); ok {
+		if err := resetter.ClearDocumentContentHashes(ctx); err != nil {
+			writef(a.stderr, "clear content hashes: %v\n", err)
+			return exitGeneric
+		}
+	}
+	for _, indexPath := range []string{textIndexPath, codeIndexPath} {
+		if err := os.Remove(indexPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			writef(a.stderr, "remove stale index file %s: %v\n", indexPath, err)
+			return exitGeneric
+		}
+	}
 
 	// use the factory hook (same as runUp) to allow tests to intercept
 	ing := a.newIngestor(cfg, st)
@@ -786,6 +991,132 @@ func writeConnectionFile(path string, payload connectionPayload) error {
 
 func newNDJSONEmitter(out io.Writer, enabled bool) *ndjsonEmitter {
 	return &ndjsonEmitter{enabled: enabled, out: out}
+}
+
+func runCorpusWriter(ctx context.Context, stateDir string, st model.Store, indexingState *appstate.IndexingState, stderr io.Writer) {
+	runCorpusWriterWithInterval(ctx, stateDir, st, indexingState, stderr, 5*time.Second)
+}
+
+func runCorpusWriterWithInterval(ctx context.Context, stateDir string, st model.Store, indexingState *appstate.IndexingState, stderr io.Writer, interval time.Duration) {
+	if interval <= 0 {
+		interval = 5 * time.Second
+	}
+	// Emit an initial snapshot immediately, then refresh while indexing runs.
+	if err := writeCorpusSnapshot(ctx, stateDir, st, indexingState); err != nil {
+		writef(stderr, "write corpus snapshot: %v\n", err)
+	}
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if indexingState != nil && !indexingState.Snapshot().Running {
+				continue
+			}
+			if err := writeCorpusSnapshot(ctx, stateDir, st, indexingState); err != nil {
+				writef(stderr, "write corpus snapshot: %v\n", err)
+			}
+		}
+	}
+}
+
+func writeCorpusSnapshot(ctx context.Context, stateDir string, st model.Store, indexingState *appstate.IndexingState) error {
+	snapshot, err := buildCorpusSnapshot(ctx, st, indexingState)
+	if err != nil {
+		return err
+	}
+
+	path := filepath.Join(stateDir, "corpus.json")
+	// Use a per-write temporary file so concurrent snapshot writers don't
+	// stomp each other's tmp file and trigger spurious ENOENT on rename.
+	tmp := fmt.Sprintf("%s.tmp.%d", path, time.Now().UnixNano())
+	raw, err := json.MarshalIndent(snapshot, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal corpus snapshot: %w", err)
+	}
+	if err := os.WriteFile(tmp, raw, 0o644); err != nil {
+		return fmt.Errorf("write temp corpus snapshot: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("rename corpus snapshot: %w", err)
+	}
+	return nil
+}
+
+func buildCorpusSnapshot(ctx context.Context, st model.Store, indexingState *appstate.IndexingState) (corpusSnapshot, error) {
+	docCounts, totalDocs, err := collectActiveDocCounts(ctx, st)
+	if err != nil {
+		return corpusSnapshot{}, err
+	}
+
+	codeDocs := docCounts["code"]
+	codeRatio := 0.0
+	if totalDocs > 0 {
+		codeRatio = float64(codeDocs) / float64(totalDocs)
+	}
+
+	idx := appstate.IndexingSnapshot{Mode: appstate.ModeIncremental}
+	if indexingState != nil {
+		idx = indexingState.Snapshot()
+	}
+
+	return corpusSnapshot{
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Indexing: corpusIndexing{
+			Mode:            idx.Mode,
+			Running:         idx.Running,
+			Scanned:         idx.Scanned,
+			Indexed:         idx.Indexed,
+			Skipped:         idx.Skipped,
+			Deleted:         idx.Deleted,
+			Representations: idx.Representations,
+			ChunksTotal:     idx.ChunksTotal,
+			EmbeddedOK:      idx.EmbeddedOK,
+			Errors:          idx.Errors,
+		},
+		DocCounts: docCounts,
+		TotalDocs: totalDocs,
+		CodeRatio: codeRatio,
+	}, nil
+}
+
+func collectActiveDocCounts(ctx context.Context, st model.Store) (map[string]int64, int64, error) {
+	if st == nil {
+		return map[string]int64{}, 0, nil
+	}
+
+	const pageSize = 500
+	offset := 0
+	counts := make(map[string]int64)
+	var totalActive int64
+
+	for {
+		docs, total, err := st.ListFiles(ctx, "", "", pageSize, offset)
+		if err != nil {
+			return nil, 0, fmt.Errorf("list files: %w", err)
+		}
+		for _, doc := range docs {
+			if doc.Deleted {
+				continue
+			}
+			docType := strings.TrimSpace(doc.DocType)
+			if docType == "" {
+				docType = "unknown"
+			}
+			counts[docType]++
+			totalActive++
+		}
+		offset += len(docs)
+		if len(docs) == 0 || int64(offset) >= total {
+			break
+		}
+	}
+
+	return counts, totalActive, nil
 }
 
 func (e *ndjsonEmitter) Emit(level, event string, data interface{}) {

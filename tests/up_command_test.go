@@ -19,6 +19,7 @@ import (
 	"dir2mcp/internal/cli"
 	"dir2mcp/internal/config"
 	"dir2mcp/internal/model"
+	"dir2mcp/internal/store"
 )
 
 var cwdMu sync.Mutex
@@ -212,6 +213,63 @@ func TestReindexPassesConfigToNewIngestor(t *testing.T) {
 	}
 	if seenCfg.MistralBaseURL != "https://example.local/" {
 		t.Fatalf("config not propagated to ingestor: got base url %q", seenCfg.MistralBaseURL)
+	}
+}
+
+func TestReindexClearsContentHashesBeforeRun(t *testing.T) {
+	tmp := t.TempDir()
+
+	stateDir := filepath.Join(tmp, ".dir2mcp")
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatalf("mkdir state dir: %v", err)
+	}
+
+	// Seed sqlite with one document that has a content hash.
+	st := store.NewSQLiteStore(filepath.Join(stateDir, "meta.sqlite"))
+	if err := st.Init(context.Background()); err != nil {
+		t.Fatalf("init sqlite store: %v", err)
+	}
+	if err := st.UpsertDocument(context.Background(), model.Document{
+		RelPath:     "docs/a.md",
+		DocType:     "md",
+		SizeBytes:   10,
+		MTimeUnix:   1,
+		ContentHash: "seeded-hash",
+		Status:      "ready",
+	}); err != nil {
+		t.Fatalf("seed document: %v", err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("close seeded store: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := cli.NewAppWithIOAndHooks(&stdout, &stderr, cli.RuntimeHooks{
+		NewIngestor: func(cfg config.Config, st model.Store) model.Ingestor {
+			return failingIngestor{}
+		},
+	})
+
+	withWorkingDir(t, tmp, func() {
+		code := app.RunWithContext(context.Background(), []string{"reindex"})
+		if code != 0 {
+			t.Fatalf("unexpected exit code: %d stderr=%s", code, stderr.String())
+		}
+	})
+
+	verify := store.NewSQLiteStore(filepath.Join(stateDir, "meta.sqlite"))
+	if err := verify.Init(context.Background()); err != nil {
+		t.Fatalf("init verify store: %v", err)
+	}
+	defer func() { _ = verify.Close() }()
+
+	doc, err := verify.GetDocumentByPath(context.Background(), "docs/a.md")
+	if err != nil {
+		t.Fatalf("get seeded document: %v", err)
+	}
+	if doc.ContentHash != "" {
+		t.Fatalf("expected content_hash to be cleared before reindex, got %q", doc.ContentHash)
 	}
 }
 
