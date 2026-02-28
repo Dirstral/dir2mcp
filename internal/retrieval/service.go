@@ -376,7 +376,13 @@ func (s *Service) openFile(ctx context.Context, relPath string, span model.Span,
 		return "", false, model.ErrDocTypeUnsupported
 	}
 
-	raw, readTruncated, err := readFileBounded(resolvedAbs, maxChars+1)
+	readLimit := maxChars + 1
+	if kind == "lines" || kind == "page" || kind == "time" ||
+		span.StartLine > 0 || span.EndLine > 0 || span.Page > 0 || span.StartMS > 0 || span.EndMS > 0 {
+		// Preserve span correctness; apply maxChars after slicing.
+		readLimit = 0
+	}
+	raw, readTruncated, err := readFileBounded(resolvedAbs, readLimit)
 	if err != nil {
 		return "", false, err
 	}
