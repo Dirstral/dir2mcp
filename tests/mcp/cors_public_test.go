@@ -1,4 +1,4 @@
-package issue37
+package tests
 
 import (
 	"bytes"
