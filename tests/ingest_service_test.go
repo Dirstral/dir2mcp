@@ -1,4 +1,4 @@
-package ingest
+package tests
 
 import (
 	"context"
@@ -12,6 +12,7 @@ import (
 
 	"dir2mcp/internal/appstate"
 	"dir2mcp/internal/config"
+	"dir2mcp/internal/ingest"
 	"dir2mcp/internal/model"
 )
 
@@ -44,7 +45,7 @@ func TestServiceRun_ProcessesFilesAndMarksMissingDeleted(t *testing.T) {
 	cfg.PathExcludes = []string{"**/exclude/**"}
 
 	indexState := appstate.NewIndexingState(appstate.ModeIncremental)
-	svc := NewService(cfg, st)
+	svc := ingest.NewService(cfg, st)
 	svc.SetIndexingState(indexState)
 
 	if err := svc.Run(context.Background()); err != nil {
@@ -113,7 +114,7 @@ func TestServiceRun_ReturnsErrorOnInvalidSecretPattern(t *testing.T) {
 	cfg.RootDir = root
 	cfg.SecretPatterns = []string{"["}
 
-	svc := NewService(cfg, newMemoryStore())
+	svc := ingest.NewService(cfg, newMemoryStore())
 	if err := svc.Run(context.Background()); err == nil {
 		t.Fatal("expected error for invalid secret pattern")
 	}
@@ -129,7 +130,7 @@ func TestServiceRun_ContextCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	svc := NewService(cfg, newMemoryStore())
+	svc := ingest.NewService(cfg, newMemoryStore())
 	if err := svc.Run(ctx); err == nil {
 		t.Fatal("expected context cancellation error")
 	}

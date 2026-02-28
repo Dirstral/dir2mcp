@@ -1,6 +1,10 @@
-package ingest
+package tests
 
-import "testing"
+import (
+	"testing"
+
+	"dir2mcp/internal/ingest"
+)
 
 func TestClassifyDocType(t *testing.T) {
 	tests := []struct {
@@ -23,7 +27,7 @@ func TestClassifyDocType(t *testing.T) {
 	for _, tc := range tests {
 		tc := tc
 		t.Run(tc.path, func(t *testing.T) {
-			got := ClassifyDocType(tc.path)
+			got := ingest.ClassifyDocType(tc.path)
 			if got != tc.want {
 				t.Fatalf("ClassifyDocType(%q)=%q want=%q", tc.path, got, tc.want)
 			}

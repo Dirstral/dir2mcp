@@ -1,4 +1,4 @@
-package ingest
+package tests
 
 import (
 	"context"
@@ -7,6 +7,8 @@ import (
 	"runtime"
 	"slices"
 	"testing"
+
+	"dir2mcp/internal/ingest"
 )
 
 func TestDiscoverFiles_SkipsDefaultExcludedDirsSymlinksAndLargeFiles(t *testing.T) {
@@ -27,7 +29,7 @@ func TestDiscoverFiles_SkipsDefaultExcludedDirsSymlinksAndLargeFiles(t *testing.
 		}
 	}
 
-	files, err := DiscoverFiles(context.Background(), root, 10)
+	files, err := ingest.DiscoverFiles(context.Background(), root, 10)
 	if err != nil {
 		t.Fatalf("DiscoverFiles failed: %v", err)
 	}
@@ -50,7 +52,7 @@ func TestDiscoverFiles_ContextCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	if _, err := DiscoverFiles(ctx, root, 1024); err == nil {
+	if _, err := ingest.DiscoverFiles(ctx, root, 1024); err == nil {
 		t.Fatal("expected context cancellation error")
 	}
 }

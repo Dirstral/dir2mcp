@@ -2,8 +2,6 @@ package ingest
 
 import (
 	"fmt"
-	"io"
-	"os"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -26,24 +24,6 @@ func compileSecretPatterns(patterns []string) ([]*regexp.Regexp, error) {
 		compiled = append(compiled, rx)
 	}
 	return compiled, nil
-}
-
-func detectSecretInFile(absPath string, patterns []*regexp.Regexp) (bool, error) {
-	if len(patterns) == 0 {
-		return false, nil
-	}
-
-	f, err := os.Open(absPath)
-	if err != nil {
-		return false, err
-	}
-	defer func() { _ = f.Close() }()
-
-	sample, err := io.ReadAll(io.LimitReader(f, secretScanSampleBytes))
-	if err != nil {
-		return false, err
-	}
-	return hasSecretMatch(sample, patterns), nil
 }
 
 func hasSecretMatch(sample []byte, patterns []*regexp.Regexp) bool {
