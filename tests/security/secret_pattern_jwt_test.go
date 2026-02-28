@@ -48,7 +48,17 @@ func repoRoot(t *testing.T) string {
 	if !ok {
 		t.Fatal("runtime.Caller failed")
 	}
-	return filepath.Dir(filepath.Dir(thisFile))
+	dir := filepath.Dir(thisFile)
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatal("failed to locate repository root (go.mod)")
+		}
+		dir = parent
+	}
 }
 
 func TestJWTSecretPattern_Corpus(t *testing.T) {
