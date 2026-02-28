@@ -42,6 +42,7 @@ type Server struct {
 	retriever model.Retriever
 	store     model.Store
 	indexing  *appstate.IndexingState
+	tts       TTSSynthesizer
 	tools     map[string]toolDefinition
 
 	sessionMu sync.RWMutex
@@ -86,6 +87,10 @@ func (e validationError) Error() string {
 
 type ServerOption func(*Server)
 
+type TTSSynthesizer interface {
+	Synthesize(ctx context.Context, text string) ([]byte, error)
+}
+
 func WithStore(store model.Store) ServerOption {
 	return func(s *Server) {
 		s.store = store
@@ -95,6 +100,12 @@ func WithStore(store model.Store) ServerOption {
 func WithIndexingState(state *appstate.IndexingState) ServerOption {
 	return func(s *Server) {
 		s.indexing = state
+	}
+}
+
+func WithTTS(tts TTSSynthesizer) ServerOption {
+	return func(s *Server) {
+		s.tts = tts
 	}
 }
 
@@ -123,7 +134,36 @@ func NewServer(cfg config.Config, retriever model.Retriever, opts ...ServerOptio
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc(s.cfg.MCPPath, s.handleMCP)
-	return mux
+	return s.corsMiddleware(mux)
+}
+
+// corsMiddleware wraps the handler to support CORS preflight (OPTIONS) and
+// response headers for the MCP endpoint. Required for browser-based MCP
+// clients such as ElevenLabs Conversational AI.
+func (s *Server) corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		origin := strings.TrimSpace(r.Header.Get("Origin"))
+		if origin != "" && isOriginAllowed(origin, s.cfg.AllowedOrigins) {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, MCP-Protocol-Version, MCP-Session-Id")
+			w.Header().Set("Access-Control-Expose-Headers", "MCP-Session-Id")
+			w.Header().Set("Access-Control-Max-Age", "86400")
+			w.Header().Set("Vary", "Origin")
+		}
+
+		accessControlRequestMethod := strings.TrimSpace(r.Header.Get("Access-Control-Request-Method"))
+		accessControlRequestHeaders := strings.TrimSpace(r.Header.Get("Access-Control-Request-Headers"))
+		isPreflight := r.Method == http.MethodOptions &&
+			origin != "" &&
+			(accessControlRequestMethod != "" || accessControlRequestHeaders != "")
+		if isPreflight {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) Run(ctx context.Context) error {

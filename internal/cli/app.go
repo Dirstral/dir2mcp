@@ -19,6 +19,7 @@ import (
 
 	"dir2mcp/internal/appstate"
 	"dir2mcp/internal/config"
+	"dir2mcp/internal/elevenlabs"
 	"dir2mcp/internal/index"
 	"dir2mcp/internal/ingest"
 	"dir2mcp/internal/mcp"
@@ -308,7 +309,20 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	ret := retrieval.NewService(st, ix, client, client)
 	ret.SetRootDir(cfg.RootDir)
 	indexingState := appstate.NewIndexingState(appstate.ModeIncremental)
-	mcpServer := mcp.NewServer(cfg, ret, mcp.WithStore(st), mcp.WithIndexingState(indexingState))
+
+	serverOptions := []mcp.ServerOption{
+		mcp.WithStore(st),
+		mcp.WithIndexingState(indexingState),
+	}
+	if strings.TrimSpace(cfg.ElevenLabsAPIKey) != "" {
+		ttsClient := elevenlabs.NewClient(cfg.ElevenLabsAPIKey, cfg.ElevenLabsTTSVoiceID)
+		if strings.TrimSpace(cfg.ElevenLabsBaseURL) != "" {
+			ttsClient.BaseURL = strings.TrimRight(strings.TrimSpace(cfg.ElevenLabsBaseURL), "/")
+		}
+		serverOptions = append(serverOptions, mcp.WithTTS(ttsClient))
+	}
+
+	mcpServer := mcp.NewServer(cfg, ret, serverOptions...)
 	ing := a.newIngestor(cfg, st)
 	if stateAware, ok := ing.(indexingStateAware); ok {
 		stateAware.SetIndexingState(indexingState)
