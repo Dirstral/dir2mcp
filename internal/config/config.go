@@ -26,6 +26,9 @@ type Config struct {
 	// used by the MCP server when running in public mode.
 	RateLimitRPS   int
 	RateLimitBurst int
+	// TrustedProxies controls when X-Forwarded-For may be used to derive
+	// client identity. Values can be IPs or CIDRs.
+	TrustedProxies []string
 	PathExcludes   []string
 	SecretPatterns []string
 	// ResolvedAuthToken is a runtime-only token value injected by CLI wiring.
@@ -51,6 +54,10 @@ func Default() Config {
 		AuthMode:        "auto",
 		RateLimitRPS:    60,
 		RateLimitBurst:  20,
+		TrustedProxies: []string{
+			"127.0.0.1/32",
+			"::1/128",
+		},
 		PathExcludes: []string{
 			"**/.git/**",
 			"**/.dir2mcp/**",
@@ -136,6 +143,9 @@ func applyEnvOverrides(cfg *Config, overrideEnv map[string]string) {
 			cfg.RateLimitBurst = burst
 		}
 	}
+	if trustedProxies, ok := envLookup("DIR2MCP_TRUSTED_PROXIES", overrideEnv); ok {
+		cfg.TrustedProxies = MergeTrustedProxies(cfg.TrustedProxies, trustedProxies)
+	}
 }
 
 // MergeAllowedOrigins appends comma-separated origins to an existing allowlist,
@@ -198,6 +208,57 @@ func normalizeOriginKey(origin string) string {
 	}
 
 	return strings.ToLower(origin)
+}
+
+// MergeTrustedProxies appends comma-separated trusted proxies to an existing
+// list while preserving first-seen, normalized CIDR entries.
+func MergeTrustedProxies(existing []string, csv string) []string {
+	merged := make([]string, 0, len(existing))
+	seen := make(map[string]struct{}, len(existing))
+
+	add := func(value string) {
+		key := normalizeTrustedProxyKey(value)
+		if key == "" {
+			return
+		}
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		merged = append(merged, key)
+	}
+
+	for _, value := range existing {
+		add(value)
+	}
+	for _, value := range strings.Split(csv, ",") {
+		add(value)
+	}
+	return merged
+}
+
+func normalizeTrustedProxyKey(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+
+	if strings.Contains(value, "/") {
+		_, network, err := net.ParseCIDR(value)
+		if err != nil {
+			return ""
+		}
+		return network.String()
+	}
+
+	ip := net.ParseIP(value)
+	if ip == nil {
+		return ""
+	}
+	if v4 := ip.To4(); v4 != nil {
+		return (&net.IPNet{IP: v4, Mask: net.CIDRMask(32, 32)}).String()
+	}
+	return (&net.IPNet{IP: ip, Mask: net.CIDRMask(128, 128)}).String()
 }
 
 func loadDotEnvFiles(paths []string, overrideEnv map[string]string) error {
