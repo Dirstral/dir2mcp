@@ -265,6 +265,13 @@ func TestServer_ToolsCall_MissingParams(t *testing.T) {
 
 	srv.Handler().ServeHTTP(rr, req)
 
+	// missing parameters are considered a bad request by the server,
+	// it returns 400 along with a JSON-RPC error object.  assert the
+	// status code so we don't blindly decode an unexpected payload.
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("unexpected status: %d body=%s", rr.Code, rr.Body.String())
+	}
+
 	var resp map[string]any
 	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("unmarshal response: %v", err)

@@ -48,7 +48,17 @@ func NewPersistenceManager(indices []IndexedFile, interval time.Duration, onErro
 	}
 }
 
+// LoadAll invokes Load on every registered index, checking the provided
+// context before and after each call. Note that LoadAll holds the same
+// saveMu mutex used by SaveAll; this prevents concurrent loads and saves
+// (including the ticker goroutine started by Start) from running at the
+// same time. Callers should therefore expect LoadAll to block briefly if a
+// save is in progress, but it is otherwise safe to call after Start. The
+// lock is released when the method returns so the ticker can resume.
 func (m *PersistenceManager) LoadAll(ctx context.Context) error {
+	m.saveMu.Lock()
+	defer m.saveMu.Unlock()
+
 	for _, idx := range m.indices {
 		if idx.Index == nil {
 			continue
@@ -113,9 +123,12 @@ func (m *PersistenceManager) Start(ctx context.Context) {
 	runCtx, cancel := context.WithCancel(ctx)
 	m.cancel = cancel
 	m.running = true
+	// increment the wait group while we still hold stateMu so that
+	// StopAndSave cannot observe a zero count and return early. this
+	// mirrors the original deferred Done in the goroutine below.
+	m.wg.Add(1)
 	m.stateMu.Unlock()
 
-	m.wg.Add(1)
 	go func() {
 		defer m.wg.Done()
 		defer func() {

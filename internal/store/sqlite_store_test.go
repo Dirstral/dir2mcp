@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"path/filepath"
 	"reflect"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/Dirstral/dir2mcp/internal/model"
@@ -26,17 +28,12 @@ func TestSQLiteStore_PendingChunkLifecycle(t *testing.T) {
 		t.Fatalf("index verification failed: %v", err)
 	}
 
-	if err := st.UpsertChunkTask(ctx, model.ChunkTask{
-		Label:     101,
-		Text:      "chunk text",
-		IndexKind: "text",
-		Metadata: model.ChunkMetadata{
-			ChunkID: 101,
-			RelPath: "docs/a.md",
-			DocType: "md",
-			RepType: "raw_text",
-		},
-	}); err != nil {
+	if err := st.UpsertChunkTask(ctx, model.NewChunkTask(101, "chunk text", "text", model.ChunkMetadata{
+		ChunkID: 101,
+		RelPath: "docs/a.md",
+		DocType: "md",
+		RepType: "raw_text",
+	})); err != nil {
 		t.Fatalf("UpsertChunkTask failed: %v", err)
 	}
 
@@ -58,7 +55,7 @@ func TestSQLiteStore_PendingChunkLifecycle(t *testing.T) {
 		Snippet: "chunk text",
 		Span:    model.Span{Kind: "lines"},
 	}
-	if tasks[0].Label != 101 ||
+	if tasks[0].Label != 101 || tasks[0].Metadata.ChunkID != 101 ||
 		tasks[0].Text != expectedText ||
 		tasks[0].IndexKind != expectedIndexKind ||
 		!reflect.DeepEqual(tasks[0].Metadata, expectedMetadata) {
@@ -87,30 +84,79 @@ func TestSQLiteStore_UpsertChunkTask_RequiresRelPath(t *testing.T) {
 		t.Fatalf("Init failed: %v", err)
 	}
 
-	err := st.UpsertChunkTask(ctx, model.ChunkTask{
-		Label:     1,
-		Text:      "some text",
-		IndexKind: "text",
-		Metadata: model.ChunkMetadata{
-			ChunkID: 1,
-			RelPath: "",
-		},
-	})
+	err := st.UpsertChunkTask(ctx, model.NewChunkTask(1, "some text", "text", model.ChunkMetadata{
+		ChunkID: 1,
+		RelPath: "",
+	}))
 	if err == nil {
 		t.Fatal("expected error for empty RelPath, got nil")
 	}
 
-	err = st.UpsertChunkTask(ctx, model.ChunkTask{
-		Label:     2,
-		Text:      "some text",
+	err = st.UpsertChunkTask(ctx, model.NewChunkTask(2, "some text", "text", model.ChunkMetadata{
+		ChunkID: 2,
+		RelPath: "   ",
+	}))
+	if err == nil {
+		t.Fatal("expected error for whitespace RelPath, got nil")
+	}
+}
+
+func TestSQLiteStore_UpsertChunkTask_RequiresPositiveLabel(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "meta.sqlite")
+	st := NewSQLiteStore(dbPath)
+	defer func() { _ = st.Close() }()
+
+	if err := st.Init(ctx); err != nil {
+		t.Fatalf("Init failed: %v", err)
+	}
+
+	for _, lbl := range []int{0, -1, -100} {
+		err := st.UpsertChunkTask(ctx, model.NewChunkTask(int64(lbl), "text", "text", model.ChunkMetadata{
+			ChunkID: int64(lbl),
+			RelPath: "foo",
+		}))
+		if err == nil {
+			t.Fatalf("expected error for label %d, got nil", lbl)
+		}
+		if !strings.Contains(err.Error(), "positive") {
+			t.Fatalf("unexpected error message for label %d: %v", lbl, err)
+		}
+	}
+
+	// positive label should succeed
+	if err := st.UpsertChunkTask(ctx, model.NewChunkTask(1, "text", "text", model.ChunkMetadata{
+		ChunkID: 1,
+		RelPath: "foo",
+	})); err != nil {
+		t.Fatalf("expected success for positive label, got %v", err)
+	}
+}
+
+func TestSQLiteStore_UpsertChunkTask_LabelMetadataMismatch(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "meta.sqlite")
+	st := NewSQLiteStore(dbPath)
+	defer func() { _ = st.Close() }()
+
+	if err := st.Init(ctx); err != nil {
+		t.Fatalf("Init failed: %v", err)
+	}
+
+	// construct a task where label and metadata.ChunkID disagree; validation
+	// should catch this and return an error instead of panicking or accepting
+	// inconsistent data.
+	task := model.ChunkTask{
+		Label:     1,
+		Text:      "mismatch",
 		IndexKind: "text",
 		Metadata: model.ChunkMetadata{
 			ChunkID: 2,
-			RelPath: "   ",
+			RelPath: "foo",
 		},
-	})
-	if err == nil {
-		t.Fatal("expected error for whitespace RelPath, got nil")
+	}
+	if err := st.UpsertChunkTask(ctx, task); err == nil {
+		t.Fatalf("expected error for mismatched label/metadata, got nil")
 	}
 }
 
@@ -124,17 +170,12 @@ func TestSQLiteStore_UpsertChunkTask_TrimsRelPath(t *testing.T) {
 		t.Fatalf("Init failed: %v", err)
 	}
 
-	if err := st.UpsertChunkTask(ctx, model.ChunkTask{
-		Label:     1,
-		Text:      "trim me",
-		IndexKind: "text",
-		Metadata: model.ChunkMetadata{
-			ChunkID: 1,
-			RelPath: "  docs/a.md  ",
-			DocType: "md",
-			RepType: "raw_text",
-		},
-	}); err != nil {
+	if err := st.UpsertChunkTask(ctx, model.NewChunkTask(1, "trim me", "text", model.ChunkMetadata{
+		ChunkID: 1,
+		RelPath: "  docs/a.md  ",
+		DocType: "md",
+		RepType: "raw_text",
+	})); err != nil {
 		t.Fatalf("UpsertChunkTask failed: %v", err)
 	}
 
@@ -150,6 +191,38 @@ func TestSQLiteStore_UpsertChunkTask_TrimsRelPath(t *testing.T) {
 	}
 }
 
+func TestSQLiteStore_EnsureDB_ConcurrentInitClose(t *testing.T) {
+	// this test exercises the window addressed by the recent race fix: calling
+	// ensureDB and Close simultaneously should not trigger a nil-pointer or
+	// other panics.  with the mutex held during initialization there is no
+	// race, but run under -race to be sure.
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "meta.sqlite")
+	st := NewSQLiteStore(dbPath)
+	// don't defer Close here; we call it explicitly below
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		// ignore result; we only care that it doesn't panic or cause race
+		if db, err := st.ensureDB(ctx); err == nil {
+			st.ReleaseDB()
+			_ = db
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		_ = st.Close()
+	}()
+	wg.Wait()
+
+	// store should be safely closed now; further Close is no-op
+	if err := st.Close(); err != nil {
+		t.Fatalf("unexpected error on second Close: %v", err)
+	}
+}
+
 // verifyChunkIndexes ensures the sqlite initialization created the indexes we
 // added to avoid full table scans. A missing index would mean queries like
 // NextPending or path lookups could be slow.
@@ -158,6 +231,7 @@ func verifyChunkIndexes(ctx context.Context, st *SQLiteStore) error {
 	if err != nil {
 		return err
 	}
+	defer st.ReleaseDB()
 	rows, err := db.QueryContext(ctx, "PRAGMA index_list('chunks')")
 	if err != nil {
 		return err
@@ -175,6 +249,9 @@ func verifyChunkIndexes(ctx context.Context, st *SQLiteStore) error {
 			return err
 		}
 		present[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		return err
 	}
 	for _, want := range []string{
 		"idx_chunks_embedding_status",

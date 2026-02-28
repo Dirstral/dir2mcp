@@ -2,6 +2,7 @@ package retrieval
 
 import (
 	"context"
+	"errors"
 	"math"
 	"path"
 	"regexp"
@@ -223,7 +224,19 @@ func (s *Service) searchHitForLabel(indexName string, label uint64) model.Search
 	}
 }
 
+// ErrMissingEmbedder is returned when the service was created without
+// a configured embedder and a search attempt is made. This prevents a
+// nil-pointer panic in searchSingleIndex while giving callers a clear
+// failure reason.
+var ErrMissingEmbedder = errors.New("embedder not configured")
+
 func (s *Service) searchSingleIndex(ctx context.Context, query string, k int, modelName string, idx model.Index, indexName string, filters model.SearchQuery) ([]model.SearchHit, error) {
+	if s.embedder == nil {
+		// caller should have provided an embedder via NewService or
+		// SetEmbedder (not currently available).  Return an explicit
+		// error rather than letting the nil dereference panic later.
+		return nil, ErrMissingEmbedder
+	}
 	vectors, err := s.embedder.Embed(ctx, modelName, []string{query})
 	if err != nil {
 		return nil, err

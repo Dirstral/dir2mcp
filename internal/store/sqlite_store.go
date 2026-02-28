@@ -17,16 +17,24 @@ type SQLiteStore struct {
 
 	mu sync.Mutex
 	db *sql.DB
+
+	activeOps int
+	closing   bool
+	cond      *sync.Cond
 }
 
 func NewSQLiteStore(path string) *SQLiteStore {
-	return &SQLiteStore{path: path}
+	s := &SQLiteStore{path: path}
+	s.cond = sync.NewCond(&s.mu)
+	return s
 }
 
-func (s *SQLiteStore) Init(ctx context.Context) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
+// initLocked performs the same initialization work as Init but assumes
+// the caller already holds s.mu.  This helper allows ensureDB to set up the
+// database under lock, closing a small race window against Close().
+//
+// It mirrors the original Init logic but skips the mutex operations.
+func (s *SQLiteStore) initLocked(ctx context.Context) error {
 	if s.db != nil {
 		return nil
 	}
@@ -82,11 +90,18 @@ CREATE INDEX IF NOT EXISTS idx_chunks_rel_path_deleted ON chunks(rel_path, delet
 	return nil
 }
 
+func (s *SQLiteStore) Init(ctx context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.initLocked(ctx)
+}
+
 func (s *SQLiteStore) UpsertDocument(ctx context.Context, doc model.Document) error {
 	db, err := s.ensureDB(ctx)
 	if err != nil {
 		return err
 	}
+	defer s.ReleaseDB()
 
 	_, err = db.ExecContext(
 		ctx,
@@ -111,13 +126,21 @@ func (s *SQLiteStore) UpsertDocument(ctx context.Context, doc model.Document) er
 }
 
 func (s *SQLiteStore) UpsertChunkTask(ctx context.Context, task model.ChunkTask) error {
+	// ensure the caller did not accidentally pass inconsistent IDs
+	if err := task.Validate(); err != nil {
+		return err
+	}
 	db, err := s.ensureDB(ctx)
 	if err != nil {
 		return err
 	}
+	defer s.ReleaseDB()
 
-	if task.Label == 0 {
-		return errors.New("task label is required")
+	if task.Label <= 0 {
+		// chunk IDs (labels) must be positive integers; zero or negative
+		// values would be invalid and could interfere with SQL PRIMARY KEY
+		// semantics, so enforce this early with a clear error message.
+		return errors.New("task label must be a positive integer")
 	}
 	relPath := strings.TrimSpace(task.Metadata.RelPath)
 	if relPath == "" {
@@ -152,6 +175,7 @@ func (s *SQLiteStore) GetDocumentByPath(ctx context.Context, relPath string) (mo
 	if err != nil {
 		return model.Document{}, err
 	}
+	defer s.ReleaseDB()
 
 	var doc model.Document
 	var deleted int
@@ -182,6 +206,7 @@ func (s *SQLiteStore) ListFiles(ctx context.Context, prefix, glob string, limit,
 	if err != nil {
 		return nil, 0, err
 	}
+	defer s.ReleaseDB()
 
 	if limit <= 0 {
 		limit = 200
@@ -194,8 +219,8 @@ func (s *SQLiteStore) ListFiles(ctx context.Context, prefix, glob string, limit,
 	where := make([]string, 0, 2)
 	args := make([]any, 0, 4)
 	if strings.TrimSpace(prefix) != "" {
-		where = append(where, "rel_path LIKE ?")
-		args = append(args, prefix+"%")
+		where = append(where, "rel_path LIKE ? ESCAPE '\\'")
+		args = append(args, escapeLike(prefix)+"%")
 	}
 	if strings.TrimSpace(glob) != "" {
 		where = append(where, "rel_path GLOB ?")
@@ -255,6 +280,7 @@ func (s *SQLiteStore) NextPending(ctx context.Context, limit int, indexKind stri
 	if err != nil {
 		return nil, err
 	}
+	defer s.ReleaseDB()
 	if limit <= 0 {
 		limit = 32
 	}
@@ -291,19 +317,14 @@ func (s *SQLiteStore) NextPending(ctx context.Context, limit int, indexKind stri
 		if err := rows.Scan(&chunkID, &relPath, &docType, &repType, &text, &idxKind); err != nil {
 			return nil, err
 		}
-		tasks = append(tasks, model.ChunkTask{
-			Label:     chunkID,
-			Text:      text,
-			IndexKind: idxKind,
-			Metadata: model.ChunkMetadata{
-				ChunkID: chunkID,
-				RelPath: relPath,
-				DocType: docType,
-				RepType: repType,
-				Snippet: snippet(text, 240),
-				Span:    model.Span{Kind: "lines"},
-			},
-		})
+		tasks = append(tasks, model.NewChunkTask(chunkID, text, idxKind, model.ChunkMetadata{
+			ChunkID: chunkID,
+			RelPath: relPath,
+			DocType: docType,
+			RepType: repType,
+			Snippet: snippet(text, 240),
+			Span:    model.Span{Kind: "lines"},
+		}))
 	}
 	return tasks, rows.Err()
 }
@@ -313,6 +334,7 @@ func (s *SQLiteStore) ListEmbeddedChunkMetadata(ctx context.Context, indexKind s
 	if err != nil {
 		return nil, err
 	}
+	defer s.ReleaseDB()
 	if limit <= 0 {
 		limit = 500
 	}
@@ -384,6 +406,7 @@ func (s *SQLiteStore) markEmbeddingStatus(ctx context.Context, labels []int64, s
 	if err != nil {
 		return err
 	}
+	defer s.ReleaseDB()
 
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
@@ -408,25 +431,62 @@ func (s *SQLiteStore) markEmbeddingStatus(ctx context.Context, labels []int64, s
 
 func (s *SQLiteStore) Close() error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	for s.closing {
+		s.cond.Wait()
+	}
 	if s.db == nil {
+		s.mu.Unlock()
 		return nil
 	}
-	err := s.db.Close()
+	s.closing = true
+	db := s.db
 	s.db = nil
+	for s.activeOps > 0 {
+		s.cond.Wait()
+	}
+	s.mu.Unlock()
+
+	err := db.Close()
+
+	s.mu.Lock()
+	s.closing = false
+	s.cond.Broadcast()
+	s.mu.Unlock()
 	return err
 }
 
 func (s *SQLiteStore) ensureDB(ctx context.Context) (*sql.DB, error) {
-	if err := s.Init(ctx); err != nil {
-		return nil, err
-	}
+	// acquire lock early so Close can't clear s.db between init and use
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closing {
+		return nil, errors.New("sqlite db is closing")
+	}
+
 	if s.db == nil {
+		if err := s.initLocked(ctx); err != nil {
+			return nil, err
+		}
+	}
+	if s.db == nil {
+		// should never happen but keep defensive check
 		return nil, errors.New("sqlite db not initialized")
 	}
+	s.activeOps++
 	return s.db, nil
+}
+
+// ReleaseDB marks completion of an operation that previously acquired a
+// database handle via ensureDB.
+func (s *SQLiteStore) ReleaseDB() {
+	s.mu.Lock()
+	if s.activeOps > 0 {
+		s.activeOps--
+	}
+	if s.activeOps == 0 {
+		s.cond.Broadcast()
+	}
+	s.mu.Unlock()
 }
 
 func boolToInt(v bool) int {
@@ -440,6 +500,13 @@ func defaultIfEmpty(v, fallback string) string {
 	if strings.TrimSpace(v) == "" {
 		return fallback
 	}
+	return v
+}
+
+func escapeLike(v string) string {
+	v = strings.ReplaceAll(v, `\`, `\\`)
+	v = strings.ReplaceAll(v, `%`, `\%`)
+	v = strings.ReplaceAll(v, `_`, `\_`)
 	return v
 }
 

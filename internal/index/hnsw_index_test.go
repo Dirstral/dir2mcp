@@ -103,6 +103,7 @@ func TestHNSWIndex_SaveAndLoad(t *testing.T) {
 		t.Fatalf("unexpected loaded search result: %#v", labels)
 	}
 }
+
 func TestHNSWIndex_SearchEmptyIndex(t *testing.T) {
 	idx := NewHNSWIndex("")
 	// should not panic and should return empty slices

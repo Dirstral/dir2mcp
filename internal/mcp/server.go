@@ -351,12 +351,9 @@ func (s *Server) handleToolsCall(ctx context.Context, w http.ResponseWriter, id 
 			// error code as defined in SPEC.md.
 			canon := "INTERNAL_ERROR"
 			msg := "internal server error"
-			if err != nil {
-				e := err.Error()
-				if strings.Contains(e, "not ready") || strings.Contains(e, "not configured") {
-					canon = "INDEX_NOT_READY"
-					msg = "index not ready"
-				}
+			if errors.Is(err, model.ErrIndexNotReady) || errors.Is(err, model.ErrIndexNotConfigured) {
+				canon = "INDEX_NOT_READY"
+				msg = "index not ready"
 			}
 			writeError(w, http.StatusOK, id, -32000, msg, canon, true)
 			return

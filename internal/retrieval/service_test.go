@@ -159,9 +159,6 @@ func TestSearch_OverflowProtection(t *testing.T) {
 	svc.SetOverfetchMultiplier(100)
 	// choose a k that's guaranteed to overflow when multiplied by 100
 	bigK := math.MaxInt/100 + 1
-	if bigK <= 0 { // defensive in case of unexpected integer width
-		t.Skip("platform has non-positive MaxInt")
-	}
 	if _, err := svc.Search(context.Background(), model.SearchQuery{Query: "x", K: bigK}); err != nil {
 		t.Fatalf("Search error: %v", err)
 	}

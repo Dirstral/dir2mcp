@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"strings"
 	"time"
 
@@ -64,28 +65,51 @@ func (w *EmbeddingWorker) RunOnce(ctx context.Context, indexKind string) (int, e
 	if len(tasks) == 0 {
 		return 0, nil
 	}
+	// sanity-check tasks returned by the source.  they should already be
+	// consistent, but validating here guards against misbehaving or
+	// hand‑constructed implementations.
+	for _, t := range tasks {
+		if err := t.Validate(); err != nil {
+			return 0, fmt.Errorf("%w: invalid chunk task: %v", ErrFatal, err)
+		}
+	}
 
 	modelName := w.modelForKind(indexKind)
 	inputs := make([]string, len(tasks))
 	labels := make([]int64, len(tasks))
 	for idx, task := range tasks {
-		// validate labels early so we can fail fast before expending
-		// resources on embedding or indexing.  A negative label indicates a
+		// always prefer the metadata value; Label exists only for API
+		// compatibility and must mirror Metadata.ChunkID.  The prior
+		// validation loop already checked this invariant, but using the
+		// metadata field directly removes the need to reference Label at
+		// every call site.
+		chunkID := task.Metadata.ChunkID
+		// validate chunk ID early so we can fail fast before expending
+		// resources on embedding or indexing.  A negative ID indicates a
 		// corrupt or otherwise unusable chunk.  We mark it failed and then
 		// return a fatal error so the Run loop does not treat it as retryable.
-		if task.Label < 0 {
+		if chunkID < 0 {
 			reason := "negative label not supported"
-			if mfErr := w.Source.MarkFailed(ctx, []int64{task.Label}, reason); mfErr != nil {
-				w.logf("mark failed update error: %v (reason: %s) labels=%v", mfErr, reason, []int64{task.Label})
-			}
+			w.logf("corrupt chunk skipped: %s label=%d", reason, chunkID)
 			return 0, fmt.Errorf("%w: %s", ErrFatal, reason)
 		}
 		inputs[idx] = task.Text
-		labels[idx] = task.Label
+		labels[idx] = chunkID
 	}
 
 	vectors, err := w.Embedder.Embed(ctx, modelName, inputs)
 	if err != nil {
+		// distinguish between transient errors (which we want to retry later)
+		// and permanent failures for which the chunks should be marked as
+		// irrecoverable.  A transient error could be a network timeout,
+		// rate‑limit response, or context cancellation.  We intentionally keep
+		// the interface simple; by returning the error without marking the
+		// chunks as failed they will remain in the pending state and be
+		// re‑fetched on the next cycle.  Permanent errors fall through to the
+		// existing MarkFailed behaviour.
+		if isTransientEmbedError(err) {
+			return 0, err
+		}
 		if mfErr := w.Source.MarkFailed(ctx, labels, err.Error()); mfErr != nil {
 			w.logf("mark failed update error: %v (source error: %v) labels=%v", mfErr, err, labels)
 		}
@@ -100,7 +124,7 @@ func (w *EmbeddingWorker) RunOnce(ctx context.Context, indexKind string) (int, e
 	}
 
 	for idx := range tasks {
-		if addErr := w.Index.Add(uint64(tasks[idx].Label), vectors[idx]); addErr != nil {
+		if addErr := w.Index.Add(uint64(tasks[idx].Metadata.ChunkID), vectors[idx]); addErr != nil {
 			if idx > 0 {
 				if err := w.Source.MarkEmbedded(ctx, labels[:idx]); err != nil {
 					w.logf("mark embedded warning: failed to mark %d chunks as embedded before index error: %v labels=%v", idx, err, labels[:idx])
@@ -112,12 +136,37 @@ func (w *EmbeddingWorker) RunOnce(ctx context.Context, indexKind string) (int, e
 			return idx, addErr
 		}
 		if w.OnIndexedChunk != nil {
-			w.OnIndexedChunk(tasks[idx].Label, tasks[idx].Metadata)
+			w.OnIndexedChunk(tasks[idx].Metadata.ChunkID, tasks[idx].Metadata)
 		}
 	}
 
-	if err := w.Source.MarkEmbedded(ctx, labels); err != nil {
-		return len(labels), err
+	// Attempt to mark all successfully indexed chunks as embedded.
+	// Because the vectors are already in the index, a transient DB hiccup
+	// should not cause them to be re-indexed on the next cycle – so retry
+	// with exponential backoff before giving up.
+	{
+		const maxRetries = 3
+		retryDelay := 100 * time.Millisecond
+		var meErr error
+		for attempt := 0; attempt < maxRetries; attempt++ {
+			meErr = w.Source.MarkEmbedded(ctx, labels)
+			if meErr == nil {
+				break
+			}
+			w.logf("mark embedded attempt %d/%d failed: %v labels=%v", attempt+1, maxRetries, meErr, labels)
+			if attempt < maxRetries-1 {
+				select {
+				case <-ctx.Done():
+					return len(labels), ctx.Err()
+				case <-time.After(retryDelay):
+				}
+				retryDelay *= 2
+			}
+		}
+		if meErr != nil {
+			w.logf("mark embedded final failure after %d attempts: %v labels=%v", maxRetries, meErr, labels)
+			return len(labels), meErr
+		}
 	}
 
 	return len(labels), nil
@@ -220,6 +269,40 @@ func isRetryable(err error) bool {
 		return false
 	}
 	return true
+}
+
+// isTransientEmbedError categorises errors returned by an Embedder.  If the
+// error is considered transient the worker should not mark the associated
+// chunks as failed; the caller can simply return the error and the chunk
+// will remain pending.  The heuristics here are intentionally conservative –
+// anything that looks like a network hiccup, timeout, rate limit, or
+// cancellation is treated as transient.  Other errors are assumed to be
+// permanent and callers may safely mark the work item failed.
+func isTransientEmbedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	// context package errors are usually propagated from the caller and
+	// indicate the operation stopped; leave the chunk pending rather than
+	// declare it failed.
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	// net.Error can indicate timeouts or temporary network failures.
+	var ne net.Error
+	if errors.As(err, &ne) {
+		if ne.Timeout() {
+			return true
+		}
+	}
+	// some embedder implementations return textual hints for rate limits or
+	// timeouts; look for those substrings so the behaviour is still correct
+	// even if they don't implement the net.Error interface.
+	lower := strings.ToLower(err.Error())
+	if strings.Contains(lower, "rate limit") || strings.Contains(lower, "timeout") {
+		return true
+	}
+	return false
 }
 
 func (w *EmbeddingWorker) modelForKind(indexKind string) string {

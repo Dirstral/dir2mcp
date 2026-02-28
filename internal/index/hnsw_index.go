@@ -126,8 +126,13 @@ func (i *HNSWIndex) Search(vector []float32, k int) ([]uint64, []float32, error)
 		})
 	}
 
+	// eps is the tolerance used when comparing two float32 similarity
+	// scores.  Values that differ by less than eps are treated as equal and
+	// the tie is broken by label to guarantee a stable, deterministic order.
+	const eps = 1e-6
 	sort.Slice(scoredItems, func(a, b int) bool {
-		if scoredItems[a].score == scoredItems[b].score {
+		diff := math.Abs(float64(scoredItems[a].score) - float64(scoredItems[b].score))
+		if diff <= eps {
 			return scoredItems[a].label < scoredItems[b].label
 		}
 		return scoredItems[a].score > scoredItems[b].score
@@ -171,10 +176,25 @@ func (i *HNSWIndex) Save(path string) error {
 		return err
 	}
 
+	// take a snapshot of vectors while holding the read lock. doing this
+	// prevents Add/other writers from blocking on our long-running gob
+	// encoding and file operations. the snapshot is a deep copy of the map
+	// and each slice so that we don't race with callers who might mutate
+	// the original slices after we release the lock.
+	var snapshot map[uint64][]float32
 	i.mu.RLock()
-	defer i.mu.RUnlock()
+	snapshot = make(map[uint64][]float32, len(i.vectors))
+	for k, v := range i.vectors {
+		copied := make([]float32, len(v))
+		copy(copied, v)
+		snapshot[k] = copied
+	}
+	i.mu.RUnlock()
+
+	// perform encoding and all file I/O on the snapshot without holding
+	// any locks. preserve existing cleanup semantics.
 	enc := gob.NewEncoder(file)
-	err = enc.Encode(i.vectors)
+	err = enc.Encode(snapshot)
 	if err != nil {
 		closeErr := file.Close()
 		_ = os.Remove(tmpPath)

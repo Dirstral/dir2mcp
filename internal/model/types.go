@@ -1,5 +1,7 @@
 package model
 
+import "fmt"
+
 type Document struct {
 	DocID       int64
 	RelPath     string
@@ -89,11 +91,51 @@ func (m ChunkMetadata) ToSearchHit() SearchHit {
 // package convention of using signed int64 identifiers. Metadata is a small
 // subset of SearchHit information that is relevant when processing the task
 // (the score field is omitted since it isn’t applicable).
+//
+// Historically the identifier lived only in the Label field; adding
+// ChunkMetadata caused duplication and opened the door for the two values to
+// diverge. Label is retained for API compatibility with the embedding
+// pipeline (EmbeddingWorker, stores etc.) but callers should prefer
+// Metadata.ChunkID when they only need an ID. The helper constructors and
+// validation method below ensure the two fields remain in sync.
+
+// ChunkTask is intentionally a struct so that callers outside the package may
+// construct values in tests or mocks but NewChunkTask should be used by
+// production code whenever possible.
 type ChunkTask struct {
 	Label     int64
 	Text      string
 	IndexKind string
 	Metadata  ChunkMetadata
+}
+
+// NewChunkTask returns a task with the supplied components. If the provided
+// metadata already contains a ChunkID it must match the explicit label;
+// otherwise the metadata ID is populated. The function panics if the two
+// values conflict, which is suitable for use by store code and tests where
+// a mismatch indicates a programmer error. Callers that prefer an error
+// return can instead construct a value and call Validate.
+func NewChunkTask(label int64, text, indexKind string, meta ChunkMetadata) ChunkTask {
+	if meta.ChunkID == 0 {
+		meta.ChunkID = label
+	} else if label != meta.ChunkID {
+		panic(fmt.Sprintf("NewChunkTask: label %d != metadata.ChunkID %d", label, meta.ChunkID))
+	}
+	return ChunkTask{
+		Label:     label,
+		Text:      text,
+		IndexKind: indexKind,
+		Metadata:  meta,
+	}
+}
+
+// Validate checks that Label and Metadata.ChunkID agree. It returns an error
+// if they differ and nil otherwise.
+func (t ChunkTask) Validate() error {
+	if t.Label != t.Metadata.ChunkID {
+		return fmt.Errorf("label %d does not match metadata.chunkID %d", t.Label, t.Metadata.ChunkID)
+	}
+	return nil
 }
 
 type Citation struct {

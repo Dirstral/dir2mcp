@@ -74,8 +74,8 @@ func (e *fakeEmbedder) Embed(_ context.Context, _ string, _ []string) ([][]float
 func TestEmbeddingWorker_RunOnce_Success(t *testing.T) {
 	source := &fakeChunkSource{
 		tasks: []model.ChunkTask{
-			{Label: 11, Text: "alpha", Metadata: model.ChunkMetadata{ChunkID: 11, RelPath: "a.txt", DocType: "text"}},
-			{Label: 22, Text: "beta", Metadata: model.ChunkMetadata{ChunkID: 22, RelPath: "b.go", DocType: "code"}},
+			model.NewChunkTask(11, "alpha", "", model.ChunkMetadata{ChunkID: 11, RelPath: "a.txt", DocType: "text"}),
+			model.NewChunkTask(22, "beta", "", model.ChunkMetadata{ChunkID: 22, RelPath: "b.go", DocType: "code"}),
 		},
 	}
 
@@ -117,7 +117,7 @@ func TestEmbeddingWorker_RunOnce_Success(t *testing.T) {
 func TestEmbeddingWorker_RunOnce_EmbeddingFailure(t *testing.T) {
 	source := &fakeChunkSource{
 		tasks: []model.ChunkTask{
-			{Label: 99, Text: "fail"},
+			model.NewChunkTask(99, "fail", "", model.ChunkMetadata{}),
 		},
 	}
 
@@ -152,61 +152,72 @@ func (p *panicEmbedder) Embed(_ context.Context, _ string, _ []string) ([][]floa
 }
 
 func TestEmbeddingWorker_RunOnce_NegativeLabel(t *testing.T) {
-	// single negative label
-	source := &fakeChunkSource{
-		tasks: []model.ChunkTask{{Label: -5, Text: "oops"}},
-	}
+	t.Run("single-negative", func(t *testing.T) {
+		// single negative label
+		source := &fakeChunkSource{
+			tasks: []model.ChunkTask{model.NewChunkTask(-5, "oops", "", model.ChunkMetadata{})},
+		}
 
-	worker := &EmbeddingWorker{
-		Source:    source,
-		Index:     NewHNSWIndex(""),
-		Embedder:  &panicEmbedder{},
-		BatchSize: 1,
-	}
+		worker := &EmbeddingWorker{
+			Source:    source,
+			Index:     NewHNSWIndex(""),
+			Embedder:  &panicEmbedder{},
+			BatchSize: 1,
+		}
 
-	n, err := worker.RunOnce(context.Background(), "text")
-	if err == nil {
-		t.Fatal("expected error for negative label")
-	}
-	if !errors.Is(err, ErrFatal) {
-		t.Fatalf("expected fatal error, got %v", err)
-	}
-	if n != 0 {
-		t.Fatalf("expected 0 tasks processed, got %d", n)
-	}
-	if len(source.failedLabels) != 1 || source.failedLabels[0] != -5 {
-		t.Fatalf("expected failed label -5, got %#v", source.failedLabels)
-	}
-	if source.failedReason != "negative label not supported" {
-		t.Fatalf("unexpected failure reason: %q", source.failedReason)
-	}
+		n, err := worker.RunOnce(context.Background(), "text")
+		if err == nil {
+			t.Fatal("expected error for negative label")
+		}
+		if !errors.Is(err, ErrFatal) {
+			t.Fatalf("expected fatal error, got %v", err)
+		}
+		if n != 0 {
+			t.Fatalf("expected 0 tasks processed, got %d", n)
+		}
+		// MarkFailed must NOT be called for negative labels.
+		if len(source.failedLabels) != 0 {
+			t.Fatalf("expected no MarkFailed call for negative label, got %#v", source.failedLabels)
+		}
+		if source.failedReason != "" {
+			t.Fatalf("expected no failure reason, got %q", source.failedReason)
+		}
+	})
 
-	// mix of positive then negative; embedder still must not be called and
-	// only the offending label should be marked failed.
-	source = &fakeChunkSource{
-		tasks: []model.ChunkTask{
-			{Label: 10, Text: "ok"},
-			{Label: -1, Text: "bad"},
-		},
-	}
-	worker.Source = source
+	t.Run("mixed-batch", func(t *testing.T) {
+		// mix of positive then negative; embedder still must not be called and
+		// MarkFailed must not be called with the negative ID.
+		source := &fakeChunkSource{
+			tasks: []model.ChunkTask{
+				model.NewChunkTask(10, "ok", "", model.ChunkMetadata{}),
+				model.NewChunkTask(-1, "bad", "", model.ChunkMetadata{}),
+			},
+		}
 
-	n, err = worker.RunOnce(context.Background(), "text")
-	if err == nil {
-		t.Fatal("expected error for negative label in mixed batch")
-	}
-	if !errors.Is(err, ErrFatal) {
-		t.Fatalf("expected fatal error for mixed batch, got %v", err)
-	}
-	if n != 0 {
-		t.Fatalf("expected 0 tasks processed on mixed batch, got %d", n)
-	}
-	if len(source.failedLabels) != 1 || source.failedLabels[0] != -1 {
-		t.Fatalf("expected only bad label to be marked failed, got %#v", source.failedLabels)
-	}
-	if source.failedReason != "negative label not supported" {
-		t.Fatalf("unexpected failure reason on mixed batch: %q", source.failedReason)
-	}
+		worker := &EmbeddingWorker{
+			Source:    source,
+			Index:     NewHNSWIndex(""),
+			Embedder:  &panicEmbedder{},
+			BatchSize: 1,
+		}
+
+		n, err := worker.RunOnce(context.Background(), "text")
+		if err == nil {
+			t.Fatal("expected error for negative label in mixed batch")
+		}
+		if !errors.Is(err, ErrFatal) {
+			t.Fatalf("expected fatal error for mixed batch, got %v", err)
+		}
+		if n != 0 {
+			t.Fatalf("expected 0 tasks processed on mixed batch, got %d", n)
+		}
+		if len(source.failedLabels) != 0 {
+			t.Fatalf("expected no MarkFailed call for negative label in mixed batch, got %#v", source.failedLabels)
+		}
+		if source.failedReason != "" {
+			t.Fatalf("expected no failure reason on mixed batch, got %q", source.failedReason)
+		}
+	})
 }
 
 func TestEmbeddingWorker_Run_RetryableErrors(t *testing.T) {
@@ -229,7 +240,7 @@ func TestEmbeddingWorker_Run_RetryableErrors(t *testing.T) {
 
 func TestEmbeddingWorker_RunOnce_MarkFailedLogging(t *testing.T) {
 	source := &fakeChunkSource{
-		tasks:         []model.ChunkTask{{Label: 123, Text: "err"}},
+		tasks:         []model.ChunkTask{model.NewChunkTask(123, "err", "", model.ChunkMetadata{})},
 		markFailedErr: errors.New("db down"),
 	}
 
