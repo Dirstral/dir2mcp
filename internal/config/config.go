@@ -120,7 +120,7 @@ func applyEnvOverrides(cfg *Config, overrideEnv map[string]string) {
 		cfg.ElevenLabsBaseURL = baseURL
 	}
 	if voiceID, ok := envLookup("ELEVENLABS_VOICE_ID", overrideEnv); ok && strings.TrimSpace(voiceID) != "" {
-		cfg.ElevenLabsTTSVoiceID = voiceID
+		cfg.ElevenLabsTTSVoiceID = strings.TrimSpace(voiceID)
 	}
 	if allowedOrigins, ok := envLookup("DIR2MCP_ALLOWED_ORIGINS", overrideEnv); ok {
 		cfg.AllowedOrigins = MergeAllowedOrigins(cfg.AllowedOrigins, allowedOrigins)
