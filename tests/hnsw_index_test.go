@@ -1,4 +1,4 @@
-package index
+package tests
 
 import (
 	"bytes"
@@ -7,10 +7,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"dir2mcp/internal/index"
 )
 
 func TestHNSWIndex_AddAndSearch(t *testing.T) {
-	idx := NewHNSWIndex("")
+	idx := index.NewHNSWIndex("")
 	if err := idx.Add(1, []float32{1, 0}); err != nil {
 		t.Fatalf("Add failed: %v", err)
 	}
@@ -46,11 +48,11 @@ func TestHNSWIndex_AddAndSearch(t *testing.T) {
 }
 
 func TestHNSWIndex_DimensionMismatch(t *testing.T) {
-	idx := NewHNSWIndex("")
+	idx := index.NewHNSWIndex("")
 	// capture logs and provide metrics
 	var buf bytes.Buffer
 	idx.Logger = log.New(&buf, "", 0)
-	idx.Metrics = &HNSWIndexMetrics{}
+	idx.Metrics = &index.HNSWIndexMetrics{}
 
 	if err := idx.Add(1, []float32{1, 0}); err != nil {
 		t.Fatalf("Add failed: %v", err)
@@ -80,7 +82,7 @@ func TestHNSWIndex_SaveAndLoad(t *testing.T) {
 	tmp := t.TempDir()
 	file := filepath.Join(tmp, "idx.bin")
 
-	idx := NewHNSWIndex(file)
+	idx := index.NewHNSWIndex(file)
 	if err := idx.Add(7, []float32{0.1, 0.2, 0.3}); err != nil {
 		t.Fatalf("Add failed: %v", err)
 	}
@@ -91,7 +93,7 @@ func TestHNSWIndex_SaveAndLoad(t *testing.T) {
 		t.Fatalf("expected saved file: %v", err)
 	}
 
-	loaded := NewHNSWIndex(file)
+	loaded := index.NewHNSWIndex(file)
 	if err := loaded.Load(""); err != nil {
 		t.Fatalf("Load failed: %v", err)
 	}
@@ -105,7 +107,7 @@ func TestHNSWIndex_SaveAndLoad(t *testing.T) {
 }
 
 func TestHNSWIndex_SearchEmptyIndex(t *testing.T) {
-	idx := NewHNSWIndex("")
+	idx := index.NewHNSWIndex("")
 	// should not panic and should return empty slices
 	labels, scores, err := idx.Search([]float32{1, 0}, 1)
 	if err != nil {
@@ -117,7 +119,7 @@ func TestHNSWIndex_SearchEmptyIndex(t *testing.T) {
 }
 
 func TestHNSWIndex_KGreaterThanItems(t *testing.T) {
-	idx := NewHNSWIndex("")
+	idx := index.NewHNSWIndex("")
 	if err := idx.Add(10, []float32{1, 0}); err != nil {
 		t.Fatalf("Add failed: %v", err)
 	}
@@ -135,7 +137,7 @@ func TestHNSWIndex_KGreaterThanItems(t *testing.T) {
 }
 
 func TestHNSWIndex_AddDuplicateLabels(t *testing.T) {
-	idx := NewHNSWIndex("")
+	idx := index.NewHNSWIndex("")
 	// add the same label twice with different vectors; second add should
 	// overwrite the first
 	if err := idx.Add(1, []float32{1, 0}); err != nil {
@@ -163,7 +165,7 @@ func TestHNSWIndex_AddDuplicateLabels(t *testing.T) {
 }
 
 func TestHNSWIndex_LoadNonExistentFile(t *testing.T) {
-	idx := NewHNSWIndex("/nonexistent")
+	idx := index.NewHNSWIndex("/nonexistent")
 	err := idx.Load("")
 	if err != nil {
 		t.Fatalf("expected nil for nonexistent file, got %v", err)

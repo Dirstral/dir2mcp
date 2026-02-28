@@ -17,14 +17,15 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/Dirstral/dir2mcp/internal/config"
-	"github.com/Dirstral/dir2mcp/internal/index"
-	"github.com/Dirstral/dir2mcp/internal/ingest"
-	"github.com/Dirstral/dir2mcp/internal/mcp"
-	"github.com/Dirstral/dir2mcp/internal/mistral"
-	"github.com/Dirstral/dir2mcp/internal/model"
-	"github.com/Dirstral/dir2mcp/internal/retrieval"
-	"github.com/Dirstral/dir2mcp/internal/store"
+	"dir2mcp/internal/appstate"
+	"dir2mcp/internal/config"
+	"dir2mcp/internal/index"
+	"dir2mcp/internal/ingest"
+	"dir2mcp/internal/mcp"
+	"dir2mcp/internal/mistral"
+	"dir2mcp/internal/model"
+	"dir2mcp/internal/retrieval"
+	"dir2mcp/internal/store"
 )
 
 const (
@@ -57,6 +58,10 @@ type App struct {
 	stderr io.Writer
 
 	newIngestor func(config.Config, model.Store) model.Ingestor
+}
+
+type indexingStateAware interface {
+	SetIndexingState(state *appstate.IndexingState)
 }
 
 type RuntimeHooks struct {
@@ -273,8 +278,12 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	client := mistral.NewClient(cfg.MistralBaseURL, cfg.MistralAPIKey)
 	ret := retrieval.NewService(st, ix, client, client)
 	ret.SetRootDir(cfg.RootDir)
-	mcpServer := mcp.NewServer(cfg, ret)
+	indexingState := appstate.NewIndexingState(appstate.ModeIncremental)
+	mcpServer := mcp.NewServer(cfg, ret, mcp.WithStore(st), mcp.WithIndexingState(indexingState))
 	ing := a.newIngestor(cfg, st)
+	if stateAware, ok := ing.(indexingStateAware); ok {
+		stateAware.SetIndexingState(indexingState)
+	}
 
 	emitter := newNDJSONEmitter(a.stdout, opts.jsonOutput)
 	emitter.Emit("info", "index_loaded", map[string]interface{}{
@@ -331,10 +340,14 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 
 	ingestErrCh := make(chan error, 1)
 	if opts.readOnly {
+		indexingState.SetRunning(false)
 		close(ingestErrCh)
 	} else {
 		go func() {
 			defer close(ingestErrCh)
+			indexingState.SetMode(appstate.ModeIncremental)
+			indexingState.SetRunning(true)
+			defer indexingState.SetRunning(false)
 			runErr := ing.Run(runCtx)
 			if errors.Is(runErr, model.ErrNotImplemented) {
 				ingestErrCh <- nil

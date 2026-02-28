@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -18,8 +17,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Dirstral/dir2mcp/internal/config"
-	"github.com/Dirstral/dir2mcp/internal/model"
+	"dir2mcp/internal/appstate"
+	"dir2mcp/internal/config"
+	"dir2mcp/internal/model"
 )
 
 const (
@@ -30,15 +30,17 @@ const (
 	sessionCleanupInterval = time.Hour
 )
 
-// DefaultSearchK is the default number of hits to request when a search
-// query omits the `k` parameter or supplies a non‑positive value. This
-// mirrors the JSON schema in SPEC.md which specifies a default of 10.
+// DefaultSearchK is used when tools/call search arguments omit k or provide
+// a non-positive value.
 const DefaultSearchK = 10
 
 type Server struct {
 	cfg       config.Config
 	authToken string
 	retriever model.Retriever
+	store     model.Store
+	indexing  *appstate.IndexingState
+	tools     map[string]toolDefinition
 
 	sessionMu sync.RWMutex
 	sessions  map[string]time.Time
@@ -74,41 +76,41 @@ type validationError struct {
 	canonicalCode string
 }
 
-type toolsCallParams struct {
-	Name      string          `json:"name"`
-	Arguments json.RawMessage `json:"arguments"`
-}
-
-type searchArgs struct {
-	Query      string   `json:"query"`
-	K          int      `json:"k"`
-	Index      string   `json:"index"`
-	PathPrefix string   `json:"path_prefix"`
-	FileGlob   string   `json:"file_glob"`
-	DocTypes   []string `json:"doc_types"`
-}
-
-type openFileArgs struct {
-	RelPath   string `json:"rel_path"`
-	StartLine int    `json:"start_line"`
-	EndLine   int    `json:"end_line"`
-	Page      int    `json:"page"`
-	StartMS   int    `json:"start_ms"`
-	EndMS     int    `json:"end_ms"`
-	MaxChars  int    `json:"max_chars"`
-}
-
 func (e validationError) Error() string {
 	return e.message
 }
 
-func NewServer(cfg config.Config, retriever model.Retriever) *Server {
-	return &Server{
+type ServerOption func(*Server)
+
+func WithStore(store model.Store) ServerOption {
+	return func(s *Server) {
+		s.store = store
+	}
+}
+
+func WithIndexingState(state *appstate.IndexingState) ServerOption {
+	return func(s *Server) {
+		s.indexing = state
+	}
+}
+
+func NewServer(cfg config.Config, retriever model.Retriever, opts ...ServerOption) *Server {
+	s := &Server{
 		cfg:       cfg,
 		authToken: loadAuthToken(cfg),
 		retriever: retriever,
 		sessions:  make(map[string]time.Time),
 	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(s)
+		}
+	}
+	if s.indexing == nil {
+		s.indexing = appstate.NewIndexingState(appstate.ModeIncremental)
+	}
+	s.tools = s.buildToolRegistry()
+	return s
 }
 
 func (s *Server) Handler() http.Handler {
@@ -229,9 +231,17 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 		}
 		writeResult(w, http.StatusOK, id, map[string]interface{}{})
 	case "tools/list":
-		s.handleToolsList(w, id, hasID)
+		if !hasID {
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+		s.handleToolsList(w, id)
 	case "tools/call":
-		s.handleToolsCall(r.Context(), w, id, hasID, req.Params)
+		if !hasID {
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+		s.handleToolsCall(r.Context(), w, req.Params, id)
 	default:
 		if !hasID {
 			w.WriteHeader(http.StatusAccepted)
@@ -269,217 +279,6 @@ func (s *Server) handleInitialize(w http.ResponseWriter, id interface{}, hasID b
 		},
 		"instructions": "Use tools/list then tools/call. Results include citations.",
 	})
-}
-
-func (s *Server) handleToolsList(w http.ResponseWriter, id interface{}, hasID bool) {
-	if !hasID {
-		w.WriteHeader(http.StatusAccepted)
-		return
-	}
-
-	searchTool := map[string]interface{}{
-		"name":        "dir2mcp.search",
-		"description": "Semantic retrieval across indexed content.",
-		"inputSchema": map[string]interface{}{
-			"type": "object",
-			"properties": map[string]interface{}{
-				"query":       map[string]interface{}{"type": "string"},
-				"k":           map[string]interface{}{"type": "integer", "default": 10},
-				"index":       map[string]interface{}{"type": "string", "enum": []string{"auto", "text", "code", "both"}},
-				"path_prefix": map[string]interface{}{"type": "string"},
-				"file_glob":   map[string]interface{}{"type": "string"},
-				"doc_types": map[string]interface{}{
-					"type":  "array",
-					"items": map[string]interface{}{"type": "string"},
-				},
-			},
-			"required": []string{"query"},
-		},
-	}
-	openFileTool := map[string]interface{}{
-		"name":        "dir2mcp.open_file",
-		"description": "Open an exact source slice for verification (lines/page/time).",
-		"inputSchema": map[string]interface{}{
-			"type": "object",
-			"properties": map[string]interface{}{
-				"rel_path":   map[string]interface{}{"type": "string"},
-				"start_line": map[string]interface{}{"type": "integer", "minimum": 1},
-				"end_line":   map[string]interface{}{"type": "integer", "minimum": 1},
-				"page":       map[string]interface{}{"type": "integer", "minimum": 1},
-				"start_ms":   map[string]interface{}{"type": "integer", "minimum": 0},
-				"end_ms":     map[string]interface{}{"type": "integer", "minimum": 0},
-				"max_chars":  map[string]interface{}{"type": "integer", "minimum": 200, "maximum": 50000, "default": 20000},
-			},
-			"required": []string{"rel_path"},
-		},
-	}
-
-	writeResult(w, http.StatusOK, id, map[string]interface{}{
-		"tools": []interface{}{searchTool, openFileTool},
-	})
-}
-
-func (s *Server) handleToolsCall(ctx context.Context, w http.ResponseWriter, id interface{}, hasID bool, raw json.RawMessage) {
-	if !hasID {
-		w.WriteHeader(http.StatusAccepted)
-		return
-	}
-	if s.retriever == nil {
-		writeError(w, http.StatusOK, id, -32000, "retriever not configured", "INDEX_NOT_READY", false)
-		return
-	}
-
-	if len(raw) == 0 {
-		writeError(w, http.StatusBadRequest, id, -32602, "params is required", "MISSING_FIELD", false)
-		return
-	}
-	var params toolsCallParams
-	if err := json.Unmarshal(raw, &params); err != nil {
-		writeError(w, http.StatusBadRequest, id, -32602, "invalid params", "INVALID_FIELD", false)
-		return
-	}
-
-	switch params.Name {
-	case "dir2mcp.search":
-		var args searchArgs
-		if len(params.Arguments) > 0 {
-			if err := json.Unmarshal(params.Arguments, &args); err != nil {
-				writeError(w, http.StatusBadRequest, id, -32602, "invalid tool arguments", "INVALID_FIELD", false)
-				return
-			}
-		}
-		if strings.TrimSpace(args.Query) == "" {
-			writeError(w, http.StatusBadRequest, id, -32602, "query is required", "MISSING_FIELD", false)
-			return
-		}
-
-		// k is optional.  If the client does not provide a value (or provides a
-		// non‑positive one) we fall back to a sensible default rather than return
-		// an error.  This matches the `default` keyword in the JSON schema
-		// defined in SPEC.md.
-		if args.K <= 0 {
-			args.K = DefaultSearchK
-		}
-
-		hits, err := s.retriever.Search(ctx, model.SearchQuery{
-			Query:      args.Query,
-			K:          args.K,
-			Index:      args.Index,
-			PathPrefix: args.PathPrefix,
-			FileGlob:   args.FileGlob,
-			DocTypes:   args.DocTypes,
-		})
-		if err != nil {
-			log.Printf("tools/call search failed: id=%v tool=%s err=%v", id, params.Name, err)
-			// choose a canonical code/message based on the error.  At present the
-			// retriever may return an error when the index is not yet available or
-			// configured; in that case we want the caller to see INDEX_NOT_READY
-			// and a matching message.  Otherwise fall back to a generic internal
-			// error code as defined in SPEC.md.
-			canon := "INTERNAL_ERROR"
-			msg := "internal server error"
-			if errors.Is(err, model.ErrIndexNotReady) || errors.Is(err, model.ErrIndexNotConfigured) {
-				canon = "INDEX_NOT_READY"
-				msg = "index not ready"
-			}
-			writeError(w, http.StatusOK, id, -32000, msg, canon, true)
-			return
-		}
-
-		writeResult(w, http.StatusOK, id, map[string]interface{}{
-			"content": []interface{}{
-				map[string]interface{}{
-					"type": "text",
-					"text": "Found results.",
-				},
-			},
-			"structuredContent": map[string]interface{}{
-				"query":             args.Query,
-				"k":                 args.K,
-				"hits":              hits,
-				"indexing_complete": false,
-			},
-		})
-	case "dir2mcp.open_file":
-		var args openFileArgs
-		if len(params.Arguments) > 0 {
-			if err := json.Unmarshal(params.Arguments, &args); err != nil {
-				writeError(w, http.StatusBadRequest, id, -32602, "invalid tool arguments", "INVALID_FIELD", false)
-				return
-			}
-		}
-		if strings.TrimSpace(args.RelPath) == "" {
-			writeError(w, http.StatusBadRequest, id, -32602, "rel_path is required", "MISSING_FIELD", false)
-			return
-		}
-		if args.MaxChars <= 0 {
-			args.MaxChars = 20000
-		}
-		span := model.Span{}
-		if args.Page > 0 {
-			span = model.Span{Kind: "page", Page: args.Page}
-		} else if args.StartMS > 0 || args.EndMS > 0 {
-			span = model.Span{Kind: "time", StartMS: args.StartMS, EndMS: args.EndMS}
-		} else if args.StartLine > 0 || args.EndLine > 0 {
-			span = model.Span{Kind: "lines", StartLine: args.StartLine, EndLine: args.EndLine}
-		}
-
-		content, err := s.retriever.OpenFile(ctx, args.RelPath, span, args.MaxChars)
-		if err != nil {
-			log.Printf("tools/call open_file failed: id=%v tool=%s err=%v", id, params.Name, err)
-			switch {
-			case errors.Is(err, model.ErrForbidden):
-				writeError(w, http.StatusOK, id, -32000, "forbidden", "FORBIDDEN", false)
-			case errors.Is(err, model.ErrPathOutsideRoot):
-				writeError(w, http.StatusOK, id, -32000, "path outside root", "PATH_OUTSIDE_ROOT", false)
-			case errors.Is(err, model.ErrDocTypeUnsupported):
-				writeError(w, http.StatusOK, id, -32000, "doc type unsupported", "DOC_TYPE_UNSUPPORTED", false)
-			case errors.Is(err, os.ErrNotExist):
-				writeError(w, http.StatusOK, id, -32000, "file not found", "NOT_FOUND", false)
-			default:
-				writeError(w, http.StatusOK, id, -32000, "internal server error", "INTERNAL_ERROR", true)
-			}
-			return
-		}
-
-		writeResult(w, http.StatusOK, id, map[string]interface{}{
-			"content": []interface{}{
-				map[string]interface{}{
-					"type": "text",
-					"text": content,
-				},
-			},
-			"structuredContent": map[string]interface{}{
-				"rel_path":  args.RelPath,
-				"doc_type":  inferDocType(args.RelPath),
-				"span":      span,
-				"content":   content,
-				"truncated": len([]rune(content)) >= args.MaxChars,
-			},
-		})
-	default:
-		writeError(w, http.StatusBadRequest, id, -32602, "unknown tool", "INVALID_FIELD", false)
-	}
-}
-
-func inferDocType(relPath string) string {
-	ext := strings.ToLower(filepath.Ext(strings.TrimSpace(relPath)))
-	switch ext {
-	case ".go", ".js", ".ts", ".py", ".java", ".rb", ".cpp", ".c", ".cs":
-		return "code"
-	case ".md":
-		return "md"
-	case ".txt", ".rst":
-		return "text"
-	case ".pdf":
-		return "pdf"
-	case ".mp3", ".wav", ".m4a", ".flac":
-		return "audio"
-	case ".png", ".jpg", ".jpeg", ".gif", ".webp":
-		return "image"
-	default:
-		return "unknown"
-	}
 }
 
 func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
@@ -673,11 +472,6 @@ func loadAuthToken(cfg config.Config) string {
 	path := filepath.Join(cfg.StateDir, "secret.token")
 	content, err := os.ReadFile(path)
 	if err != nil {
-		// Log a warning so operators can diagnose missing tokens.  The
-		// caller will still receive an empty string, which means no auth
-		// token will be presented and certain AuthMode operations may be
-		// blocked.
-		log.Printf("warning: could not load auth token from %s: %v", path, err)
 		return ""
 	}
 	return strings.TrimSpace(string(content))
@@ -716,10 +510,7 @@ func isOriginAllowed(origin string, allowlist []string) bool {
 			}
 
 			normalizedAllowed := parsedAllowed.Scheme + "://" + strings.ToLower(parsedAllowed.Host)
-			// both normalizedAllowed and normalizedOrigin have lowercase hosts and
-			// scheme compared earlier using EqualFold, so a simple equality check
-			// suffices here.
-			if normalizedAllowed == normalizedOrigin {
+			if strings.EqualFold(normalizedAllowed, normalizedOrigin) {
 				return true
 			}
 			continue

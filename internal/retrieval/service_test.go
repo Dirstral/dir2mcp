@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/Dirstral/dir2mcp/internal/index"
-	"github.com/Dirstral/dir2mcp/internal/model"
+	"dir2mcp/internal/index"
+	"dir2mcp/internal/model"
 )
 
 type fakeEmbedder struct {

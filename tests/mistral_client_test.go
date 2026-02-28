@@ -1,4 +1,4 @@
-package mistral
+package tests
 
 import (
 	"context"
@@ -10,7 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Dirstral/dir2mcp/internal/model"
+	"dir2mcp/internal/mistral"
+	"dir2mcp/internal/model"
 )
 
 type embedTestRequest struct {
@@ -57,7 +58,7 @@ func TestEmbed_BatchesRequestsAndPreservesOrder(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL, "test-key")
+	client := mistral.NewClient(server.URL, "test-key")
 	client.BatchSize = 2
 	client.MaxRetries = 1
 	client.InitialBackoff = 1 * time.Millisecond
@@ -97,7 +98,7 @@ func TestEmbed_RetriesOnRateLimitThenSucceeds(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL, "test-key")
+	client := mistral.NewClient(server.URL, "test-key")
 	client.BatchSize = 8
 	client.MaxRetries = 2
 	client.InitialBackoff = 1 * time.Millisecond
@@ -132,7 +133,7 @@ func TestEmbed_RetriesOnServerErrorThenSucceeds(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL, "test-key")
+	client := mistral.NewClient(server.URL, "test-key")
 	client.MaxRetries = 2
 	client.InitialBackoff = 1 * time.Millisecond
 	client.MaxBackoff = 1 * time.Millisecond
@@ -156,7 +157,7 @@ func TestEmbed_MapsAuthErrors(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL, "bad-key")
+	client := mistral.NewClient(server.URL, "bad-key")
 	client.MaxRetries = 0
 
 	_, err := client.Embed(context.Background(), "mistral-embed", []string{"x"})
