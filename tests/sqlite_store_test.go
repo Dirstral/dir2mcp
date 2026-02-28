@@ -1,4 +1,4 @@
-package store
+package tests
 
 import (
 	"context"
@@ -9,11 +9,12 @@ import (
 	"time"
 
 	"github.com/Dirstral/dir2mcp/internal/model"
+	"github.com/Dirstral/dir2mcp/internal/store"
 )
 
 func TestSQLiteStoreInitBootstrapsSchemaAndSettings(t *testing.T) {
 	ctx := context.Background()
-	st := NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("Init failed: %v", err)
 	}
@@ -46,7 +47,7 @@ func TestSQLiteStoreInitBootstrapsSchemaAndSettings(t *testing.T) {
 
 func TestSQLiteStoreDocumentCRUDAndListFilters(t *testing.T) {
 	ctx := context.Background()
-	st := NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("Init failed: %v", err)
 	}
@@ -137,7 +138,7 @@ func TestSQLiteStoreDocumentCRUDAndListFilters(t *testing.T) {
 
 func TestSQLiteStoreRepresentationChunkSpanAndDeleteCascade(t *testing.T) {
 	ctx := context.Background()
-	st := NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("Init failed: %v", err)
 	}
@@ -226,7 +227,7 @@ func TestSQLiteStoreConcurrentReadWriteWithWAL(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	st := NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("Init failed: %v", err)
 	}
