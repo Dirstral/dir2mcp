@@ -143,6 +143,72 @@ func TestEmbeddingWorker_RunOnce_EmbeddingFailure(t *testing.T) {
 	}
 }
 
+// panicEmbedder is used to ensure that Embed is never called when a
+// negative label is detected before embedding begins.
+type panicEmbedder struct{}
+
+func (p *panicEmbedder) Embed(_ context.Context, _ string, _ []string) ([][]float32, error) {
+	panic("embedder should not be invoked for negative-label batches")
+}
+
+func TestEmbeddingWorker_RunOnce_NegativeLabel(t *testing.T) {
+	// single negative label
+	source := &fakeChunkSource{
+		tasks: []model.ChunkTask{{Label: -5, Text: "oops"}},
+	}
+
+	worker := &EmbeddingWorker{
+		Source:    source,
+		Index:     NewHNSWIndex(""),
+		Embedder:  &panicEmbedder{},
+		BatchSize: 1,
+	}
+
+	n, err := worker.RunOnce(context.Background(), "text")
+	if err == nil {
+		t.Fatal("expected error for negative label")
+	}
+	if !errors.Is(err, ErrFatal) {
+		t.Fatalf("expected fatal error, got %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("expected 0 tasks processed, got %d", n)
+	}
+	if len(source.failedLabels) != 1 || source.failedLabels[0] != -5 {
+		t.Fatalf("expected failed label -5, got %#v", source.failedLabels)
+	}
+	if source.failedReason != "negative label not supported" {
+		t.Fatalf("unexpected failure reason: %q", source.failedReason)
+	}
+
+	// mix of positive then negative; embedder still must not be called and
+	// only the offending label should be marked failed.
+	source = &fakeChunkSource{
+		tasks: []model.ChunkTask{
+			{Label: 10, Text: "ok"},
+			{Label: -1, Text: "bad"},
+		},
+	}
+	worker.Source = source
+
+	n, err = worker.RunOnce(context.Background(), "text")
+	if err == nil {
+		t.Fatal("expected error for negative label in mixed batch")
+	}
+	if !errors.Is(err, ErrFatal) {
+		t.Fatalf("expected fatal error for mixed batch, got %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("expected 0 tasks processed on mixed batch, got %d", n)
+	}
+	if len(source.failedLabels) != 1 || source.failedLabels[0] != -1 {
+		t.Fatalf("expected only bad label to be marked failed, got %#v", source.failedLabels)
+	}
+	if source.failedReason != "negative label not supported" {
+		t.Fatalf("unexpected failure reason on mixed batch: %q", source.failedReason)
+	}
+}
+
 func TestEmbeddingWorker_Run_RetryableErrors(t *testing.T) {
 	// first two invocations return retryable errors; Run should keep looping
 	// until the context expires and we should see at least three calls.

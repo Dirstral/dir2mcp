@@ -2,6 +2,7 @@ package retrieval
 
 import (
 	"context"
+	"math"
 	"testing"
 
 	"github.com/Dirstral/dir2mcp/internal/index"
@@ -145,6 +146,27 @@ func TestSearch_OverfetchMultiplier_DefaultAndConfigurable(t *testing.T) {
 	}
 	if fi.lastK > 100*1 {
 		t.Fatalf("multiplier upper cap not enforced (got %d)", fi.lastK)
+	}
+}
+
+// ensure we don't overflow when k * multiplier would exceed the range of
+// int.  The actual index implementation can't handle a number this large
+// anyway, so we expect the result to be clamped to math.MaxInt.
+func TestSearch_OverflowProtection(t *testing.T) {
+	fi := &fakeIndex{}
+	svc := NewService(nil, fi, &fakeEmbedder{vectorsByModel: map[string][]float32{}}, nil)
+	// set multiplier to max allowed by the setter; the service doesn't crash
+	svc.SetOverfetchMultiplier(100)
+	// choose a k that's guaranteed to overflow when multiplied by 100
+	bigK := math.MaxInt/100 + 1
+	if bigK <= 0 { // defensive in case of unexpected integer width
+		t.Skip("platform has non-positive MaxInt")
+	}
+	if _, err := svc.Search(context.Background(), model.SearchQuery{Query: "x", K: bigK}); err != nil {
+		t.Fatalf("Search error: %v", err)
+	}
+	if fi.lastK != math.MaxInt {
+		t.Fatalf("expected clamped value math.MaxInt (%d), got %d", math.MaxInt, fi.lastK)
 	}
 }
 

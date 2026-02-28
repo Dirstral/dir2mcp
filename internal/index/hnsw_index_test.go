@@ -118,10 +118,10 @@ func TestHNSWIndex_SearchEmptyIndex(t *testing.T) {
 func TestHNSWIndex_KGreaterThanItems(t *testing.T) {
 	idx := NewHNSWIndex("")
 	if err := idx.Add(10, []float32{1, 0}); err != nil {
-		t.Fatalf("add failed: %v", err)
+		t.Fatalf("Add failed: %v", err)
 	}
 	if err := idx.Add(20, []float32{0, 1}); err != nil {
-		t.Fatalf("add failed: %v", err)
+		t.Fatalf("Add failed: %v", err)
 	}
 
 	labels, scores, err := idx.Search([]float32{1, 0}, 5)

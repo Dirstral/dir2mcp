@@ -3,6 +3,7 @@ package index
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"strings"
 	"time"
@@ -68,6 +69,17 @@ func (w *EmbeddingWorker) RunOnce(ctx context.Context, indexKind string) (int, e
 	inputs := make([]string, len(tasks))
 	labels := make([]int64, len(tasks))
 	for idx, task := range tasks {
+		// validate labels early so we can fail fast before expending
+		// resources on embedding or indexing.  A negative label indicates a
+		// corrupt or otherwise unusable chunk.  We mark it failed and then
+		// return a fatal error so the Run loop does not treat it as retryable.
+		if task.Label < 0 {
+			reason := "negative label not supported"
+			if mfErr := w.Source.MarkFailed(ctx, []int64{task.Label}, reason); mfErr != nil {
+				w.logf("mark failed update error: %v (reason: %s) labels=%v", mfErr, reason, []int64{task.Label})
+			}
+			return 0, fmt.Errorf("%w: %s", ErrFatal, reason)
+		}
 		inputs[idx] = task.Text
 		labels[idx] = task.Label
 	}
@@ -88,19 +100,6 @@ func (w *EmbeddingWorker) RunOnce(ctx context.Context, indexKind string) (int, e
 	}
 
 	for idx := range tasks {
-		if tasks[idx].Label < 0 {
-			// Mark successfully indexed chunks before this failure
-			if idx > 0 {
-				if err := w.Source.MarkEmbedded(ctx, labels[:idx]); err != nil {
-					w.logf("mark embedded warning: failed to mark %d chunks as embedded before negative-label error: %v labels=%v", idx, err, labels[:idx])
-				}
-			}
-			reason := "negative label not supported"
-			if mfErr := w.Source.MarkFailed(ctx, labels[idx:idx+1], reason); mfErr != nil {
-				w.logf("mark failed update error: %v (reason: %s) labels=%v", mfErr, reason, labels[idx:idx+1])
-			}
-			return idx, errors.New(reason)
-		}
 		if addErr := w.Index.Add(uint64(tasks[idx].Label), vectors[idx]); addErr != nil {
 			if idx > 0 {
 				if err := w.Source.MarkEmbedded(ctx, labels[:idx]); err != nil {

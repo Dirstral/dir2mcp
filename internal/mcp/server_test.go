@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -207,40 +208,45 @@ func TestServer_ToolsCall_Search_NonPositiveK(t *testing.T) {
 	cfg.AuthMode = "none"
 	srv := NewServer(cfg, &fakeRetriever{hits: hits})
 	sessionID := initializeSession(t, srv)
-	// send a non-positive k (zero in this case); should also fall back to default
-	reqBody := `{"jsonrpc":"2.0","id":"req-3","method":"tools/call","params":{"name":"dir2mcp.search","arguments":{"query":"hello","k":0}}}`
-	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(reqBody))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("MCP-Session-Id", sessionID)
-	rr := httptest.NewRecorder()
 
-	srv.Handler().ServeHTTP(rr, req)
-	if rr.Code != http.StatusOK {
-		t.Fatalf("unexpected status: %d body=%s", rr.Code, rr.Body.String())
-	}
+	for _, k := range []int{0, -1} {
+		t.Run(fmt.Sprintf("k=%d", k), func(t *testing.T) {
+			// send a non-positive k; should fall back to default
+			reqBody := fmt.Sprintf(`{"jsonrpc":"2.0","id":"req-3","method":"tools/call","params":{"name":"dir2mcp.search","arguments":{"query":"hello","k":%d}}}`, k)
+			req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(reqBody))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("MCP-Session-Id", sessionID)
+			rr := httptest.NewRecorder()
 
-	var resp map[string]any
-	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("unmarshal response: %v", err)
-	}
-	if resp["error"] != nil {
-		t.Fatalf("expected no error, got %v", resp["error"])
-	}
+			srv.Handler().ServeHTTP(rr, req)
+			if rr.Code != http.StatusOK {
+				t.Fatalf("unexpected status: %d body=%s", rr.Code, rr.Body.String())
+			}
 
-	resultMap, ok := resp["result"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected result object, got: %#v", resp["result"])
-	}
-	structured, ok := resultMap["structuredContent"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected structuredContent object, got: %#v", resultMap["structuredContent"])
-	}
-	kVal, ok := structured["k"].(float64)
-	if !ok {
-		t.Fatalf("expected structuredContent.k number, got %#v", structured["k"])
-	}
-	if int(kVal) != DefaultSearchK {
-		t.Fatalf("expected default k %d, got %v", DefaultSearchK, kVal)
+			var resp map[string]any
+			if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("unmarshal response: %v", err)
+			}
+			if resp["error"] != nil {
+				t.Fatalf("expected no error, got %v", resp["error"])
+			}
+
+			resultMap, ok := resp["result"].(map[string]any)
+			if !ok {
+				t.Fatalf("expected result object, got: %#v", resp["result"])
+			}
+			structured, ok := resultMap["structuredContent"].(map[string]any)
+			if !ok {
+				t.Fatalf("expected structuredContent object, got: %#v", resultMap["structuredContent"])
+			}
+			kVal, ok := structured["k"].(float64)
+			if !ok {
+				t.Fatalf("expected structuredContent.k number, got %#v", structured["k"])
+			}
+			if int(kVal) != DefaultSearchK {
+				t.Fatalf("expected default k %d, got %v", DefaultSearchK, kVal)
+			}
+		})
 	}
 }
 

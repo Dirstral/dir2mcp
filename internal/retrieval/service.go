@@ -244,13 +244,32 @@ func (s *Service) searchSingleIndex(ctx context.Context, query string, k int, mo
 	s.metaMu.RLock()
 	overfetchMultiplier := s.overfetchMultiplier
 	s.metaMu.RUnlock()
-	n := k * overfetchMultiplier
+	// protect multiplication k * overfetchMultiplier against overflow
+	// by checking against MaxInt. If the caller supplied a huge k value we
+	// simply clamp the request size rather than allow wraparound.  An
+	// alternative would be to return an error; at present callers only ever
+	// pass reasonably small k's so clamping is acceptable.
+	var n int
+	if k > math.MaxInt/overfetchMultiplier {
+		// avoid overflow and also prevent asking the index for more
+		// neighbors than an int can represent; this keeps downstream code
+		// consistent (e.g. fakeIndex in tests) and mirrors the behavior of
+		// capping the multiplier itself via SetOverfetchMultiplier.
+		n = math.MaxInt
+	} else {
+		n = k * overfetchMultiplier
+	}
 	labels, scores, err := idx.Search(vectors[0], n)
 	if err != nil {
 		return nil, err
 	}
 
-	filtered := make([]model.SearchHit, 0, k)
+	// avoid trying to preallocate a gigantic slice when k is absurdly large
+	cap := k
+	if cap > len(labels) {
+		cap = len(labels)
+	}
+	filtered := make([]model.SearchHit, 0, cap)
 	for i, label := range labels {
 		hit := s.searchHitForLabel(indexName, label)
 		hit.Score = float64(scores[i])

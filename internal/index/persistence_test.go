@@ -194,13 +194,7 @@ func TestPersistenceManager_LoadAll_CancelDuring(t *testing.T) {
 		t.Fatal("timeout waiting for first load to start")
 	}
 	cancel()
-	// let the first load finish now that we've cancelled; but don't
-	// block indefinitely if something goes wrong.
-	select {
-	case <-time.After(time.Second):
-		t.Fatal("timeout before allowing first load to finish")
-	default:
-	}
+	// signal the first load to finish now that we've cancelled.
 	close(first.done)
 
 	// collect the result, timing out if LoadAll hung

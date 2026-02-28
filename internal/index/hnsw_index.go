@@ -78,43 +78,52 @@ func (i *HNSWIndex) Search(vector []float32, k int) ([]uint64, []float32, error)
 	}
 
 	// We only hold the read lock long enough to inspect each vector's
-	// length and, if a mismatch occurs, bump the metric.  Logging is done
-	// afterward so that any I/O or mutex inside the logger doesn't block
-	// other readers.
-	var mismatches []struct {
+	// length, bump the metric on mismatch, and copy candidates for later
+	// scoring.
+	// define local types for readability
+	type mismatch struct {
 		label    uint64
 		candLen  int
 		queryLen int
 	}
+	type candidate struct {
+		label  uint64
+		vector []float32
+	}
+	var (
+		mismatches []mismatch
+		candidates []candidate
+	)
 
 	i.mu.RLock()
-	// not using defer so we can unlock before logging
-	scoredItems := make([]scored, 0, len(i.vectors))
-	for label, candidate := range i.vectors {
-		if len(candidate) != len(vector) {
-			mismatches = append(mismatches, struct {
-				label    uint64
-				candLen  int
-				queryLen int
-			}{label, len(candidate), len(vector)})
+	// collect matching candidates while holding the lock
+	for label, cand := range i.vectors {
+		if len(cand) != len(vector) {
+			mismatches = append(mismatches, mismatch{label, len(cand), len(vector)})
 			if i.Metrics != nil {
-				// still safe to update under lock but atomic so we could also do
-				// it afterwards; keeping it here keeps the counter closer to the
-				// observation point without holding the lock too long.
+				// atomic counter; update under lock to keep close to observation
 				i.Metrics.DimensionMismatch.Add(1)
 			}
 			continue
 		}
-		scoredItems = append(scoredItems, scored{
-			label: label,
-			score: cosineSimilarity(vector, candidate),
-		})
+		copyVec := make([]float32, len(cand))
+		copy(copyVec, cand)
+		candidates = append(candidates, candidate{label, copyVec})
 	}
 	i.mu.RUnlock()
 
 	// perform logging outside the lock to avoid blocking other routines
 	for _, m := range mismatches {
 		i.logf("dimension mismatch: label=%d candidate_len=%d query_len=%d", m.label, m.candLen, m.queryLen)
+	}
+
+	// now that the lock is released, compute similarities
+	scoredItems := make([]scored, 0, len(candidates))
+	for _, c := range candidates {
+		scoredItems = append(scoredItems, scored{
+			label: c.label,
+			score: cosineSimilarity(vector, c.vector),
+		})
 	}
 
 	sort.Slice(scoredItems, func(a, b int) bool {
