@@ -362,6 +362,28 @@ func TestUpPublicAuthNoneFailsWithoutForceInsecure(t *testing.T) {
 	}
 }
 
+func TestUpPublicAuthNoneWithWhitespaceFailsWithoutForceInsecure(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("MISTRAL_API_KEY", "test-key")
+	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := cli.NewAppWithIO(&stdout, &stderr)
+
+	var code int
+	withWorkingDir(t, tmp, func() {
+		code = app.RunWithContext(context.Background(), []string{"up", "--public", "--auth", " none "})
+	})
+
+	if code != 2 {
+		t.Fatalf("unexpected exit code: got=%d want=2 stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "--public requires auth") {
+		t.Fatalf("expected public auth guardrail message, got: %s", stderr.String())
+	}
+}
+
 func TestUpPublicAuthNoneAllowedWithForceInsecure(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("MISTRAL_API_KEY", "test-key")

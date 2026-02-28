@@ -236,7 +236,8 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 			cfg.ListenAddr = net.JoinHostPort("0.0.0.0", port)
 		}
 
-		if strings.EqualFold(cfg.AuthMode, "none") && !opts.forceInsecure {
+		authMode := strings.TrimSpace(cfg.AuthMode)
+		if strings.EqualFold(authMode, "none") && !opts.forceInsecure {
 			writeln(a.stderr, "ERROR: CONFIG_INVALID: --public requires auth. Use --auth auto or --force-insecure to override (unsafe).")
 			return exitConfigInvalid
 		}
