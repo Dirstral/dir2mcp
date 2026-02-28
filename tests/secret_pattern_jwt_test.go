@@ -21,7 +21,11 @@ func readCorpus(t *testing.T, filePath string) []string {
 	if err != nil {
 		t.Fatalf("failed to open corpus %s: %v", filePath, err)
 	}
-	defer file.Close()
+	defer func() {
+		if closeErr := file.Close(); closeErr != nil {
+			t.Errorf("failed to close corpus %s: %v", filePath, closeErr)
+		}
+	}()
 
 	var lines []string
 	scanner := bufio.NewScanner(file)
@@ -116,7 +120,11 @@ func parseSecretPatternsFromSpec(t *testing.T) []string {
 	if err != nil {
 		t.Fatalf("failed to open SPEC.md: %v", err)
 	}
-	defer file.Close()
+	defer func() {
+		if closeErr := file.Close(); closeErr != nil {
+			t.Errorf("failed to close SPEC.md: %v", closeErr)
+		}
+	}()
 
 	var patterns []string
 	insideSecretPatterns := false
