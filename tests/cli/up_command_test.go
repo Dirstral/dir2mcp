@@ -286,7 +286,9 @@ func TestReindexClearsContentHashesBeforeRun(t *testing.T) {
 	})
 
 	withWorkingDir(t, tmp, func() {
-		code := app.RunWithContext(context.Background(), []string{"reindex"})
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		code := app.RunWithContext(ctx, []string{"reindex"})
 		if code != 0 {
 			t.Fatalf("unexpected exit code: %d stderr=%s", code, stderr.String())
 		}

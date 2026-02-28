@@ -161,10 +161,11 @@ func truncateQuestion(q string) string {
 		return "<empty>"
 	}
 	const max = 64
-	if len(q) <= max {
-		return q
+	r := []rune(q)
+	if len(r) <= max {
+		return string(r)
 	}
-	return q[:max] + "…"
+	return string(r[:max]) + "…"
 }
 
 func (s *Service) SetQueryEmbeddingModel(modelName string) {

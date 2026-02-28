@@ -536,8 +536,18 @@ func TestMCPToolsCallAsk_ReturnsStructuredAnswerAndCitations(t *testing.T) {
 	cfg := config.Default()
 	cfg.AuthMode = "none"
 
+	// use the shared stub instead of a duplicate fake
+	retriever := &askAudioRetrieverStub{
+		askResult: model.AskResult{
+			Answer:           "alpha answer",
+			Citations:        []model.Citation{{ChunkID: 1, RelPath: "docs/a.md", Span: model.Span{Kind: "lines", StartLine: 1, EndLine: 2}}},
+			Hits:             []model.SearchHit{{ChunkID: 1, RelPath: "docs/a.md", Snippet: "alpha"}},
+			IndexingComplete: true,
+		},
+		EchoQuestion: true, // mirror the incoming question in results
+	}
 	server := httptest.NewServer(
-		mcp.NewServer(cfg, &fakeAskRetriever{}).Handler(),
+		mcp.NewServer(cfg, retriever).Handler(),
 	)
 	defer server.Close()
 
@@ -579,34 +589,59 @@ func TestMCPToolsCallAsk_ReturnsStructuredAnswerAndCitations(t *testing.T) {
 	}
 }
 
+func TestMCPToolsCallAsk_SearchOnly(t *testing.T) {
+	cfg := config.Default()
+	cfg.AuthMode = "none"
+
+	hits := []model.SearchHit{{ChunkID: 99, RelPath: "foo/bar.go", Snippet: "snippet"}}
+	retriever := &askAudioRetrieverStub{searchHits: hits}
+	server := httptest.NewServer(mcp.NewServer(cfg, retriever).Handler())
+	defer server.Close()
+
+	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
+	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":14,"method":"tools/call","params":{"name":"dir2mcp.ask","arguments":{"question":"q?","mode":"search_only","k":5}}}`)
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		payload, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status=%d want=%d body=%s", resp.StatusCode, http.StatusOK, string(payload))
+	}
+
+	var envelope struct {
+		Result struct {
+			IsError           bool                   `json:"isError"`
+			StructuredContent map[string]interface{} `json:"structuredContent"`
+			Content           []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"result"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if envelope.Result.IsError {
+		t.Fatalf("expected search_only success, got isError=true: %#v", envelope.Result.StructuredContent)
+	}
+	if envelope.Result.StructuredContent["answer"] != "" {
+		t.Fatalf("expected empty answer, got %#v", envelope.Result.StructuredContent["answer"])
+	}
+	hitsList, ok := envelope.Result.StructuredContent["hits"].([]interface{})
+	if !ok {
+		t.Fatalf("expected hits array, got %#v", envelope.Result.StructuredContent["hits"])
+	}
+	if len(hitsList) != 1 {
+		t.Fatalf("unexpected hits length: %#v", hitsList)
+	}
+	if envelope.Result.StructuredContent["question"] != "q?" {
+		t.Fatalf("question field passed through: %#v", envelope.Result.StructuredContent["question"])
+	}
+}
+
 // failingListFilesStore is a minimal store stub that forces ListFiles to
 // return a configured error for error-path testing.
 type failingListFilesStore struct {
 	err error
-}
-
-type fakeAskRetriever struct{}
-
-func (f *fakeAskRetriever) Search(_ context.Context, _ model.SearchQuery) ([]model.SearchHit, error) {
-	return []model.SearchHit{}, nil
-}
-
-func (f *fakeAskRetriever) Ask(_ context.Context, question string, query model.SearchQuery) (model.AskResult, error) {
-	return model.AskResult{
-		Question:         question,
-		Answer:           "alpha answer",
-		Citations:        []model.Citation{{ChunkID: 1, RelPath: "docs/a.md", Span: model.Span{Kind: "lines", StartLine: 1, EndLine: 2}}},
-		Hits:             []model.SearchHit{{ChunkID: 1, RelPath: "docs/a.md", Snippet: "alpha"}},
-		IndexingComplete: true,
-	}, nil
-}
-
-func (f *fakeAskRetriever) OpenFile(_ context.Context, _ string, _ model.Span, _ int) (string, error) {
-	return "", model.ErrNotImplemented
-}
-
-func (f *fakeAskRetriever) Stats(_ context.Context) (model.Stats, error) {
-	return model.Stats{}, nil
 }
 
 func (s *failingListFilesStore) Init(_ context.Context) error {
@@ -716,17 +751,44 @@ func postRPC(t *testing.T, url, sessionID, body string) *http.Response {
 type askAudioRetrieverStub struct {
 	askResult model.AskResult
 	askErr    error
+	// values produced by Search mode
+	searchHits []model.SearchHit
+	searchErr  error
+	OnSearch   func(query model.SearchQuery) ([]model.SearchHit, error)
+	// EchoQuestion instructs the stub to copy the incoming question
+	// into the returned AskResult.Question field. This mirrors the
+	// behavior of the previous helper that echoed the input question
+	// automatically. Tests can also supply an OnAsk
+	// callback to compute a custom question string.
+	EchoQuestion bool
+	OnAsk        func(question string) string
 }
 
-func (s *askAudioRetrieverStub) Search(_ context.Context, _ model.SearchQuery) ([]model.SearchHit, error) {
+func (s *askAudioRetrieverStub) Search(_ context.Context, q model.SearchQuery) ([]model.SearchHit, error) {
+	if s.OnSearch != nil {
+		return s.OnSearch(q)
+	}
+	if s.searchErr != nil {
+		return nil, s.searchErr
+	}
+	if s.searchHits != nil {
+		return s.searchHits, nil
+	}
 	return nil, model.ErrNotImplemented
 }
 
-func (s *askAudioRetrieverStub) Ask(_ context.Context, _ string, _ model.SearchQuery) (model.AskResult, error) {
+func (s *askAudioRetrieverStub) Ask(_ context.Context, question string, _ model.SearchQuery) (model.AskResult, error) {
 	if s.askErr != nil {
 		return model.AskResult{}, s.askErr
 	}
-	return s.askResult, nil
+	res := s.askResult
+	// override the question if requested by the test
+	if s.OnAsk != nil {
+		res.Question = s.OnAsk(question)
+	} else if s.EchoQuestion {
+		res.Question = question
+	}
+	return res, nil
 }
 
 func (s *askAudioRetrieverStub) OpenFile(_ context.Context, _ string, _ model.Span, _ int) (string, error) {

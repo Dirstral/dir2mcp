@@ -204,6 +204,13 @@ func writeln(out io.Writer, args ...interface{}) {
 	_, _ = fmt.Fprintln(out, args...)
 }
 
+func (a *App) storeForConfig(cfg config.Config) model.Store {
+	if a != nil && a.newStore != nil {
+		return a.newStore(cfg)
+	}
+	return store.NewSQLiteStore(filepath.Join(cfg.StateDir, "meta.sqlite"))
+}
+
 func (a *App) Run(args []string) int {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
@@ -339,16 +346,8 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	cfg.AuthMode = auth.mode
 	cfg.ResolvedAuthToken = auth.token
 
-	stateDB := filepath.Join(cfg.StateDir, "meta.sqlite")
-	var st model.Store
-	if a.newStore != nil {
-		st = a.newStore(cfg)
-	} else {
-		st = store.NewSQLiteStore(stateDB)
-	}
-	defer func() {
-		_ = st.Close()
-	}()
+	st := a.storeForConfig(cfg)
+	defer func() { _ = st.Close() }()
 	if err := st.Init(ctx); err != nil && !errors.Is(err, model.ErrNotImplemented) {
 		writef(a.stderr, "initialize metadata store: %v\n", err)
 		return exitIndexLoadFailure
@@ -461,7 +460,17 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	embedErrCh := make(chan error, 4)
 	if !opts.readOnly {
 		if chunkSource, ok := st.(index.ChunkSource); ok {
-			startEmbeddingWorkers(runCtx, chunkSource, textIx, codeIx, client, ret, indexingState, embedErrCh, cfg.EmbedModelText, cfg.EmbedModelCode)
+			// choose an embed worker logger appropriate for JSON mode so that
+			// unstructured log output never leaks into the NDJSON stream.  when
+			// in JSON mode we simply discard logs; otherwise forward to the CLI
+			// stderr writer (which tests can capture).
+			var embedLogger *log.Logger
+			if opts.jsonOutput {
+				embedLogger = log.New(io.Discard, "", 0)
+			} else {
+				embedLogger = log.New(a.stderr, "", log.LstdFlags)
+			}
+			startEmbeddingWorkers(runCtx, chunkSource, textIx, codeIx, client, ret, indexingState, embedErrCh, embedLogger, cfg.EmbedModelText, cfg.EmbedModelCode)
 		}
 	}
 	mcpAddr := ln.Addr().String()
@@ -618,6 +627,7 @@ func startEmbeddingWorkers(
 	ret *retrieval.Service,
 	indexingState *appstate.IndexingState,
 	errCh chan<- error,
+	logger *log.Logger,
 	textModel, codeModel string,
 ) {
 	if st == nil || embedder == nil {
@@ -636,7 +646,7 @@ func startEmbeddingWorkers(
 			ModelForText: textModel,
 			ModelForCode: codeModel,
 			BatchSize:    32,
-			Logger:       log.Default(),
+			Logger:       logger,
 			OnIndexedChunk: func(label uint64, metadata model.ChunkMetadata) {
 				if ret != nil {
 					ret.SetChunkMetadataForIndex(workerKind, label, model.SearchHit{
@@ -696,13 +706,17 @@ func (a *App) runReindex(ctx context.Context) int {
 	if baseDir == "" {
 		baseDir = ".dir2mcp"
 	}
+	// ensure the directory exists before we let the store constructor write
+	// to it
 	textIndexPath := filepath.Join(baseDir, "vectors_text.hnsw")
 	codeIndexPath := filepath.Join(baseDir, "vectors_code.hnsw")
 	if err := os.MkdirAll(baseDir, 0o755); err != nil {
 		writef(a.stderr, "create state dir: %v\n", err)
 		return exitRootInaccessible
 	}
-	st := store.NewSQLiteStore(filepath.Join(baseDir, "meta.sqlite"))
+	// update cfg so that the store factory uses the same baseDir
+	cfg.StateDir = baseDir
+	st := a.storeForConfig(cfg)
 	defer func() {
 		if closeErr := st.Close(); closeErr != nil {
 			writef(a.stderr, "close store: %v\n", closeErr)

@@ -51,23 +51,27 @@ func TestBuildCorpusSnapshot_ComputesDocCountsAndCodeRatio(t *testing.T) {
 		t.Fatalf("buildCorpusSnapshot failed: %v", err)
 	}
 	if snap.TotalDocs != 3 {
-		t.Fatalf("expected total_docs=3, got %d", snap.TotalDocs)
+		t.Errorf("expected total_docs=3, got %d", snap.TotalDocs)
 	}
 	if snap.DocCounts["code"] != 2 {
-		t.Fatalf("expected code count=2, got %d", snap.DocCounts["code"])
+		t.Errorf("expected code count=2, got %d", snap.DocCounts["code"])
 	}
 	if snap.DocCounts["md"] != 1 {
-		t.Fatalf("expected md count=1, got %d", snap.DocCounts["md"])
+		t.Errorf("expected md count=1, got %d", snap.DocCounts["md"])
+	}
+	// deleted documents should not be counted
+	if snap.DocCounts["text"] != 0 {
+		t.Errorf("deleted text docs should not be counted, got %d", snap.DocCounts["text"])
 	}
 	// use an epsilon-based comparison rather than hardcoded bounds
 	eps := 1e-3
 	if math.Abs(snap.CodeRatio-0.6667) > eps {
-		t.Fatalf("expected code_ratio around 0.6667 (±%f), got %f", eps, snap.CodeRatio)
+		t.Errorf("expected code_ratio around 0.6667 (±%f), got %f", eps, snap.CodeRatio)
 	}
 	if !snap.Indexing.Running {
-		t.Fatalf("expected indexing.running=true")
+		t.Errorf("expected indexing.running=true")
 	}
 	if snap.Indexing.Indexed != 3 {
-		t.Fatalf("expected indexing.indexed=3, got %d", snap.Indexing.Indexed)
+		t.Errorf("expected indexing.indexed=3, got %d", snap.Indexing.Indexed)
 	}
 }

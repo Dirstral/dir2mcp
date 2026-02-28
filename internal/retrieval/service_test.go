@@ -4,12 +4,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"math"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 
 	"dir2mcp/internal/index"
@@ -378,18 +378,17 @@ func TestOpenFile_TimeSpan(t *testing.T) {
 func TestMatchExcludePattern_Concurrent(t *testing.T) {
 	svc := NewService(nil, nil, nil, nil)
 	pattern := "**/foo/**"
-	var wg sync.WaitGroup
 	const goroutines = 20
-	wg.Add(goroutines)
+
 	for i := 0; i < goroutines; i++ {
-		go func() {
-			defer wg.Done()
+		i := i // capture for closure
+		t.Run(fmt.Sprintf("%d", i), func(t *testing.T) {
+			t.Parallel()
 			if !svc.matchExcludePattern(pattern, "a/foo/b") {
 				t.Error("expected pattern to match")
 			}
-		}()
+		})
 	}
-	wg.Wait()
 }
 
 func TestOpenFile_PageSpan_FromMetadata(t *testing.T) {

@@ -87,8 +87,8 @@ func buildLargeCorpusService(tb testing.TB, total int) *Service {
 		}
 		if i%3 == 0 {
 			// we intentionally reuse the same `label` value here that was already
-			// added to `textIdx` above. since multiples of 3 are also even numbers
-			// in this loop, this creates duplicate IDs across the two indexes.
+			// added to `textIdx` above. this creates duplicate IDs across the two
+			// indexes (every third label appears in both).
 			// the test later searches in "both" mode and the Service deduplicates
 			// hits coming from textIdx and codeIdx. documenting the design choice
 			// helps future readers understand why some labels appear in both

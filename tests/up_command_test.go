@@ -694,13 +694,11 @@ func withWorkingDir(t *testing.T, dir string, fn func()) {
 
 type failingIngestor struct{}
 
-func (f failingIngestor) Run(ctx context.Context) error {
-	_ = ctx
+func (f failingIngestor) Run(_ context.Context) error {
 	return errors.New("forced ingest failure")
 }
 
-func (f failingIngestor) Reindex(ctx context.Context) error {
-	_ = ctx
+func (f failingIngestor) Reindex(_ context.Context) error {
 	return nil
 }
 
@@ -710,8 +708,7 @@ type capturingIngestor struct {
 	capturedHash *string
 }
 
-func (c *capturingIngestor) Run(ctx context.Context) error {
-	_ = ctx
+func (c *capturingIngestor) Run(_ context.Context) error {
 	return nil
 }
 

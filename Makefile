@@ -8,15 +8,16 @@ build:
 up: build
 	./dir2mcp up
 
-.PHONY: all clean help fmt vet lint test check ci benchmark
+.PHONY: all clean clean-all help fmt vet lint test check ci benchmark
 
 all: check
 
 help:
 	@echo "Targets:"
-	@echo "  all    - default target (runs check)"
-	@echo "  clean  - remove build artifacts and local caches"
-	@echo "  fmt    - format Go code"
+	@echo "  all       - default target (runs check)"
+	@echo "  clean     - remove build artifacts and local test caches only"
+	@echo "  clean-all - full clean including Go build cache (use sparingly)"
+	@echo "  fmt       - format Go code"
 	@echo "  vet    - run go vet"
 	@echo "  lint   - run golangci-lint"
 	@echo "  test   - run go test"
@@ -47,4 +48,9 @@ benchmark:
 
 clean:
 	rm -f dir2mcp coverage.out
+	# only purge the test cache so we don't evict the global build cache
+	go clean -testcache >/dev/null 2>&1 || true
+
+clean-all: clean
+	# perform a full cache wipe, use only when you really need it
 	go clean -cache -testcache >/dev/null 2>&1 || true

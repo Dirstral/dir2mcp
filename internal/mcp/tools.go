@@ -570,6 +570,51 @@ func (s *Server) handleAskTool(ctx context.Context, args map[string]interface{})
 		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
 	}
 
+	if s.retriever == nil {
+		return toolCallResult{}, &toolExecutionError{Code: "INDEX_NOT_READY", Message: "retriever not configured", Retryable: false}
+	}
+
+	// branch early on search_only so we avoid asking the generator and can
+	// take advantage of Search-specific behaviour (and avoid throwing away the
+	// generated answer).
+	if mode == "search_only" {
+		hits, searchErr := s.retriever.Search(ctx, model.SearchQuery{
+			Query:      question,
+			K:          k,
+			Index:      indexName,
+			PathPrefix: pathPrefix,
+			FileGlob:   fileGlob,
+			DocTypes:   docTypes,
+		})
+		if searchErr != nil {
+			code := "INTERNAL_ERROR"
+			message := "internal server error"
+			retryable := true
+			if errors.Is(searchErr, model.ErrIndexNotReady) || errors.Is(searchErr, model.ErrIndexNotConfigured) {
+				code = "INDEX_NOT_READY"
+				message = "index not ready"
+			}
+			return toolCallResult{}, &toolExecutionError{Code: code, Message: message, Retryable: retryable}
+		}
+
+		hitMaps := make([]map[string]interface{}, 0, len(hits))
+		for _, h := range hits {
+			hitMaps = append(hitMaps, serializeHit(h))
+		}
+		structured := map[string]interface{}{
+			"question":          question,
+			"answer":            "",
+			"citations":         []interface{}{},
+			"hits":              hitMaps,
+			"indexing_complete": false,
+		}
+		return toolCallResult{
+			Content:           []toolContentItem{{Type: "text", Text: fmt.Sprintf("found %d supporting result(s)", len(hits))}},
+			StructuredContent: structured,
+		}, nil
+	}
+
+	// non‑search mode falls through to the original Ask logic
 	askResult, askErr := s.retriever.Ask(ctx, question, model.SearchQuery{
 		Query:      question,
 		K:          k,
@@ -585,13 +630,8 @@ func (s *Server) handleAskTool(ctx context.Context, args map[string]interface{})
 		if errors.Is(askErr, model.ErrIndexNotReady) || errors.Is(askErr, model.ErrIndexNotConfigured) {
 			code = "INDEX_NOT_READY"
 			message = "index not ready"
-			// retryable stays true to encourage callers to retry once the
-			// index becomes available, matching handleSearchTool/handleAskAudioTool
 		}
 		return toolCallResult{}, &toolExecutionError{Code: code, Message: message, Retryable: retryable}
-	}
-	if mode == "search_only" {
-		askResult.Answer = ""
 	}
 
 	structured := map[string]interface{}{
@@ -602,9 +642,6 @@ func (s *Server) handleAskTool(ctx context.Context, args map[string]interface{})
 		"indexing_complete": askResult.IndexingComplete,
 	}
 	contentText := askResult.Answer
-	if mode == "search_only" {
-		contentText = fmt.Sprintf("found %d supporting result(s)", len(askResult.Hits))
-	}
 
 	return toolCallResult{
 		Content:           []toolContentItem{{Type: "text", Text: contentText}},
