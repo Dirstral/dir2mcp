@@ -134,6 +134,14 @@ func NewAppWithIOAndHooks(stdout, stderr io.Writer, hooks RuntimeHooks) *App {
 	return app
 }
 
+func writef(out io.Writer, format string, args ...interface{}) {
+	_, _ = fmt.Fprintf(out, format, args...)
+}
+
+func writeln(out io.Writer, args ...interface{}) {
+	_, _ = fmt.Fprintln(out, args...)
+}
+
 func (a *App) Run(args []string) int {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
@@ -148,7 +156,7 @@ func (a *App) RunWithContext(ctx context.Context, args []string) int {
 
 	globalOpts, remaining, err := parseGlobalOptions(args)
 	if err != nil {
-		fmt.Fprintf(a.stderr, "%v\n", err)
+		writef(a.stderr, "%v\n", err)
 		return exitGeneric
 	}
 	if len(remaining) == 0 {
@@ -160,7 +168,7 @@ func (a *App) RunWithContext(ctx context.Context, args []string) int {
 	case "up":
 		upOpts, parseErr := parseUpOptions(globalOpts, remaining[1:])
 		if parseErr != nil {
-			fmt.Fprintf(a.stderr, "invalid up flags: %v\n", parseErr)
+			writef(a.stderr, "invalid up flags: %v\n", parseErr)
 			return exitConfigInvalid
 		}
 		return a.runUp(ctx, upOpts)
@@ -173,25 +181,25 @@ func (a *App) RunWithContext(ctx context.Context, args []string) int {
 	case "config":
 		return a.runConfig(remaining[1:])
 	case "version":
-		fmt.Fprintln(a.stdout, "dir2mcp skeleton v0.0.0-dev")
+		writeln(a.stdout, "dir2mcp skeleton v0.0.0-dev")
 		return exitSuccess
 	default:
-		fmt.Fprintf(a.stderr, "unknown command: %s\n", remaining[0])
+		writef(a.stderr, "unknown command: %s\n", remaining[0])
 		a.printUsage()
 		return exitGeneric
 	}
 }
 
 func (a *App) printUsage() {
-	fmt.Fprintln(a.stdout, "dir2mcp skeleton")
-	fmt.Fprintln(a.stdout, "usage: dir2mcp [--json] [--non-interactive] <command>")
-	fmt.Fprintln(a.stdout, "commands: up, status, ask, reindex, config, version")
+	writeln(a.stdout, "dir2mcp skeleton")
+	writeln(a.stdout, "usage: dir2mcp [--json] [--non-interactive] <command>")
+	writeln(a.stdout, "commands: up, status, ask, reindex, config, version")
 }
 
 func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	cfg, err := config.Load(".dir2mcp.yaml")
 	if err != nil {
-		fmt.Fprintf(a.stderr, "load config: %v\n", err)
+		writef(a.stderr, "load config: %v\n", err)
 		return exitConfigInvalid
 	}
 
@@ -205,37 +213,37 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 		cfg.AuthMode = opts.auth
 	}
 	if !strings.HasPrefix(cfg.MCPPath, "/") {
-		fmt.Fprintln(a.stderr, "CONFIG_INVALID: --mcp-path must start with '/'")
+		writeln(a.stderr, "CONFIG_INVALID: --mcp-path must start with '/'")
 		return exitConfigInvalid
 	}
 	_ = opts.x402ResourceBaseURL
 
 	if err := ensureRootAccessible(cfg.RootDir); err != nil {
-		fmt.Fprintf(a.stderr, "root inaccessible: %v\n", err)
+		writef(a.stderr, "root inaccessible: %v\n", err)
 		return exitRootInaccessible
 	}
 
 	if err := os.MkdirAll(cfg.StateDir, 0o755); err != nil {
-		fmt.Fprintf(a.stderr, "create state dir: %v\n", err)
+		writef(a.stderr, "create state dir: %v\n", err)
 		return exitRootInaccessible
 	}
 
 	nonInteractiveMode := opts.nonInteractive || !isTerminal(os.Stdin) || !isTerminal(os.Stdout)
 	if strings.TrimSpace(cfg.MistralAPIKey) == "" {
 		if nonInteractiveMode {
-			fmt.Fprintln(a.stderr, "ERROR: CONFIG_INVALID: Missing MISTRAL_API_KEY")
-			fmt.Fprintln(a.stderr, "Set env: MISTRAL_API_KEY=...")
-			fmt.Fprintln(a.stderr, "Or run: dir2mcp config init")
+			writeln(a.stderr, "ERROR: CONFIG_INVALID: Missing MISTRAL_API_KEY")
+			writeln(a.stderr, "Set env: MISTRAL_API_KEY=...")
+			writeln(a.stderr, "Or run: dir2mcp config init")
 		} else {
-			fmt.Fprintln(a.stderr, "CONFIG_INVALID: Missing MISTRAL_API_KEY")
-			fmt.Fprintln(a.stderr, "Run: dir2mcp config init")
+			writeln(a.stderr, "CONFIG_INVALID: Missing MISTRAL_API_KEY")
+			writeln(a.stderr, "Run: dir2mcp config init")
 		}
 		return exitConfigInvalid
 	}
 
 	auth, err := prepareAuthMaterial(cfg)
 	if err != nil {
-		fmt.Fprintf(a.stderr, "auth setup: %v\n", err)
+		writef(a.stderr, "auth setup: %v\n", err)
 		return exitConfigInvalid
 	}
 	cfg.AuthMode = auth.mode
@@ -243,7 +251,7 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	previousAuthToken, hadPreviousAuthToken := os.LookupEnv(authTokenEnvVar)
 	if auth.mode == "file" {
 		if err := os.Setenv(authTokenEnvVar, auth.token); err != nil {
-			fmt.Fprintf(a.stderr, "set auth token env: %v\n", err)
+			writef(a.stderr, "set auth token env: %v\n", err)
 			return exitGeneric
 		}
 		defer func() {
@@ -261,7 +269,7 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 		_ = st.Close()
 	}()
 	if err := st.Init(ctx); err != nil && !errors.Is(err, model.ErrNotImplemented) {
-		fmt.Fprintf(a.stderr, "initialize metadata store: %v\n", err)
+		writef(a.stderr, "initialize metadata store: %v\n", err)
 		return exitIndexLoadFailure
 	}
 
@@ -272,7 +280,7 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	if err := ix.Load(filepath.Join(cfg.StateDir, "vectors_text.hnsw")); err != nil &&
 		!errors.Is(err, model.ErrNotImplemented) &&
 		!errors.Is(err, os.ErrNotExist) {
-		fmt.Fprintf(a.stderr, "load index: %v\n", err)
+		writef(a.stderr, "load index: %v\n", err)
 		return exitIndexLoadFailure
 	}
 
@@ -288,7 +296,7 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 
 	ln, err := net.Listen("tcp", cfg.ListenAddr)
 	if err != nil {
-		fmt.Fprintf(a.stderr, "bind server: %v\n", err)
+		writef(a.stderr, "bind server: %v\n", err)
 		return exitServerBindFailure
 	}
 	mcpURL := buildMCPURL(ln.Addr().String(), cfg.MCPPath)
@@ -305,7 +313,7 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 
 	connection := buildConnectionPayload(cfg, mcpURL, auth)
 	if err := writeConnectionFile(filepath.Join(cfg.StateDir, connectionFileName), connection); err != nil {
-		fmt.Fprintf(a.stderr, "write %s: %v\n", connectionFileName, err)
+		writef(a.stderr, "write %s: %v\n", connectionFileName, err)
 		return exitGeneric
 	}
 
@@ -345,7 +353,7 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 			return exitSuccess
 		case serverErr := <-serverErrCh:
 			if serverErr != nil {
-				fmt.Fprintf(a.stderr, "server failed: %v\n", serverErr)
+				writef(a.stderr, "server failed: %v\n", serverErr)
 				emitter.Emit("error", "fatal", map[string]interface{}{
 					"code":    "SERVER_FAILURE",
 					"message": serverErr.Error(),
@@ -358,7 +366,7 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 				ingestErrCh = nil
 				continue
 			}
-			fmt.Fprintf(a.stderr, "ingestion failed: %v\n", ingestErr)
+			writef(a.stderr, "ingestion failed: %v\n", ingestErr)
 			emitter.Emit("error", "file_error", map[string]interface{}{
 				"message": ingestErr.Error(),
 			})
@@ -372,16 +380,16 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 }
 
 func (a *App) runStatus() int {
-	fmt.Fprintln(a.stdout, "status command skeleton: not implemented")
+	writeln(a.stdout, "status command skeleton: not implemented")
 	return exitSuccess
 }
 
 func (a *App) runAsk(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(a.stderr, "ask command requires a question argument")
+		writeln(a.stderr, "ask command requires a question argument")
 		return exitGeneric
 	}
-	fmt.Fprintf(a.stdout, "ask command skeleton: %q\n", args[0])
+	writef(a.stdout, "ask command skeleton: %q\n", args[0])
 	return exitSuccess
 }
 
@@ -390,11 +398,11 @@ func (a *App) runReindex() int {
 	ing := ingest.NewService(config.Default(), st)
 	err := ing.Reindex(context.Background())
 	if errors.Is(err, model.ErrNotImplemented) {
-		fmt.Fprintln(a.stdout, "reindex skeleton: ingestion pipeline not implemented yet")
+		writeln(a.stdout, "reindex skeleton: ingestion pipeline not implemented yet")
 		return exitSuccess
 	}
 	if err != nil {
-		fmt.Fprintf(a.stderr, "reindex failed: %v\n", err)
+		writef(a.stderr, "reindex failed: %v\n", err)
 		return exitGeneric
 	}
 	return exitSuccess
@@ -402,19 +410,19 @@ func (a *App) runReindex() int {
 
 func (a *App) runConfig(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(a.stdout, "config command skeleton: supported subcommands are init and print")
+		writeln(a.stdout, "config command skeleton: supported subcommands are init and print")
 		return exitSuccess
 	}
 	switch args[0] {
 	case "init":
-		fmt.Fprintln(a.stdout, "config init skeleton: not implemented")
+		writeln(a.stdout, "config init skeleton: not implemented")
 	case "print":
 		cfg, err := config.Load(".dir2mcp.yaml")
 		if err != nil {
-			fmt.Fprintf(a.stderr, "load config: %v\n", err)
+			writef(a.stderr, "load config: %v\n", err)
 			return exitConfigInvalid
 		}
-		fmt.Fprintf(
+		writef(
 			a.stdout,
 			"root=%s state_dir=%s listen=%s mcp_path=%s mistral_base_url=%s mistral_api_key_set=%t\n",
 			cfg.RootDir,
@@ -425,7 +433,7 @@ func (a *App) runConfig(args []string) int {
 			cfg.MistralAPIKey != "",
 		)
 	default:
-		fmt.Fprintf(a.stderr, "unknown config subcommand: %s\n", args[0])
+		writef(a.stderr, "unknown config subcommand: %s\n", args[0])
 		return exitGeneric
 	}
 	return exitSuccess
@@ -665,28 +673,28 @@ func (e *ndjsonEmitter) Emit(level, event string, data interface{}) {
 }
 
 func (a *App) printHumanConnection(cfg config.Config, connection connectionPayload, auth authMaterial, readOnly bool) {
-	fmt.Fprintf(a.stdout, "Index: %s\n", cfg.StateDir)
+	writef(a.stdout, "Index: %s\n", cfg.StateDir)
 	mode := "incremental (server-first; indexing in background)"
 	if readOnly {
 		mode += ", read-only=true"
 	}
-	fmt.Fprintf(a.stdout, "Mode: %s\n\n", mode)
-	fmt.Fprintln(a.stdout, "MCP endpoint:")
-	fmt.Fprintf(a.stdout, "  URL:    %s\n", connection.URL)
+	writef(a.stdout, "Mode: %s\n\n", mode)
+	writeln(a.stdout, "MCP endpoint:")
+	writef(a.stdout, "  URL:    %s\n", connection.URL)
 	if auth.mode == "none" {
-		fmt.Fprintln(a.stdout, "  Auth:   none")
+		writeln(a.stdout, "  Auth:   none")
 	} else {
-		fmt.Fprintf(a.stdout, "  Auth:   Bearer (source=%s)\n", auth.tokenSource)
+		writef(a.stdout, "  Auth:   Bearer (source=%s)\n", auth.tokenSource)
 	}
 	if auth.tokenFile != "" {
-		fmt.Fprintf(a.stdout, "  Token file: %s\n", auth.tokenFile)
+		writef(a.stdout, "  Token file: %s\n", auth.tokenFile)
 	}
-	fmt.Fprintln(a.stdout, "  Headers:")
-	fmt.Fprintf(a.stdout, "    MCP-Protocol-Version: %s\n", cfg.ProtocolVersion)
+	writeln(a.stdout, "  Headers:")
+	writef(a.stdout, "    MCP-Protocol-Version: %s\n", cfg.ProtocolVersion)
 	if auth.mode != "none" {
-		fmt.Fprintln(a.stdout, "    Authorization: Bearer <token>")
+		writeln(a.stdout, "    Authorization: Bearer <token>")
 	}
-	fmt.Fprintln(a.stdout, "    MCP-Session-Id: (assigned after initialize response)")
+	writeln(a.stdout, "    MCP-Session-Id: (assigned after initialize response)")
 }
 
 func isTerminal(file *os.File) bool {
