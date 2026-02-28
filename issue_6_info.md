@@ -190,3 +190,5 @@ internal/appstate/
 internal/config/
 └── config.go            # Configuration (existing)
 ```
+
+..
