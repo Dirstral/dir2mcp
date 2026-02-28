@@ -32,9 +32,24 @@ type Service struct {
 	ocrCacheMaxBytes int64
 	ocrCacheTTL      time.Duration
 
-	// mutex protecting the two fields above.  EnforceOCRCachePolicy may run in
-	// a goroutine concurrently with calls to SetOCRCacheLimits, so we need to
-	// guard reads and writes.
+	// optional hook used primarily by tests. if non‑nil the function is used
+	// in place of DirEntry.Info() when scanning the cache. this allows the
+	// tests to simulate stat errors without fiddling with the real filesystem.
+	ocrCacheStat func(os.DirEntry) (os.FileInfo, error)
+
+	// hook invoked instead of enforceOCRCachePolicy; useful for tests that
+	// want to simulate a failure without touching the filesystem. nil means
+	// use the normal method.
+	ocrCacheEnforce func(string) error
+
+	// mutex protecting all of the OCR cache configuration fields and the
+	// related bookkeeping state.  In particular it guards access to
+	// ocrCacheMaxBytes, ocrCacheTTL (and the associated hooks
+	// ocrCacheStat/ocrCacheEnforce), as well as the write counter
+	// ocrCacheWrites and the pruning interval ocrCachePruneEvery.  The cache
+	// enforcement routine (enforceOCRCachePolicy or a test hook) may run
+	// concurrently with calls to SetOCRCacheLimits/SetOCRCachePruneEvery, so
+	// readers and writers of those shared fields must hold the lock.
 	ocrCacheMu sync.RWMutex
 
 	// enforcement bookkeeping. Instead of scanning the cache on every write we
@@ -491,18 +506,31 @@ func (s *Service) enforceOCRCachePolicy(cacheDir string) error {
 			continue
 		}
 		p := filepath.Join(cacheDir, e.Name())
-		info, err := e.Info()
+		// use test hook if provided; otherwise fall back to the real call
+		var info os.FileInfo
+		var err error
+		if s.ocrCacheStat != nil {
+			info, err = s.ocrCacheStat(e)
+		} else {
+			info, err = e.Info()
+		}
 		if err != nil {
 			// log failure so that operators can investigate; include the
 			// entry name since that is the only identifier available here.
 			log.Printf("enforceOCRCachePolicy: failed to stat %s: %v", e.Name(), err)
-			// do not silently drop the entry from size accounting.  add a
-			// conservative estimate (e.g. the configured max) so that a bad
-			// stat cannot be used to bypass the cache limit.  we could also
-			// increment a metric/counter here if one were available.
-			if maxBytes > 0 {
-				total += maxBytes
-			}
+			// the previous behaviour added the full maxBytes value to the
+			// total when stat failed. that could greatly overestimate the
+			// cache size and trigger aggressive eviction. instead we
+			// either skip counting the entry entirely or add a small
+			// conservative estimate. skipping is simplest and guarantees we
+			// won't evict other files just because one entry couldn't be
+			// stat'd.
+			// a future enhancement could make this estimate configurable or
+			// derive it from observed file sizes, but the change is local to
+			// this function.
+			// leave `total` unchanged in this case. if an estimate is
+			// desired, define a constant and add it here (capped by maxBytes
+			// if that makes sense).
 			continue
 		}
 		files = append(files, fileInfo{path: p, info: info})
@@ -560,8 +588,6 @@ func (s *Service) readOrComputeOCR(ctx context.Context, doc model.Document, cont
 	// can be expensive, so we only run it on a configurable write interval.
 	// The counter increments only when we are about to perform a real write
 	// (cache miss), not for cache hits.
-	shouldEnforceAfterWrite := s.markOCRCacheWrite()
-
 	ocrText, err := s.ocr.Extract(ctx, doc.RelPath, content)
 	if err != nil {
 		return "", fmt.Errorf("ocr extract %s: %w", doc.RelPath, err)
@@ -571,9 +597,19 @@ func (s *Service) readOrComputeOCR(ctx context.Context, doc model.Document, cont
 	if err := os.WriteFile(cachePath, ocrBytes, 0o644); err != nil {
 		return "", fmt.Errorf("write ocr cache: %w", err)
 	}
+	shouldEnforceAfterWrite := s.markOCRCacheWrite()
 	if shouldEnforceAfterWrite {
-		if err := s.enforceOCRCachePolicy(cacheDir); err != nil {
-			return "", err
+		var err error
+		if s.ocrCacheEnforce != nil {
+			err = s.ocrCacheEnforce(cacheDir)
+		} else {
+			err = s.enforceOCRCachePolicy(cacheDir)
+		}
+		if err != nil {
+			// enforcement failure should not prevent the caller from
+			// receiving the OCR result. log and continue instead of
+			// returning an error; the cache write has already succeeded.
+			log.Printf("enforceOCRCachePolicy(%s) failed: %v", cacheDir, err)
 		}
 	}
 	return string(ocrBytes), nil

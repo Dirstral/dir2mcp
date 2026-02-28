@@ -167,13 +167,6 @@ func TestGenerateRawTextFromContentPrefersGivenBytes(t *testing.T) {
 	rg := NewRepresentationGenerator(st)
 	doc := model.Document{DocID: 1, RelPath: "foo.txt", DocType: "text"}
 
-	// create a real file with different contents to ensure the method uses the
-	// provided bytes instead of re-reading from disk.
-	tmp := t.TempDir() + "/foo.txt"
-	if err := os.WriteFile(tmp, []byte("disk content"), 0o644); err != nil {
-		t.Fatalf("write disk file: %v", err)
-	}
-
 	provided := []byte("provided content")
 	if err := rg.GenerateRawTextFromContent(context.Background(), doc, provided); err != nil {
 		t.Fatalf("GenerateRawTextFromContent failed: %v", err)

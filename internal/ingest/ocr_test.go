@@ -1,10 +1,13 @@
 package ingest
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -360,9 +363,6 @@ func TestReadOrComputeOCR_PruneInterval(t *testing.T) {
 	if _, err := os.Stat(pathB); err != nil {
 		t.Fatalf("expected B still there after first write: %v", err)
 	}
-	// dump cache state after first write (debug)
-	entries, _ := os.ReadDir(cacheDir)
-	_ = entries // deliberately ignore; used during development
 
 	// second call should trigger pruning; one of the old files should be removed
 	if _, err := svc.readOrComputeOCR(context.Background(), doc, []byte("y")); err != nil {
@@ -406,6 +406,79 @@ func TestClearOCRCache(t *testing.T) {
 	}
 	if _, err := os.Stat(file); !os.IsNotExist(err) {
 		t.Fatalf("expected cache dir removed, got %v", err)
+	}
+}
+
+func TestEnforceOCRCachePolicy_SkipsStatError(t *testing.T) {
+	// when a cache entry cannot be stat'd we used to charge the full
+	// maxBytes value against the total, which could lead to premature
+	// eviction of unrelated files. this regression test ensures we no
+	// longer remove good data in that scenario.
+	stateDir := t.TempDir()
+	svc := &Service{cfg: config.Config{StateDir: stateDir}}
+	svc.SetOCRCacheLimits(5, 0) // very small size limit so evictions are easy
+
+	cacheDir := filepath.Join(stateDir, "cache", "ocr")
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		t.Fatalf("mkdir cache dir: %v", err)
+	}
+
+	// normal file that should survive enforcement
+	good := filepath.Join(cacheDir, "good")
+	if err := os.WriteFile(good, []byte("aaa"), 0o644); err != nil {
+		t.Fatalf("write good file: %v", err)
+	}
+
+	// simulate a stat failure for one of the entries using the hook
+	badName := "broken"
+	badPath := filepath.Join(cacheDir, badName)
+	if err := os.WriteFile(badPath, []byte("zzz"), 0o644); err != nil {
+		t.Fatalf("write bad file: %v", err)
+	}
+	// override the stat function so that this particular entry fails
+	svc.ocrCacheStat = func(e os.DirEntry) (os.FileInfo, error) {
+		if e.Name() == badName {
+			return nil, fmt.Errorf("simulated stat failure")
+		}
+		return e.Info()
+	}
+
+	if err := svc.enforceOCRCachePolicy(cacheDir); err != nil {
+		t.Fatalf("enforceOCRCachePolicy returned error: %v", err)
+	}
+
+	// the good file should still be present; the old behaviour would have
+	// removed it because total would have been > maxBytes.
+	if _, err := os.Stat(good); err != nil {
+		t.Fatalf("good file unexpectedly removed: %v", err)
+	}
+}
+
+func TestReadOrComputeOCR_EnforceErrorIgnored(t *testing.T) {
+	stateDir := t.TempDir()
+	svc := &Service{cfg: config.Config{StateDir: stateDir}}
+	svc.SetOCRCacheLimits(1024, 0)
+	// make enforcement fail
+	svc.ocrCacheEnforce = func(dir string) error { return fmt.Errorf("simulated failure") }
+
+	// capture log output so we can verify the warning is produced
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	defer log.SetOutput(os.Stderr)
+
+	// use a simple fake OCR implementation
+	fake := &fakeOCR{text: "XYZ"}
+	svc.ocr = fake
+	doc := model.Document{RelPath: "doc"}
+	res, err := svc.readOrComputeOCR(context.Background(), doc, []byte("data"))
+	if err != nil {
+		t.Fatalf("readOrComputeOCR returned error: %v", err)
+	}
+	if res != "XYZ" {
+		t.Fatalf("unexpected ocr result: %s", res)
+	}
+	if !strings.Contains(buf.String(), "enforceOCRCachePolicy") {
+		t.Fatalf("expected log about enforcement failure, got %q", buf.String())
 	}
 }
 
