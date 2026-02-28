@@ -76,6 +76,8 @@ type globalOptions struct {
 type upOptions struct {
 	globalOptions
 	readOnly            bool
+	public              bool
+	forceInsecure       bool
 	x402ResourceBaseURL string
 	auth                string
 	listen              string
@@ -102,6 +104,7 @@ type connectionPayload struct {
 	URL         string            `json:"url"`
 	Headers     map[string]string `json:"headers"`
 	Session     connectionSession `json:"session"`
+	Public      bool              `json:"public"`
 	TokenSource string            `json:"token_source"`
 	TokenFile   string            `json:"token_file,omitempty"`
 }
@@ -225,6 +228,24 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	if opts.allowedOrigins != "" {
 		cfg.AllowedOrigins = config.MergeAllowedOrigins(cfg.AllowedOrigins, opts.allowedOrigins)
 	}
+	if opts.public {
+		cfg.Public = true
+
+		// Public mode defaults to all interfaces unless operator provided --listen explicitly.
+		if opts.listen == "" {
+			port := "0"
+			if _, parsedPort, splitErr := net.SplitHostPort(cfg.ListenAddr); splitErr == nil && parsedPort != "" {
+				port = parsedPort
+			}
+			cfg.ListenAddr = net.JoinHostPort("0.0.0.0", port)
+		}
+
+		authMode := strings.TrimSpace(cfg.AuthMode)
+		if strings.EqualFold(authMode, "none") && !opts.forceInsecure {
+			writeln(a.stderr, "ERROR: CONFIG_INVALID: --public requires auth. Use --auth auto or --force-insecure to override (unsafe).")
+			return exitConfigInvalid
+		}
+	}
 	if !strings.HasPrefix(cfg.MCPPath, "/") {
 		writeln(a.stderr, "CONFIG_INVALID: --mcp-path must start with '/'")
 		return exitConfigInvalid
@@ -308,7 +329,11 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	defer func() {
 		_ = ln.Close()
 	}()
-	mcpURL := buildMCPURL(ln.Addr().String(), cfg.MCPPath)
+	mcpAddr := ln.Addr().String()
+	if cfg.Public {
+		mcpAddr = publicURLAddress(cfg.ListenAddr, mcpAddr)
+	}
+	mcpURL := buildMCPURL(mcpAddr, cfg.MCPPath)
 
 	serverErrCh := make(chan error, 1)
 	go func() {
@@ -318,6 +343,7 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	emitter.Emit("info", "server_started", map[string]interface{}{
 		"url":         mcpURL,
 		"listen_addr": ln.Addr().String(),
+		"public":      cfg.Public,
 	})
 
 	connection := buildConnectionPayload(cfg, mcpURL, auth)
@@ -516,6 +542,8 @@ func parseUpOptions(global globalOptions, args []string) (upOptions, error) {
 	fs.BoolVar(&opts.jsonOutput, "json", opts.jsonOutput, "emit NDJSON events")
 	fs.BoolVar(&opts.nonInteractive, "non-interactive", opts.nonInteractive, "disable prompts")
 	fs.BoolVar(&opts.readOnly, "read-only", false, "run in read-only mode")
+	fs.BoolVar(&opts.public, "public", false, "bind to all interfaces for external access")
+	fs.BoolVar(&opts.forceInsecure, "force-insecure", false, "allow public mode without auth (unsafe)")
 	fs.StringVar(&opts.x402ResourceBaseURL, "x402-resource-base-url", "", "x402 resource base URL")
 	fs.StringVar(&opts.auth, "auth", "", "auth mode: auto|none|file:<path>")
 	fs.StringVar(&opts.listen, "listen", "", "listen address")
@@ -663,6 +691,67 @@ func buildMCPURL(addr, path string) string {
 	return "http://" + addr + path
 }
 
+func publicURLAddress(configuredListenAddr, resolvedListenAddr string) string {
+	configuredListenAddr = strings.TrimSpace(configuredListenAddr)
+	resolvedListenAddr = strings.TrimSpace(resolvedListenAddr)
+
+	host := "0.0.0.0"
+	if parsedHost, _, err := net.SplitHostPort(configuredListenAddr); err == nil && strings.TrimSpace(parsedHost) != "" {
+		host = parsedHost
+	}
+
+	if port := extractPortFromAddress(resolvedListenAddr); port != "" {
+		return net.JoinHostPort(host, port)
+	}
+	if port := extractPortFromAddress(configuredListenAddr); port != "" {
+		return net.JoinHostPort(host, port)
+	}
+
+	return net.JoinHostPort(host, "0")
+}
+
+func extractPortFromAddress(addr string) string {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return ""
+	}
+
+	if _, port, err := net.SplitHostPort(addr); err == nil {
+		port = strings.TrimSpace(port)
+		if isNumericPort(port) {
+			return port
+		}
+		return ""
+	}
+
+	// Best effort for malformed values where SplitHostPort fails but the
+	// value still contains a trailing numeric ":port" token.
+	i := strings.LastIndex(addr, ":")
+	if i < 0 || i == len(addr)-1 {
+		return ""
+	}
+	port := addr[i+1:]
+	if strings.ContainsAny(port, " \t\r\n/\\") {
+		return ""
+	}
+	if isNumericPort(port) {
+		return port
+	}
+	return ""
+}
+
+func isNumericPort(port string) bool {
+	if port == "" {
+		return false
+	}
+	for _, r := range port {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 func buildConnectionPayload(cfg config.Config, url string, auth authMaterial) connectionPayload {
 	headers := map[string]string{
 		"MCP-Protocol-Version": cfg.ProtocolVersion,
@@ -680,6 +769,7 @@ func buildConnectionPayload(cfg config.Config, url string, auth authMaterial) co
 			HeaderName:           "MCP-Session-Id",
 			AssignedOnInitialize: true,
 		},
+		Public:      cfg.Public,
 		TokenSource: auth.tokenSource,
 		TokenFile:   auth.tokenFile,
 	}
@@ -721,7 +811,12 @@ func (a *App) printHumanConnection(cfg config.Config, connection connectionPaylo
 	if readOnly {
 		mode += ", read-only=true"
 	}
+	mode += fmt.Sprintf(", public=%t", cfg.Public)
 	writef(a.stdout, "Mode: %s\n\n", mode)
+	if cfg.Public {
+		writeln(a.stdout, "WARNING: server is bound to all interfaces. Ensure auth is enabled.")
+		writeln(a.stdout)
+	}
 	writeln(a.stdout, "MCP endpoint:")
 	writef(a.stdout, "  URL:    %s\n", connection.URL)
 	if auth.mode == "none" {
