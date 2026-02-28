@@ -461,23 +461,25 @@ Write Go functions for: insert/upsert document, insert representation, insert ch
 **Task 2.20 — Demo script + talking points** (~1h)
 - Write a step-by-step demo script (target 3–5 minutes):
   1. `dir2mcp up` on demo corpus → show live progress
-  2. Connect via web UI → show corpus stats
-  3. Run a search → show semantic hits across modalities
-  4. Run an ask → show RAG answer with citations
-  5. Click citation → inspect source with `open_file`
-  6. Call `transcribe_and_ask` on audio file
-  7. Enable x402 → show HTTP 402 payment required flow
+  2. Expose `/mcp` publicly (tunnel or reverse proxy) and verify `initialize` + `tools/list`
+  3. Open hosted ElevenLabs talk-to page (agent with MCP integration)
+  4. Ask a repo/corpus question that triggers MCP tool call and citations
+  5. Show fallback behavior (no-evidence or timeout path)
+  6. Optional: enable x402 and show HTTP 402 payment-required flow
 - Rehearse and time the demo
 
 **Task 2.21 — README and quick-start docs** (~1h)
 - Update `README.md` with: install instructions, quick-start example, env vars required (`MISTRAL_API_KEY`, optional `ELEVENLABS_API_KEY`)
 - Add example config YAML snippet
-- Screenshot or GIF of web UI
+- Add hosted-talk-to runbook details:
+  - MCP endpoint field mapping for ElevenLabs custom MCP server setup
+  - secure header/token setup guidance
+  - pre-demo smoke checklist
 
 **Task 2.22 — Final integration smoke test** (~1h)
 - Full clean-room test: fresh directory, set `MISTRAL_API_KEY`, run `dir2mcp up ./demo-corpus`
 - Verify every tool works via MCP client (or curl)
-- Verify web UI connects and displays correctly
+- Verify hosted ElevenLabs talk-to can call at least one read-only MCP tool end-to-end
 
 ---
 
@@ -488,7 +490,7 @@ Write Go functions for: insert/upsert document, insert representation, insert ch
 | **Day 1 AM** | Go scaffold + shared interfaces + MCP server core (JSON-RPC, sessions, auth) | Mistral embed client + HNSW index wrapper | SQLite schema + file discovery + type classification (incl. content-based secret patterns) | Config loading (correct precedence: flags→env→yaml→defaults) + secrets/keychain block + interactive wizard |
 | **Day 1 PM** | `tools/list`, `stats` (with `mode` field), `list_files`, `ask` stub (search_only), `up` wiring (exit codes, new flags, extended connection.json) + NDJSON mode | Embedding pipeline + `search` tool + `open_file` tool (with exclusion engine enforcement) | `raw_text` rep + chunking + incremental hash logic + Mistral OCR | CLI progress output + `status`/`ask` commands + hosted demo integration scaffold |
 | **Day 2 AM** | x402 v2 middleware (PAYMENT-REQUIRED/SIGNATURE/RESPONSE headers) + rate limiting | `transcribe` MCP tool + `annotate` tool + `transcribe_and_ask` tool | Mistral STT + ElevenLabs STT (both normalized) | ElevenLabs MCP integration + read-only tool approval policy |
-| **Day 2 PM** | ElevenLabs TTS + `ask_audio` + integration tests + binary build | Index fusion tuning + RAG quality + `reindex` + perf test | `ask` RAG generation (full LLM call) + archive ingestion + bug fixes | Hosted talk-to flow + demo corpus + demo script + README |
+| **Day 2 PM** | ElevenLabs TTS + `ask_audio` + integration tests + binary build | Index fusion tuning + RAG quality + `reindex` + perf test | `ask` RAG generation (full LLM call) + archive ingestion + bug fixes | Hosted talk-to flow + public endpoint runbook/checklist + demo corpus/script + docs |
 
 ---
 
