@@ -625,6 +625,11 @@ func normalizeScores(hits []model.SearchHit) {
 }
 
 func looksLikeCodeQuery(query string) bool {
+	return LooksLikeCodeQuery(query)
+}
+
+// LooksLikeCodeQuery reports whether the query appears code-oriented.
+func LooksLikeCodeQuery(query string) bool {
 	q := strings.ToLower(query)
 
 	// keyword pattern with word boundaries to avoid matching substrings.
@@ -723,6 +728,11 @@ func (s *Service) matchExcludePattern(pattern, relPath string) bool {
 		s.metaMu.Unlock()
 	}
 	return re.MatchString(relPath)
+}
+
+// MatchExcludePattern reports whether relPath matches an exclude glob.
+func (s *Service) MatchExcludePattern(pattern, relPath string) bool {
+	return s.matchExcludePattern(pattern, relPath)
 }
 
 func globToRegexp(glob string) string {
