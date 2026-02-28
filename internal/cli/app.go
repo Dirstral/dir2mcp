@@ -177,7 +177,7 @@ func (a *App) RunWithContext(ctx context.Context, args []string) int {
 	case "ask":
 		return a.runAsk(remaining[1:])
 	case "reindex":
-		return a.runReindex()
+		return a.runReindex(ctx)
 	case "config":
 		return a.runConfig(remaining[1:])
 	case "version":
@@ -299,11 +299,16 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 		writef(a.stderr, "bind server: %v\n", err)
 		return exitServerBindFailure
 	}
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	defer func() {
+		_ = ln.Close()
+	}()
 	mcpURL := buildMCPURL(ln.Addr().String(), cfg.MCPPath)
 
 	serverErrCh := make(chan error, 1)
 	go func() {
-		serverErrCh <- mcpServer.RunOnListener(ctx, ln)
+		serverErrCh <- mcpServer.RunOnListener(runCtx, ln)
 	}()
 
 	emitter.Emit("info", "server_started", map[string]interface{}{
@@ -338,18 +343,23 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	}
 
 	ingestErrCh := make(chan error, 1)
-	go func() {
-		runErr := ing.Run(ctx)
-		if errors.Is(runErr, model.ErrNotImplemented) {
-			ingestErrCh <- nil
-			return
-		}
-		ingestErrCh <- runErr
-	}()
+	if opts.readOnly {
+		close(ingestErrCh)
+	} else {
+		go func() {
+			defer close(ingestErrCh)
+			runErr := ing.Run(runCtx)
+			if errors.Is(runErr, model.ErrNotImplemented) {
+				ingestErrCh <- nil
+				return
+			}
+			ingestErrCh <- runErr
+		}()
+	}
 
 	for {
 		select {
-		case <-ctx.Done():
+		case <-runCtx.Done():
 			return exitSuccess
 		case serverErr := <-serverErrCh:
 			if serverErr != nil {
@@ -361,9 +371,12 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 				return exitGeneric
 			}
 			return exitSuccess
-		case ingestErr := <-ingestErrCh:
-			if ingestErr == nil {
+		case ingestErr, ok := <-ingestErrCh:
+			if !ok {
 				ingestErrCh = nil
+				continue
+			}
+			if ingestErr == nil {
 				continue
 			}
 			writef(a.stderr, "ingestion failed: %v\n", ingestErr)
@@ -393,10 +406,10 @@ func (a *App) runAsk(args []string) int {
 	return exitSuccess
 }
 
-func (a *App) runReindex() int {
+func (a *App) runReindex(ctx context.Context) int {
 	st := store.NewSQLiteStore(filepath.Join(".dir2mcp", "meta.sqlite"))
 	ing := ingest.NewService(config.Default(), st)
-	err := ing.Reindex(context.Background())
+	err := ing.Reindex(ctx)
 	if errors.Is(err, model.ErrNotImplemented) {
 		writeln(a.stdout, "reindex skeleton: ingestion pipeline not implemented yet")
 		return exitSuccess

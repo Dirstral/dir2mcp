@@ -96,6 +96,10 @@ func (s *Server) Run(ctx context.Context) error {
 }
 
 func (s *Server) RunOnListener(ctx context.Context, ln net.Listener) error {
+	if ln == nil {
+		return errors.New("nil listener passed to RunOnListener")
+	}
+
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -123,8 +127,7 @@ func (s *Server) RunOnListener(ctx context.Context, ln net.Listener) error {
 	case <-runCtx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_ = server.Shutdown(shutdownCtx)
-		return nil
+		return server.Shutdown(shutdownCtx)
 	case err := <-errCh:
 		return err
 	}

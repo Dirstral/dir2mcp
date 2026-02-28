@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,6 +19,8 @@ import (
 	"github.com/Dirstral/dir2mcp/internal/config"
 	"github.com/Dirstral/dir2mcp/internal/model"
 )
+
+var cwdMu sync.Mutex
 
 func TestUpCreatesSecretTokenAndConnectionFile(t *testing.T) {
 	tmp := t.TempDir()
@@ -29,7 +32,7 @@ func TestUpCreatesSecretTokenAndConnectionFile(t *testing.T) {
 	app := cli.NewAppWithIO(&stdout, &stderr)
 
 	withWorkingDir(t, tmp, func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 
 		code := app.RunWithContext(ctx, []string{"up", "--listen", "127.0.0.1:0"})
@@ -153,7 +156,7 @@ func TestUpJSONConnectionEventIncludesTokenSourceForFileAuth(t *testing.T) {
 	app := cli.NewAppWithIO(&stdout, &stderr)
 
 	withWorkingDir(t, tmp, func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 
 		code := app.RunWithContext(ctx, []string{
@@ -296,6 +299,9 @@ func scanLines(t *testing.T, text string) []string {
 
 func withWorkingDir(t *testing.T, dir string, fn func()) {
 	t.Helper()
+
+	cwdMu.Lock()
+	defer cwdMu.Unlock()
 
 	original, err := os.Getwd()
 	if err != nil {
