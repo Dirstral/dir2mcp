@@ -2,6 +2,7 @@ package tests
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"testing"
 
@@ -56,13 +57,14 @@ func TestListFiles_ExcludesDeletedDocuments(t *testing.T) {
 func TestListFiles_TotalReflectsOnlyLiveDocs(t *testing.T) {
 	ctx := context.Background()
 	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	t.Cleanup(func() { _ = st.Close() })
 	if err := st.Init(ctx); err != nil {
 		t.Fatalf("store init: %v", err)
 	}
 
 	for i := 0; i < 5; i++ {
-		path := filepath.Join("dir", filepath.FromSlash("file"+string(rune('a'+i))+".txt"))
-		doc := model.Document{RelPath: filepath.ToSlash(path), DocType: "text", Status: "ok"}
+		path := fmt.Sprintf("dir/file%c.txt", 'a'+i)
+		doc := model.Document{RelPath: path, DocType: "text", Status: "ok"}
 		if err := st.UpsertDocument(ctx, doc); err != nil {
 			t.Fatalf("upsert: %v", err)
 		}
