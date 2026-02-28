@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -29,9 +30,15 @@ const (
 	sessionCleanupInterval = time.Hour
 )
 
+// DefaultSearchK is the default number of hits to request when a search
+// query omits the `k` parameter or supplies a non‑positive value. This
+// mirrors the JSON schema in SPEC.md which specifies a default of 10.
+const DefaultSearchK = 10
+
 type Server struct {
 	cfg       config.Config
 	authToken string
+	retriever model.Retriever
 
 	sessionMu sync.RWMutex
 	sessions  map[string]time.Time
@@ -67,16 +74,29 @@ type validationError struct {
 	canonicalCode string
 }
 
+type toolsCallParams struct {
+	Name      string          `json:"name"`
+	Arguments json.RawMessage `json:"arguments"`
+}
+
+type searchArgs struct {
+	Query      string   `json:"query"`
+	K          int      `json:"k"`
+	Index      string   `json:"index"`
+	PathPrefix string   `json:"path_prefix"`
+	FileGlob   string   `json:"file_glob"`
+	DocTypes   []string `json:"doc_types"`
+}
+
 func (e validationError) Error() string {
 	return e.message
 }
 
 func NewServer(cfg config.Config, retriever model.Retriever) *Server {
-	_ = retriever
-
 	return &Server{
 		cfg:       cfg,
 		authToken: loadAuthToken(cfg),
+		retriever: retriever,
 		sessions:  make(map[string]time.Time),
 	}
 }
@@ -198,6 +218,10 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeResult(w, http.StatusOK, id, map[string]interface{}{})
+	case "tools/list":
+		s.handleToolsList(w, id, hasID)
+	case "tools/call":
+		s.handleToolsCall(r.Context(), w, id, hasID, req.Params)
 	default:
 		if !hasID {
 			w.WriteHeader(http.StatusAccepted)
@@ -235,6 +259,123 @@ func (s *Server) handleInitialize(w http.ResponseWriter, id interface{}, hasID b
 		},
 		"instructions": "Use tools/list then tools/call. Results include citations.",
 	})
+}
+
+func (s *Server) handleToolsList(w http.ResponseWriter, id interface{}, hasID bool) {
+	if !hasID {
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
+
+	searchTool := map[string]interface{}{
+		"name":        "dir2mcp.search",
+		"description": "Semantic retrieval across indexed content.",
+		"inputSchema": map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"query":       map[string]interface{}{"type": "string"},
+				"k":           map[string]interface{}{"type": "integer"},
+				"index":       map[string]interface{}{"type": "string", "enum": []string{"auto", "text", "code", "both"}},
+				"path_prefix": map[string]interface{}{"type": "string"},
+				"file_glob":   map[string]interface{}{"type": "string"},
+				"doc_types": map[string]interface{}{
+					"type":  "array",
+					"items": map[string]interface{}{"type": "string"},
+				},
+			},
+			"required": []string{"query"},
+		},
+	}
+
+	writeResult(w, http.StatusOK, id, map[string]interface{}{
+		"tools": []interface{}{searchTool},
+	})
+}
+
+func (s *Server) handleToolsCall(ctx context.Context, w http.ResponseWriter, id interface{}, hasID bool, raw json.RawMessage) {
+	if !hasID {
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
+	if s.retriever == nil {
+		writeError(w, http.StatusOK, id, -32000, "retriever not configured", "INDEX_NOT_READY", false)
+		return
+	}
+
+	if len(raw) == 0 {
+		writeError(w, http.StatusBadRequest, id, -32602, "params is required", "MISSING_FIELD", false)
+		return
+	}
+	var params toolsCallParams
+	if err := json.Unmarshal(raw, &params); err != nil {
+		writeError(w, http.StatusBadRequest, id, -32602, "invalid params", "INVALID_FIELD", false)
+		return
+	}
+
+	switch params.Name {
+	case "dir2mcp.search":
+		var args searchArgs
+		if len(params.Arguments) > 0 {
+			if err := json.Unmarshal(params.Arguments, &args); err != nil {
+				writeError(w, http.StatusBadRequest, id, -32602, "invalid tool arguments", "INVALID_FIELD", false)
+				return
+			}
+		}
+		if strings.TrimSpace(args.Query) == "" {
+			writeError(w, http.StatusBadRequest, id, -32602, "query is required", "MISSING_FIELD", false)
+			return
+		}
+
+		// k is optional.  If the client does not provide a value (or provides a
+		// non‑positive one) we fall back to a sensible default rather than return
+		// an error.  This matches the `default` keyword in the JSON schema
+		// defined in SPEC.md.
+		if args.K <= 0 {
+			args.K = DefaultSearchK
+		}
+
+		hits, err := s.retriever.Search(ctx, model.SearchQuery{
+			Query:      args.Query,
+			K:          args.K,
+			Index:      args.Index,
+			PathPrefix: args.PathPrefix,
+			FileGlob:   args.FileGlob,
+			DocTypes:   args.DocTypes,
+		})
+		if err != nil {
+			log.Printf("tools/call search failed: id=%v tool=%s err=%v", id, params.Name, err)
+			// choose a canonical code/message based on the error.  At present the
+			// retriever may return an error when the index is not yet available or
+			// configured; in that case we want the caller to see INDEX_NOT_READY
+			// and a matching message.  Otherwise fall back to a generic internal
+			// error code as defined in SPEC.md.
+			canon := "INTERNAL_ERROR"
+			msg := "internal server error"
+			if errors.Is(err, model.ErrIndexNotReady) || errors.Is(err, model.ErrIndexNotConfigured) {
+				canon = "INDEX_NOT_READY"
+				msg = "index not ready"
+			}
+			writeError(w, http.StatusOK, id, -32000, msg, canon, true)
+			return
+		}
+
+		writeResult(w, http.StatusOK, id, map[string]interface{}{
+			"content": []interface{}{
+				map[string]interface{}{
+					"type": "text",
+					"text": "Found results.",
+				},
+			},
+			"structuredContent": map[string]interface{}{
+				"query":             args.Query,
+				"k":                 args.K,
+				"hits":              hits,
+				"indexing_complete": false,
+			},
+		})
+	default:
+		writeError(w, http.StatusBadRequest, id, -32602, "unknown tool", "INVALID_FIELD", false)
+	}
 }
 
 func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
@@ -428,6 +569,11 @@ func loadAuthToken(cfg config.Config) string {
 	path := filepath.Join(cfg.StateDir, "secret.token")
 	content, err := os.ReadFile(path)
 	if err != nil {
+		// Log a warning so operators can diagnose missing tokens.  The
+		// caller will still receive an empty string, which means no auth
+		// token will be presented and certain AuthMode operations may be
+		// blocked.
+		log.Printf("warning: could not load auth token from %s: %v", path, err)
 		return ""
 	}
 	return strings.TrimSpace(string(content))
@@ -466,7 +612,10 @@ func isOriginAllowed(origin string, allowlist []string) bool {
 			}
 
 			normalizedAllowed := parsedAllowed.Scheme + "://" + strings.ToLower(parsedAllowed.Host)
-			if strings.EqualFold(normalizedAllowed, normalizedOrigin) {
+			// both normalizedAllowed and normalizedOrigin have lowercase hosts and
+			// scheme compared earlier using EqualFold, so a simple equality check
+			// suffices here.
+			if normalizedAllowed == normalizedOrigin {
 				return true
 			}
 			continue
