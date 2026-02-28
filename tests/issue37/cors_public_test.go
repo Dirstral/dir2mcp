@@ -136,7 +136,7 @@ func TestPublicFlag_RejectsAuthNone(t *testing.T) {
 	if code == 0 {
 		t.Fatal("expected non-zero exit code for --public --auth none")
 	}
-	if !strings.Contains(stderr.String(), "--public requires authentication") {
+	if !strings.Contains(stderr.String(), "--public requires auth") {
 		t.Fatalf("expected auth error message, got stderr=%q", stderr.String())
 	}
 }

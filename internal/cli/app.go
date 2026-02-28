@@ -216,21 +216,6 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 		return exitConfigInvalid
 	}
 
-	if opts.public {
-		// --public: bind all interfaces unless --listen was explicitly set.
-		if opts.listen == "" {
-			cfg.ListenAddr = "0.0.0.0:0"
-		}
-		// Block insecure combination: --public with --auth none.
-		authMode := strings.TrimSpace(opts.auth)
-		if authMode == "" {
-			authMode = strings.TrimSpace(cfg.AuthMode)
-		}
-		if strings.EqualFold(authMode, "none") {
-			writeln(a.stderr, "ERROR: --public requires authentication; --auth none is not allowed in public mode")
-			return exitConfigInvalid
-		}
-	}
 	if opts.listen != "" {
 		cfg.ListenAddr = opts.listen
 	}
