@@ -101,7 +101,7 @@ func realIP(r *http.Request, limiter *ipRateLimiter) string {
 
 	peerIdentity := peerIP.String()
 	if limiter != nil && limiter.isTrustedProxy(peerIdentity) {
-		if xffIP := parseLeftMostXFFIP(r.Header.Get("X-Forwarded-For")); xffIP != nil {
+		if xffIP := rightMostClientXFFIP(r.Header.Get("X-Forwarded-For"), limiter); xffIP != nil {
 			return xffIP.String()
 		}
 	}
@@ -202,16 +202,27 @@ func (l *ipRateLimiter) isTrustedProxy(remoteIP string) bool {
 	return false
 }
 
-func parseLeftMostXFFIP(xff string) net.IP {
+// rightMostClientXFFIP selects the real client IP from X-Forwarded-For by
+// iterating entries right-to-left and returning the first address that is not
+// a trusted proxy. This prevents spoofing: an attacker can inject arbitrary
+// values at the left of the header, but every trusted hop appends from the
+// right, so the right-most untrusted entry is the true origin.
+func rightMostClientXFFIP(xff string, limiter *ipRateLimiter) net.IP {
 	xff = strings.TrimSpace(xff)
 	if xff == "" {
 		return nil
 	}
 	parts := strings.Split(xff, ",")
-	if len(parts) == 0 {
-		return nil
+	for i := len(parts) - 1; i >= 0; i-- {
+		ip := parseIPValue(parts[i])
+		if ip == nil {
+			continue
+		}
+		if limiter == nil || !limiter.isTrustedProxy(ip.String()) {
+			return ip
+		}
 	}
-	return parseIPValue(parts[0])
+	return nil
 }
 
 func parseIPValue(value string) net.IP {
