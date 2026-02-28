@@ -17,6 +17,7 @@ type Config struct {
 	ProtocolVersion string
 	Public          bool
 	AuthMode        string
+	AllowedOrigins  []string
 }
 
 func Default() Config {
@@ -28,6 +29,10 @@ func Default() Config {
 		ProtocolVersion: DefaultProtocolVersion,
 		Public:          false,
 		AuthMode:        "auto",
+		AllowedOrigins: []string{
+			"http://localhost",
+			"http://127.0.0.1",
+		},
 	}
 }
 
