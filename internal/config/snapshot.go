@@ -21,7 +21,7 @@ func redactSecret(value, envName string) string {
 	if value == "" {
 		return ""
 	}
-	return "<from env " + envName + ">"
+	return "<redacted>"
 }
 
 // WriteSnapshot writes the snapshot YAML to stateDir/.dir2mcp.yaml.snapshot.
