@@ -12,6 +12,11 @@ import (
 
 const defaultMaxFileSizeBytes int64 = 10 * 1024 * 1024
 
+// DefaultMaxFileSizeBytes returns the default ingest file-size cap.
+func DefaultMaxFileSizeBytes() int64 {
+	return defaultMaxFileSizeBytes
+}
+
 var defaultExcludedDirs = map[string]struct{}{
 	".git":         {},
 	".dir2mcp":     {},
