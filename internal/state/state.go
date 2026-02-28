@@ -36,7 +36,7 @@ func EnsureStateDir(stateDir string, cfg *config.Config) error {
 		}
 		return err
 	}
-	lockFile.Close()
+	_ = lockFile.Close()
 	// Lock is advisory; we leave the file in place while server runs (caller holds process).
 
 	tokenPath := filepath.Join(stateDir, "secret.token")

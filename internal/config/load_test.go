@@ -20,8 +20,8 @@ func TestPrecedence_FlagsOverrideEnv(t *testing.T) {
 	}
 
 	// Env: MISTRAL_API_KEY so validation passes
-	os.Setenv("MISTRAL_API_KEY", "test-key")
-	defer os.Unsetenv("MISTRAL_API_KEY")
+	_ = os.Setenv("MISTRAL_API_KEY", "test-key")
+	defer func() { _ = os.Unsetenv("MISTRAL_API_KEY") }()
 
 	// Overrides (flags) should win over file
 	listenOverride := "127.0.0.1:8888"
@@ -56,8 +56,8 @@ func TestPrecedence_EnvOverridesFile(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte(yamlContent), 0600); err != nil {
 		t.Fatal(err)
 	}
-	os.Setenv("MISTRAL_API_KEY", "from-env")
-	defer os.Unsetenv("MISTRAL_API_KEY")
+	_ = os.Setenv("MISTRAL_API_KEY", "from-env")
+	defer func() { _ = os.Unsetenv("MISTRAL_API_KEY") }()
 
 	cfg, err := Load(Options{ConfigPath: configPath, RootDir: dir, SkipValidate: true})
 	if err != nil {
