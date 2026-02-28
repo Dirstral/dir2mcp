@@ -182,6 +182,9 @@ func runUp(cmd *cobra.Command, _ []string) error {
 	mux.HandleFunc("/api/corpus", func(w http.ResponseWriter, r *http.Request) {
 		serveCorpusJSON(w, r, stateDir)
 	})
+	mux.HandleFunc("/api/connection", func(w http.ResponseWriter, r *http.Request) {
+		serveConnectionJSON(w, r, stateDir)
+	})
 	allowedOrigins := cfg.Security.AllowedOrigins
 	if len(allowedOrigins) == 0 {
 		allowedOrigins = []string{"http://localhost:3000", "http://127.0.0.1:3000"}
@@ -220,15 +223,21 @@ func corsForAPI(next http.Handler, allowedOrigins []string) http.Handler {
 	})
 }
 
+const maxProxyBody = 1 << 20 // 1MB limit for proxy request body
+
 // proxyToMCP forwards the request to mcpURL with Authorization: Bearer token.
 func proxyToMCP(w http.ResponseWriter, r *http.Request, mcpURL, token string) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	body, err := io.ReadAll(r.Body)
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxProxyBody+1))
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		http.Error(w, "failed to read request body", http.StatusBadRequest)
+		return
+	}
+	if len(body) > maxProxyBody {
+		http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
 		return
 	}
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, mcpURL, io.NopCloser(bytes.NewReader(body)))
@@ -271,6 +280,38 @@ func serveCorpusJSON(w http.ResponseWriter, r *http.Request, stateDir string) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write(data)
+}
+
+// serveConnectionJSON serves GET /api/connection with stateDir/connection.json, redacting the token.
+func serveConnectionJSON(w http.ResponseWriter, r *http.Request, stateDir string) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	data, err := os.ReadFile(filepath.Join(stateDir, "connection.json"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			http.Error(w, "connection.json not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	var conn map[string]interface{}
+	if err := json.Unmarshal(data, &conn); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if headers, ok := conn["headers"].(map[string]interface{}); ok && headers["Authorization"] != nil {
+		headers["Authorization"] = "Bearer <redacted>"
+	}
+	out, err := json.MarshalIndent(conn, "", "  ")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(out)
 }
 
 func emitNDJSON(event string, data map[string]interface{}) {

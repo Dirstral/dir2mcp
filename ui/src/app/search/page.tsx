@@ -8,14 +8,52 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL || "";
 export default function SearchPage() {
   const [query, setQuery] = useState("");
   const [message, setMessage] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!API_URL) {
       setMessage("Set NEXT_PUBLIC_API_URL to your dir2mcp up URL.");
       return;
     }
-    setMessage("Search via MCP (dir2mcp.search) will be available when the tool is implemented.");
+    setMessage(null);
+    setLoading(true);
+    try {
+      const body = {
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: { name: "dir2mcp.search", arguments: { query } },
+        id: 1,
+      };
+      const res = await fetch(`${API_URL}/api/mcp`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const text = await res.text();
+      if (!res.ok) {
+        setMessage(`Server ${res.status}: ${text || res.statusText}`);
+        return;
+      }
+      try {
+        const data = JSON.parse(text);
+        if (data.error) {
+          setMessage(`Error: ${data.error.message || JSON.stringify(data.error)}`);
+          return;
+        }
+        if (data.result?.content) {
+          setMessage(`Results: ${JSON.stringify(data.result.content).slice(0, 500)}...`);
+          return;
+        }
+        setMessage(text.slice(0, 400) + (text.length > 400 ? "..." : ""));
+      } catch {
+        setMessage(text.slice(0, 400) + (text.length > 400 ? "..." : ""));
+      }
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "Request failed");
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
@@ -40,9 +78,10 @@ export default function SearchPage() {
           />
           <button
             type="submit"
-            className="rounded bg-zinc-900 dark:bg-zinc-100 text-zinc-50 dark:text-zinc-900 px-4 py-2 font-medium"
+            disabled={loading}
+            className="rounded bg-zinc-900 dark:bg-zinc-100 text-zinc-50 dark:text-zinc-900 px-4 py-2 font-medium disabled:opacity-50"
           >
-            Search
+            {loading ? "Searching…" : "Search"}
           </button>
         </form>
         {message && <p className="mt-4 text-sm text-zinc-600 dark:text-zinc-400">{message}</p>}
