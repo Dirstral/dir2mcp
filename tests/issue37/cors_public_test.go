@@ -2,6 +2,7 @@ package issue37
 
 import (
 	"bytes"
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -131,7 +132,7 @@ func TestPublicFlag_RejectsAuthNone(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	app := cli.NewAppWithIO(&stdout, &stderr)
 
-	code := app.RunWithContext(t.Context(), []string{"up", "--public", "--auth", "none"})
+	code := app.RunWithContext(context.Background(), []string{"up", "--public", "--auth", "none"})
 
 	if code == 0 {
 		t.Fatal("expected non-zero exit code for --public --auth none")
