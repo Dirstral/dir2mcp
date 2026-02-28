@@ -682,13 +682,10 @@ func publicURLAddress(configuredListenAddr, resolvedListenAddr string) string {
 	if port := extractPortFromAddress(resolvedListenAddr); port != "" {
 		return net.JoinHostPort(host, port)
 	}
+	if port := extractPortFromAddress(configuredListenAddr); port != "" {
+		return net.JoinHostPort(host, port)
+	}
 
-	if resolvedListenAddr != "" {
-		return resolvedListenAddr
-	}
-	if configuredListenAddr != "" {
-		return configuredListenAddr
-	}
 	return net.JoinHostPort(host, "0")
 }
 

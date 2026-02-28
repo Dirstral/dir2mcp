@@ -9,10 +9,10 @@ func TestPublicURLAddress_UsesConfiguredHostAndResolvedPort(t *testing.T) {
 	}
 }
 
-func TestPublicURLAddress_PrefersResolvedAddressWhenPortUnavailable(t *testing.T) {
+func TestPublicURLAddress_UsesConfiguredPortWhenResolvedPortUnavailable(t *testing.T) {
 	got := publicURLAddress("0.0.0.0:0", "listener-address")
-	if got != "listener-address" {
-		t.Fatalf("unexpected fallback address: got=%q want=%q", got, "listener-address")
+	if got != "0.0.0.0:0" {
+		t.Fatalf("unexpected fallback address: got=%q want=%q", got, "0.0.0.0:0")
 	}
 }
 
