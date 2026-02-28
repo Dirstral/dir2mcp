@@ -361,8 +361,24 @@ func (s *Service) retainArchiveMembers(ctx context.Context, archiveRelPath strin
 		for _, doc := range docs {
 			seen[doc.RelPath] = struct{}{}
 		}
-		offset += len(docs)
-		if len(docs) == 0 || int64(offset) >= total {
+		pageLen := len(docs)
+		offset += pageLen
+		if pageLen == 0 {
+			break
+		}
+		if pageLen < pageSize {
+			if int64(offset) < total {
+				s.getLogger().Printf(
+					"retainArchiveMembers(%s): pagination inconsistency (offset=%d page=%d total=%d); stopping on short page",
+					archiveRelPath,
+					offset-pageLen,
+					pageLen,
+					total,
+				)
+			}
+			break
+		}
+		if int64(offset) >= total {
 			break
 		}
 	}
