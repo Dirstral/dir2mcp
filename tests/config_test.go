@@ -69,6 +69,67 @@ func TestLoad_DotEnvLocalOverridesDotEnv(t *testing.T) {
 	})
 }
 
+func TestLoad_UsesDotEnvWhenEnvIsMissing_ElevenLabs(t *testing.T) {
+	tmp := t.TempDir()
+	writeFile(t, filepath.Join(tmp, ".env"), "ELEVENLABS_API_KEY=el_from_dotenv\nELEVENLABS_BASE_URL=https://el-dotenv.local\n")
+
+	withWorkingDir(t, tmp, func() {
+		t.Setenv("ELEVENLABS_API_KEY", "")
+		t.Setenv("ELEVENLABS_BASE_URL", "")
+		cfg, err := config.Load("")
+		if err != nil {
+			t.Fatalf("Load failed: %v", err)
+		}
+		if cfg.ElevenLabsAPIKey != "el_from_dotenv" {
+			t.Fatalf("unexpected elevenlabs api key: %q", cfg.ElevenLabsAPIKey)
+		}
+		if cfg.ElevenLabsBaseURL != "https://el-dotenv.local" {
+			t.Fatalf("unexpected elevenlabs base URL: %q", cfg.ElevenLabsBaseURL)
+		}
+	})
+}
+
+func TestLoad_EnvOverridesDotEnv_ElevenLabs(t *testing.T) {
+	tmp := t.TempDir()
+	writeFile(t, filepath.Join(tmp, ".env"), "ELEVENLABS_API_KEY=el_from_dotenv\nELEVENLABS_BASE_URL=https://el-dotenv.local\n")
+
+	withWorkingDir(t, tmp, func() {
+		t.Setenv("ELEVENLABS_API_KEY", "el_from_env")
+		t.Setenv("ELEVENLABS_BASE_URL", "https://el-env.local")
+		cfg, err := config.Load("")
+		if err != nil {
+			t.Fatalf("Load failed: %v", err)
+		}
+		if cfg.ElevenLabsAPIKey != "el_from_env" {
+			t.Fatalf("unexpected elevenlabs api key: %q", cfg.ElevenLabsAPIKey)
+		}
+		if cfg.ElevenLabsBaseURL != "https://el-env.local" {
+			t.Fatalf("unexpected elevenlabs base URL: %q", cfg.ElevenLabsBaseURL)
+		}
+	})
+}
+
+func TestLoad_DotEnvLocalOverridesDotEnv_ElevenLabs(t *testing.T) {
+	tmp := t.TempDir()
+	writeFile(t, filepath.Join(tmp, ".env"), "ELEVENLABS_API_KEY=el_env_file\nELEVENLABS_BASE_URL=https://el-env-file.local\n")
+	writeFile(t, filepath.Join(tmp, ".env.local"), "ELEVENLABS_API_KEY=el_env_local\nELEVENLABS_BASE_URL=https://el-env-local.local\n")
+
+	withWorkingDir(t, tmp, func() {
+		t.Setenv("ELEVENLABS_API_KEY", "")
+		t.Setenv("ELEVENLABS_BASE_URL", "")
+		cfg, err := config.Load("")
+		if err != nil {
+			t.Fatalf("Load failed: %v", err)
+		}
+		if cfg.ElevenLabsAPIKey != "el_env_local" {
+			t.Fatalf("unexpected elevenlabs api key: %q", cfg.ElevenLabsAPIKey)
+		}
+		if cfg.ElevenLabsBaseURL != "https://el-env-local.local" {
+			t.Fatalf("unexpected elevenlabs base URL: %q", cfg.ElevenLabsBaseURL)
+		}
+	})
+}
+
 func TestLoad_AllowedOriginsEnvAppendsToDefaults(t *testing.T) {
 	tmp := t.TempDir()
 

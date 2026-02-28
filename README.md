@@ -136,8 +136,12 @@ export GITHUB_PERSONAL_ACCESS_TOKEN=your_pat_here
 export CONTEXT7_API_KEY=your_context7_api_key
 export MISTRAL_API_KEY=your_mistral_api_key
 export MISTRAL_BASE_URL=https://api.mistral.ai
+export ELEVENLABS_API_KEY=your_elevenlabs_api_key
+export ELEVENLABS_BASE_URL=https://api.elevenlabs.io
 export DIR2MCP_ALLOWED_ORIGINS=https://elevenlabs.io
 ```
+
+ElevenLabs integrations should read `ELEVENLABS_API_KEY` and `ELEVENLABS_BASE_URL` from env-backed config, not hardcoded literals.
 
 `DIR2MCP_ALLOWED_ORIGINS` appends extra allowed origins for browser requests while keeping localhost defaults (`http://localhost`, `http://127.0.0.1`) enabled.
 

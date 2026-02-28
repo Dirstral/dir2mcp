@@ -29,6 +29,8 @@ type Config struct {
 	ResolvedAuthToken string
 	MistralAPIKey     string
 	MistralBaseURL    string
+	ElevenLabsAPIKey  string
+	ElevenLabsBaseURL string
 	// AllowedOrigins is always initialized with local defaults and then extended
 	// via env/CLI comma-separated origin lists.
 	AllowedOrigins []string
@@ -61,8 +63,10 @@ func Default() Config {
 			`(?i)token\s*[:=]\s*[A-Za-z0-9_.-]{20,}`,
 			`sk_[a-z0-9]{32}|api_[A-Za-z0-9]{32}`,
 		},
-		MistralAPIKey:  "",
-		MistralBaseURL: "",
+		MistralAPIKey:     "",
+		MistralBaseURL:    "",
+		ElevenLabsAPIKey:  "",
+		ElevenLabsBaseURL: "",
 		AllowedOrigins: []string{
 			"http://localhost",
 			"http://127.0.0.1",
@@ -106,6 +110,12 @@ func applyEnvOverrides(cfg *Config, overrideEnv map[string]string) {
 	}
 	if baseURL, ok := envLookup("MISTRAL_BASE_URL", overrideEnv); ok && strings.TrimSpace(baseURL) != "" {
 		cfg.MistralBaseURL = baseURL
+	}
+	if apiKey, ok := envLookup("ELEVENLABS_API_KEY", overrideEnv); ok && strings.TrimSpace(apiKey) != "" {
+		cfg.ElevenLabsAPIKey = apiKey
+	}
+	if baseURL, ok := envLookup("ELEVENLABS_BASE_URL", overrideEnv); ok && strings.TrimSpace(baseURL) != "" {
+		cfg.ElevenLabsBaseURL = baseURL
 	}
 	if allowedOrigins, ok := envLookup("DIR2MCP_ALLOWED_ORIGINS", overrideEnv); ok {
 		cfg.AllowedOrigins = MergeAllowedOrigins(cfg.AllowedOrigins, allowedOrigins)
