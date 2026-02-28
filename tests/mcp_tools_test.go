@@ -2,7 +2,9 @@ package tests
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +12,7 @@ import (
 
 	"dir2mcp/internal/config"
 	"dir2mcp/internal/mcp"
+	"dir2mcp/internal/model"
 )
 
 func TestMCPToolsList_RegistersDayOneToolsWithSchemas(t *testing.T) {
@@ -175,6 +178,212 @@ func TestMCPToolsCallListFiles_GracefulWithoutSQLiteStore(t *testing.T) {
 	}
 	if len(filesRaw) != 0 {
 		t.Fatalf("expected empty files list, got %#v", filesRaw)
+	}
+}
+
+func TestMCPToolsCallStats_RejectsUnknownArgument(t *testing.T) {
+	cfg := config.Default()
+	cfg.AuthMode = "none"
+
+	server := httptest.NewServer(mcp.NewServer(cfg, nil).Handler())
+	defer server.Close()
+
+	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
+
+	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"dir2mcp.stats","arguments":{"unexpected":true}}}`)
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+
+	assertToolCallErrorCode(t, resp, "INVALID_FIELD")
+}
+
+func TestMCPToolsCallListFiles_RejectsUnknownArgument(t *testing.T) {
+	cfg := config.Default()
+	cfg.AuthMode = "none"
+
+	server := httptest.NewServer(mcp.NewServer(cfg, nil).Handler())
+	defer server.Close()
+
+	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
+
+	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"dir2mcp.list_files","arguments":{"limit":10,"offset":0,"foo":"bar"}}}`)
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+
+	assertToolCallErrorCode(t, resp, "INVALID_FIELD")
+}
+
+func TestMCPToolsCallListFiles_RejectsLimitWrongType(t *testing.T) {
+	cfg := config.Default()
+	cfg.AuthMode = "none"
+
+	server := httptest.NewServer(mcp.NewServer(cfg, nil).Handler())
+	defer server.Close()
+
+	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
+
+	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"dir2mcp.list_files","arguments":{"limit":"10","offset":0}}}`)
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+
+	assertToolCallErrorCode(t, resp, "INVALID_FIELD")
+}
+
+func TestMCPToolsCallListFiles_RejectsLimitOutOfRange(t *testing.T) {
+	cfg := config.Default()
+	cfg.AuthMode = "none"
+
+	server := httptest.NewServer(mcp.NewServer(cfg, nil).Handler())
+	defer server.Close()
+
+	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
+
+	for _, tc := range []struct {
+		name string
+		body string
+		code string
+	}{
+		{
+			name: "limit_zero",
+			body: `{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"dir2mcp.list_files","arguments":{"limit":0,"offset":0}}}`,
+			code: "INVALID_RANGE",
+		},
+		{
+			name: "limit_too_large",
+			body: `{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"dir2mcp.list_files","arguments":{"limit":5001,"offset":0}}}`,
+			code: "INVALID_RANGE",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, tc.body)
+			defer func() {
+				_ = resp.Body.Close()
+			}()
+			assertToolCallErrorCode(t, resp, tc.code)
+		})
+	}
+}
+
+func TestMCPToolsCallListFiles_RejectsOffsetWrongType(t *testing.T) {
+	cfg := config.Default()
+	cfg.AuthMode = "none"
+
+	server := httptest.NewServer(mcp.NewServer(cfg, nil).Handler())
+	defer server.Close()
+
+	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
+
+	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"dir2mcp.list_files","arguments":{"limit":10,"offset":"0"}}}`)
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+
+	assertToolCallErrorCode(t, resp, "INVALID_FIELD")
+}
+
+func TestMCPToolsCallListFiles_RejectsNegativeOffset(t *testing.T) {
+	cfg := config.Default()
+	cfg.AuthMode = "none"
+
+	server := httptest.NewServer(mcp.NewServer(cfg, nil).Handler())
+	defer server.Close()
+
+	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
+
+	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"dir2mcp.list_files","arguments":{"limit":10,"offset":-1}}}`)
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+
+	assertToolCallErrorCode(t, resp, "INVALID_RANGE")
+}
+
+func TestMCPToolsCallListFiles_StoreFailureReturnsStoreCorrupt(t *testing.T) {
+	cfg := config.Default()
+	cfg.AuthMode = "none"
+
+	server := httptest.NewServer(
+		mcp.NewServer(cfg, nil, mcp.WithStore(&failingListFilesStore{err: errors.New("boom")})).Handler(),
+	)
+	defer server.Close()
+
+	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
+
+	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"dir2mcp.list_files","arguments":{"limit":10,"offset":0}}}`)
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+
+	assertToolCallErrorCode(t, resp, "STORE_CORRUPT")
+}
+
+type failingListFilesStore struct {
+	err error
+}
+
+func (s *failingListFilesStore) Init(_ context.Context) error {
+	return nil
+}
+
+func (s *failingListFilesStore) UpsertDocument(_ context.Context, _ model.Document) error {
+	return nil
+}
+
+func (s *failingListFilesStore) GetDocumentByPath(_ context.Context, _ string) (model.Document, error) {
+	return model.Document{}, model.ErrNotImplemented
+}
+
+func (s *failingListFilesStore) ListFiles(_ context.Context, _, _ string, _, _ int) ([]model.Document, int64, error) {
+	return nil, 0, s.err
+}
+
+func (s *failingListFilesStore) Close() error {
+	return nil
+}
+
+func assertToolCallErrorCode(t *testing.T, resp *http.Response, wantCode string) {
+	t.Helper()
+
+	if resp.StatusCode != http.StatusOK {
+		payload, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status=%d want=%d body=%s", resp.StatusCode, http.StatusOK, string(payload))
+	}
+
+	var envelope struct {
+		Result struct {
+			IsError           bool                   `json:"isError"`
+			StructuredContent map[string]interface{} `json:"structuredContent"`
+		} `json:"result"`
+		Error interface{} `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	if envelope.Error != nil {
+		t.Fatalf("expected tool-level error result, got top-level error: %#v", envelope.Error)
+	}
+	if !envelope.Result.IsError {
+		t.Fatalf("expected isError=true, got false with structuredContent=%#v", envelope.Result.StructuredContent)
+	}
+
+	errObjRaw, ok := envelope.Result.StructuredContent["error"]
+	if !ok {
+		t.Fatalf("expected structuredContent.error, got %#v", envelope.Result.StructuredContent)
+	}
+	errObj, ok := errObjRaw.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected structuredContent.error object, got %#v", errObjRaw)
+	}
+	gotCode, ok := errObj["code"].(string)
+	if !ok {
+		t.Fatalf("expected structuredContent.error.code string, got %#v", errObj["code"])
+	}
+	if gotCode != wantCode {
+		t.Fatalf("unexpected error code: got=%q want=%q full_error=%#v", gotCode, wantCode, errObj)
 	}
 }
 
