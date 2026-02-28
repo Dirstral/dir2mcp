@@ -630,6 +630,9 @@ func (s *Server) handleAskTool(ctx context.Context, args map[string]interface{})
 		if errors.Is(askErr, model.ErrIndexNotReady) || errors.Is(askErr, model.ErrIndexNotConfigured) {
 			code = "INDEX_NOT_READY"
 			message = "index not ready"
+		}
+		return toolCallResult{}, &toolExecutionError{Code: code, Message: message, Retryable: retryable}
+	}
 	structured := buildAskStructuredContent(askResult)
 	contentText := askResult.Answer
 
