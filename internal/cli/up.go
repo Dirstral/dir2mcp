@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -37,7 +38,6 @@ var (
 	upX402Resource  string
 	upX402Network   string
 	upX402Price     string
-	upReadOnly      bool
 )
 
 func init() {
@@ -52,7 +52,6 @@ func init() {
 	upCmd.Flags().StringVar(&upX402Resource, "x402-resource-base-url", "", "public base URL for payment requirements")
 	upCmd.Flags().StringVar(&upX402Network, "x402-network", "", "x402 network id (e.g. eip155:8453)")
 	upCmd.Flags().StringVar(&upX402Price, "x402-price", "", "default per-call price for paid routes")
-	upCmd.Flags().BoolVar(&upReadOnly, "read-only", false, "read-only mode")
 }
 
 func runUp(cmd *cobra.Command, _ []string) error {
@@ -104,9 +103,6 @@ func runUp(cmd *cobra.Command, _ []string) error {
 	defer func() { _ = os.Remove(lockPath) }()
 
 	listenAddr := cfg.Server.Listen
-	if upPublic && listenAddr == "0.0.0.0:0" {
-		listenAddr = "0.0.0.0:0"
-	}
 	listener, err := net.Listen("tcp", listenAddr)
 	if err != nil {
 		exitWith(ExitBindFailure, "ERROR: server bind failure: "+err.Error())
@@ -241,7 +237,8 @@ func requireBearer(expectedToken string, next http.HandlerFunc) http.HandlerFunc
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		if strings.TrimPrefix(auth, "Bearer ") != expectedToken {
+		provided := strings.TrimPrefix(auth, "Bearer ")
+		if subtle.ConstantTimeCompare([]byte(provided), []byte(expectedToken)) != 1 {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
