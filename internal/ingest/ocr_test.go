@@ -370,7 +370,6 @@ func TestReadOrComputeOCR_PruneInterval(t *testing.T) {
 	}
 	// cache state after second write (debug)
 	entries, err := os.ReadDir(cacheDir)
-	_ = entries
 	if err != nil {
 		t.Fatalf("readdir: %v", err)
 	}
@@ -447,6 +446,13 @@ func TestEnforceOCRCachePolicy_SkipsStatError(t *testing.T) {
 		t.Fatalf("enforceOCRCachePolicy returned error: %v", err)
 	}
 
+	// the broken entry should have been dropped when stat failed
+	if _, err := os.Stat(badPath); err == nil {
+		t.Fatalf("broken file still exists after enforcement")
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("unexpected error stating broken file: %v", err)
+	}
+
 	// the good file should still be present; the old behaviour would have
 	// removed it because total would have been > maxBytes.
 	if _, err := os.Stat(good); err != nil {
@@ -461,10 +467,10 @@ func TestReadOrComputeOCR_EnforceErrorIgnored(t *testing.T) {
 	// make enforcement fail
 	svc.ocrCacheEnforce = func(dir string) error { return fmt.Errorf("simulated failure") }
 
-	// capture log output so we can verify the warning is produced
+	// capture log output via a scoped logger so we don't mutate global state
 	var buf bytes.Buffer
-	log.SetOutput(&buf)
-	defer log.SetOutput(os.Stderr)
+	testLogger := log.New(&buf, "", 0)
+	svc.SetLogger(testLogger)
 
 	// use a simple fake OCR implementation
 	fake := &fakeOCR{text: "XYZ"}

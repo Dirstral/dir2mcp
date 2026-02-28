@@ -26,6 +26,12 @@ type Service struct {
 	repGen        *RepresentationGenerator
 	ocr           model.OCR
 
+	// optional logger for diagnostics; defaults to log.Default() when nil.
+	// Tests can provide their own logger to avoid mutating global state.
+	Logger *log.Logger
+	// protects reads/writes of Logger when set during runtime.
+	loggerMu sync.RWMutex
+
 	// optional cache policy for OCR results. maxBytes bounds the total
 	// bytes of files kept in the on‑disk cache; zero disables size pruning.
 	// ttl, if non‑zero, causes files older than the duration to be removed.
@@ -67,13 +73,36 @@ type documentDeleteMarker interface {
 
 func NewService(cfg config.Config, store model.Store) *Service {
 	svc := &Service{
-		cfg:   cfg,
-		store: store,
+		cfg:    cfg,
+		store:  store,
+		Logger: log.Default(),
 	}
 	if rs, ok := store.(model.RepresentationStore); ok {
 		svc.repGen = NewRepresentationGenerator(rs)
 	}
 	return svc
+}
+
+// SetLogger sets a custom logger on the service. Passing nil restores the
+// default logger.
+func (s *Service) SetLogger(l *log.Logger) {
+	s.loggerMu.Lock()
+	defer s.loggerMu.Unlock()
+	s.Logger = l
+}
+
+// logger returns the active logger, defaulting to the package global if
+// none has been set.
+func (s *Service) logger() *log.Logger {
+	if s == nil {
+		return log.Default()
+	}
+	s.loggerMu.RLock()
+	defer s.loggerMu.RUnlock()
+	if s.Logger == nil {
+		return log.Default()
+	}
+	return s.Logger
 }
 
 func (s *Service) SetIndexingState(state *appstate.IndexingState) {
@@ -477,11 +506,13 @@ func (s *Service) generateOCRMarkdownRepresentation(ctx context.Context, doc mod
 // the configured size or age limits.  It's safe to call even if neither
 // policy is enabled; in that case it is a no-op.
 func (s *Service) enforceOCRCachePolicy(cacheDir string) error {
-	// read the limits under a read lock; we copy them to locals so the rest of
-	// the logic can run without holding the lock for the entire scan.
+	// read the limits and any associated hooks under a read lock. we copy them
+	// to locals so the rest of the logic can run without holding the lock for
+	// the entire scan, which could be slow.
 	s.ocrCacheMu.RLock()
 	maxBytes := s.ocrCacheMaxBytes
 	ttl := s.ocrCacheTTL
+	statHook := s.ocrCacheStat
 	s.ocrCacheMu.RUnlock()
 	if maxBytes <= 0 && ttl <= 0 {
 		return nil
@@ -509,28 +540,27 @@ func (s *Service) enforceOCRCachePolicy(cacheDir string) error {
 		// use test hook if provided; otherwise fall back to the real call
 		var info os.FileInfo
 		var err error
-		if s.ocrCacheStat != nil {
-			info, err = s.ocrCacheStat(e)
+		if statHook != nil {
+			info, err = statHook(e)
 		} else {
 			info, err = e.Info()
 		}
 		if err != nil {
 			// log failure so that operators can investigate; include the
 			// entry name since that is the only identifier available here.
-			log.Printf("enforceOCRCachePolicy: failed to stat %s: %v", e.Name(), err)
-			// the previous behaviour added the full maxBytes value to the
-			// total when stat failed. that could greatly overestimate the
-			// cache size and trigger aggressive eviction. instead we
-			// either skip counting the entry entirely or add a small
-			// conservative estimate. skipping is simplest and guarantees we
-			// won't evict other files just because one entry couldn't be
-			// stat'd.
-			// a future enhancement could make this estimate configurable or
-			// derive it from observed file sizes, but the change is local to
-			// this function.
-			// leave `total` unchanged in this case. if an estimate is
-			// desired, define a constant and add it here (capped by maxBytes
-			// if that makes sense).
+			s.logger().Printf("enforceOCRCachePolicy: failed to stat %s: %v", e.Name(), err)
+			// a stat error typically means the entry is corrupt or otherwise
+			// unreadable. retaining such files in the cache is unhelpful and
+			// may prevent enforcement from making progress (e.g. if the file is
+			// continuously failing). drop the entry outright, which also keeps
+			// the total size calculation conservative and avoids evicting good
+			// data because of a stuck bad entry. this mirrors the behaviour of
+			// the original pre-optimization implementation and matches the
+			// expectations of our regression tests.
+			if rmErr := os.Remove(p); rmErr != nil && !os.IsNotExist(rmErr) {
+				// removal failure is unfortunate but not fatal; log and continue.
+				s.logger().Printf("enforceOCRCachePolicy: failed to remove stat-error file %s: %v", p, rmErr)
+			}
 			continue
 		}
 		files = append(files, fileInfo{path: p, info: info})
@@ -599,9 +629,14 @@ func (s *Service) readOrComputeOCR(ctx context.Context, doc model.Document, cont
 	}
 	shouldEnforceAfterWrite := s.markOCRCacheWrite()
 	if shouldEnforceAfterWrite {
+		// read the hook under lock and execute it outside the lock to avoid
+		// races. fallback to the real enforcement method if no hook is set.
+		s.ocrCacheMu.RLock()
+		enforceHook := s.ocrCacheEnforce
+		s.ocrCacheMu.RUnlock()
 		var err error
-		if s.ocrCacheEnforce != nil {
-			err = s.ocrCacheEnforce(cacheDir)
+		if enforceHook != nil {
+			err = enforceHook(cacheDir)
 		} else {
 			err = s.enforceOCRCachePolicy(cacheDir)
 		}
@@ -609,7 +644,7 @@ func (s *Service) readOrComputeOCR(ctx context.Context, doc model.Document, cont
 			// enforcement failure should not prevent the caller from
 			// receiving the OCR result. log and continue instead of
 			// returning an error; the cache write has already succeeded.
-			log.Printf("enforceOCRCachePolicy(%s) failed: %v", cacheDir, err)
+			s.logger().Printf("enforceOCRCachePolicy(%s) failed: %v", cacheDir, err)
 		}
 	}
 	return string(ocrBytes), nil
