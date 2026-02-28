@@ -90,6 +90,86 @@ func upsertRepresentationWith(ctx context.Context, exec dbExecutor, rep model.Re
 	return repID, nil
 }
 
+func lookupChunkDocContext(ctx context.Context, exec dbExecutor, repID int64) (relPath, docType, repType string, err error) {
+	err = exec.QueryRowContext(
+		ctx,
+		`SELECT d.rel_path, d.doc_type, r.rep_type
+		 FROM representations r
+		 JOIN documents d ON d.doc_id = r.doc_id
+		 WHERE r.rep_id = ?
+		 LIMIT 1`,
+		repID,
+	).Scan(&relPath, &docType, &repType)
+	return relPath, docType, repType, err
+}
+
+func insertChunkWithSpansWith(ctx context.Context, exec dbExecutor, chunk model.Chunk, spans []model.Span, relPath, docType, repType string) (int64, error) {
+	_, err := exec.ExecContext(
+		ctx,
+		`INSERT INTO chunks(rep_id, ordinal, rel_path, doc_type, rep_type, text, text_hash, tokens_est, index_kind, embedding_status, embedding_error, deleted)
+		 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(rep_id, ordinal) DO UPDATE SET
+		   rel_path=excluded.rel_path,
+		   doc_type=excluded.doc_type,
+		   rep_type=excluded.rep_type,
+		   text=excluded.text,
+		   text_hash=excluded.text_hash,
+		   tokens_est=excluded.tokens_est,
+		   index_kind=excluded.index_kind,
+		   embedding_status=excluded.embedding_status,
+		   embedding_error=excluded.embedding_error,
+		   deleted=excluded.deleted`,
+		chunk.RepID,
+		chunk.Ordinal,
+		relPath,
+		docType,
+		defaultIfEmpty(repType, "raw_text"),
+		chunk.Text,
+		strings.TrimSpace(chunk.TextHash),
+		0,
+		normalizeIndexKind(chunk.IndexKind),
+		normalizeEmbeddingStatus(chunk.EmbeddingStatus),
+		strings.TrimSpace(chunk.EmbeddingError),
+		boolToInt(chunk.Deleted),
+	)
+	if err != nil {
+		return 0, err
+	}
+
+	var chunkID int64
+	if err := exec.QueryRowContext(
+		ctx,
+		`SELECT chunk_id FROM chunks WHERE rep_id = ? AND ordinal = ? LIMIT 1`,
+		chunk.RepID,
+		chunk.Ordinal,
+	).Scan(&chunkID); err != nil {
+		return 0, err
+	}
+
+	if _, err := exec.ExecContext(ctx, `DELETE FROM spans WHERE chunk_id = ?`, chunkID); err != nil {
+		return 0, err
+	}
+
+	for _, span := range spans {
+		spanKind, startValue, endValue, spanErr := spanToRow(span)
+		if spanErr != nil {
+			return 0, spanErr
+		}
+		if _, err := exec.ExecContext(
+			ctx,
+			`INSERT INTO spans (chunk_id, span_kind, start, end, extra_json) VALUES (?, ?, ?, ?, NULL)`,
+			chunkID,
+			spanKind,
+			startValue,
+			endValue,
+		); err != nil {
+			return 0, err
+		}
+	}
+
+	return chunkID, nil
+}
+
 func NewSQLiteStore(path string) *SQLiteStore {
 	s := &SQLiteStore{path: path}
 	s.cond = sync.NewCond(&s.mu)
@@ -300,90 +380,18 @@ func (s *SQLiteStore) InsertChunkWithSpans(ctx context.Context, chunk model.Chun
 	}
 	defer s.ReleaseDB()
 
-	var (
-		relPath string
-		docType string
-		repType string
-	)
-	if err := db.QueryRowContext(
-		ctx,
-		`SELECT d.rel_path, d.doc_type, r.rep_type
-		 FROM representations r
-		 JOIN documents d ON d.doc_id = r.doc_id
-		 WHERE r.rep_id = ?
-		 LIMIT 1`,
-		chunk.RepID,
-	).Scan(&relPath, &docType, &repType); err != nil {
-		return 0, err
-	}
-
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
 	defer func() { _ = tx.Rollback() }()
-
-	_, err = tx.ExecContext(
-		ctx,
-		`INSERT INTO chunks(rep_id, ordinal, rel_path, doc_type, rep_type, text, text_hash, tokens_est, index_kind, embedding_status, embedding_error, deleted)
-		 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		 ON CONFLICT(rep_id, ordinal) DO UPDATE SET
-		   rel_path=excluded.rel_path,
-		   doc_type=excluded.doc_type,
-		   rep_type=excluded.rep_type,
-		   text=excluded.text,
-		   text_hash=excluded.text_hash,
-		   tokens_est=excluded.tokens_est,
-		   index_kind=excluded.index_kind,
-		   embedding_status=excluded.embedding_status,
-		   embedding_error=excluded.embedding_error,
-		   deleted=excluded.deleted`,
-		chunk.RepID,
-		chunk.Ordinal,
-		relPath,
-		docType,
-		defaultIfEmpty(repType, "raw_text"),
-		chunk.Text,
-		strings.TrimSpace(chunk.TextHash),
-		0,
-		normalizeIndexKind(chunk.IndexKind),
-		normalizeEmbeddingStatus(chunk.EmbeddingStatus),
-		strings.TrimSpace(chunk.EmbeddingError),
-		boolToInt(chunk.Deleted),
-	)
+	relPath, docType, repType, err := lookupChunkDocContext(ctx, tx, chunk.RepID)
 	if err != nil {
 		return 0, err
 	}
-
-	var chunkID int64
-	if err := tx.QueryRowContext(
-		ctx,
-		`SELECT chunk_id FROM chunks WHERE rep_id = ? AND ordinal = ? LIMIT 1`,
-		chunk.RepID,
-		chunk.Ordinal,
-	).Scan(&chunkID); err != nil {
+	chunkID, err := insertChunkWithSpansWith(ctx, tx, chunk, spans, relPath, docType, repType)
+	if err != nil {
 		return 0, err
-	}
-
-	if _, err := tx.ExecContext(ctx, `DELETE FROM spans WHERE chunk_id = ?`, chunkID); err != nil {
-		return 0, err
-	}
-
-	for _, span := range spans {
-		spanKind, startValue, endValue, spanErr := spanToRow(span)
-		if spanErr != nil {
-			return 0, spanErr
-		}
-		if _, err := tx.ExecContext(
-			ctx,
-			`INSERT INTO spans (chunk_id, span_kind, start, end, extra_json) VALUES (?, ?, ?, ?, NULL)`,
-			chunkID,
-			spanKind,
-			startValue,
-			endValue,
-		); err != nil {
-			return 0, err
-		}
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -469,87 +477,11 @@ func (t *txSQLiteStore) InsertChunkWithSpans(ctx context.Context, chunk model.Ch
 		return 0, errors.New("chunk text must be non-empty")
 	}
 
-	var (
-		relPath string
-		docType string
-		repType string
-	)
-	if err := t.tx.QueryRowContext(
-		ctx,
-		`SELECT d.rel_path, d.doc_type, r.rep_type
-		 FROM representations r
-		 JOIN documents d ON d.doc_id = r.doc_id
-		 WHERE r.rep_id = ?
-		 LIMIT 1`,
-		chunk.RepID,
-	).Scan(&relPath, &docType, &repType); err != nil {
-		return 0, err
-	}
-
-	_, err := t.tx.ExecContext(
-		ctx,
-		`INSERT INTO chunks(rep_id, ordinal, rel_path, doc_type, rep_type, text, text_hash, tokens_est, index_kind, embedding_status, embedding_error, deleted)
-		 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		 ON CONFLICT(rep_id, ordinal) DO UPDATE SET
-		   rel_path=excluded.rel_path,
-		   doc_type=excluded.doc_type,
-		   rep_type=excluded.rep_type,
-		   text=excluded.text,
-		   text_hash=excluded.text_hash,
-		   tokens_est=excluded.tokens_est,
-		   index_kind=excluded.index_kind,
-		   embedding_status=excluded.embedding_status,
-		   embedding_error=excluded.embedding_error,
-		   deleted=excluded.deleted`,
-		chunk.RepID,
-		chunk.Ordinal,
-		relPath,
-		docType,
-		defaultIfEmpty(repType, "raw_text"),
-		chunk.Text,
-		strings.TrimSpace(chunk.TextHash),
-		0,
-		normalizeIndexKind(chunk.IndexKind),
-		normalizeEmbeddingStatus(chunk.EmbeddingStatus),
-		strings.TrimSpace(chunk.EmbeddingError),
-		boolToInt(chunk.Deleted),
-	)
+	relPath, docType, repType, err := lookupChunkDocContext(ctx, t.tx, chunk.RepID)
 	if err != nil {
 		return 0, err
 	}
-
-	var chunkID int64
-	if err := t.tx.QueryRowContext(
-		ctx,
-		`SELECT chunk_id FROM chunks WHERE rep_id = ? AND ordinal = ? LIMIT 1`,
-		chunk.RepID,
-		chunk.Ordinal,
-	).Scan(&chunkID); err != nil {
-		return 0, err
-	}
-
-	if _, err := t.tx.ExecContext(ctx, `DELETE FROM spans WHERE chunk_id = ?`, chunkID); err != nil {
-		return 0, err
-	}
-
-	for _, span := range spans {
-		spanKind, startValue, endValue, spanErr := spanToRow(span)
-		if spanErr != nil {
-			return 0, spanErr
-		}
-		if _, err := t.tx.ExecContext(
-			ctx,
-			`INSERT INTO spans (chunk_id, span_kind, start, end, extra_json) VALUES (?, ?, ?, ?, NULL)`,
-			chunkID,
-			spanKind,
-			startValue,
-			endValue,
-		); err != nil {
-			return 0, err
-		}
-	}
-
-	return chunkID, nil
+	return insertChunkWithSpansWith(ctx, t.tx, chunk, spans, relPath, docType, repType)
 }
 
 func (t *txSQLiteStore) SoftDeleteChunksFromOrdinal(ctx context.Context, repID int64, fromOrdinal int) error {

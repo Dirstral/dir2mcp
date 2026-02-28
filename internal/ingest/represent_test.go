@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -62,7 +63,9 @@ func TestNormalizeUTF8(t *testing.T) {
 		{
 			name:  "invalid UTF-8 sequence",
 			input: []byte{0xff, 0xfe, 0x00},
-			// invalid bytes should be replaced with U+FFFD then null preserved
+			// strings.ToValidUTF8 treats consecutive invalid bytes (0xff, 0xfe)
+			// as a single invalid sequence and replaces them with one U+FFFD
+			// (0xEF,0xBF,0xBD); trailing 0x00 is preserved.
 			expected: []byte{0xEF, 0xBF, 0xBD, 0x00},
 		},
 	}
@@ -142,7 +145,7 @@ func TestRepresentationGeneratorIntegration(t *testing.T) {
 		DocType: "code",
 	}
 
-	tmp := t.TempDir() + "/main.go"
+	tmp := filepath.Join(t.TempDir(), "main.go")
 	content := "package main\n\nfunc main() {}\n"
 	if err := os.WriteFile(tmp, []byte(content), 0o644); err != nil {
 		t.Fatalf("write temp file: %v", err)
@@ -193,7 +196,7 @@ func TestGenerateRawTextTooLarge(t *testing.T) {
 	doc := model.Document{DocID: 1, RelPath: "large.txt", DocType: "text"}
 
 	// create a file just above the defaultMaxFileSizeBytes limit
-	tmp := t.TempDir() + "/large.txt"
+	tmp := filepath.Join(t.TempDir(), "large.txt")
 	f, err := os.Create(tmp)
 	if err != nil {
 		t.Fatalf("create temp file: %v", err)
@@ -275,7 +278,9 @@ func (s *fakeRepStore) UpsertRepresentation(_ context.Context, rep model.Represe
 	}
 	// record rep for later inspection
 	s.reps = append(s.reps, rep)
-	return s.nextRepID, nil
+	currentID := s.nextRepID
+	s.nextRepID++
+	return currentID, nil
 }
 
 func (s *fakeRepStore) InsertChunkWithSpans(_ context.Context, chunk model.Chunk, spans []model.Span) (int64, error) {

@@ -65,13 +65,6 @@ func NewRepresentationGenerator(store model.RepresentationStore) *Representation
 // - For code/text/md/data/html doc types
 // - Normalize to UTF-8 with \n line endings
 // - Route code → index_kind=code, others → index_kind=text
-// GenerateRawText creates a raw_text representation for text-based documents.
-// It reads the file content, normalizes to UTF-8, and stores it as a representation.
-//
-// According to SPEC §7.4:
-// - For code/text/md/data/html doc types
-// - Normalize to UTF-8 with \n line endings
-// - Route code → index_kind=code, others → index_kind=text
 func (rg *RepresentationGenerator) GenerateRawText(ctx context.Context, doc model.Document, absPath string) error {
 	// Read file content first so we can delegate to the new helper which
 	// accepts pre-loaded bytes.  This keeps the original behaviour intact
@@ -233,10 +226,10 @@ func chunkCodeByLines(content string, maxLines, overlapLines int) []chunkSegment
 		overlapLines = maxLines - 1
 	}
 
-	lines := strings.Split(content, "\n")
-	if len(lines) == 0 {
+	if strings.TrimSpace(content) == "" {
 		return nil
 	}
+	lines := strings.Split(content, "\n")
 
 	step := maxLines - overlapLines
 	if step <= 0 {

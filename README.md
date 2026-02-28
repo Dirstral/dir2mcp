@@ -212,8 +212,10 @@ go test -v ./tests -run MistralOCR
   - raw text chunks persist `lines` spans
   - OCR chunks persist `page` spans
 - OCR cache:
-  - OCR outputs are cached in `.dir2mcp/cache/ocr/<content-hash>.md`; this cache persists indefinitely (no automatic TTL/rotation)
+  - OCR outputs are cached in `.dir2mcp/cache/ocr/<content-hash>.md`
+  - cache lifecycle supports automatic TTL and max-size pruning when limits are configured
+  - default behavior is unbounded (`ttl=0`, `maxBytes=0`) unless a policy is set by the embedding service/runtime
   - repeat processing of unchanged OCR input reuses cache before provider calls
-  - manual pruning may be necessary if the directory grows large, as no cleanup is performed
+  - manual pruning can still be useful, but automatic pruning may already reclaim space when limits are enabled
   - to check cache size: `du -sh .dir2mcp/cache/ocr/`
   - to clear the cache: `rm -rf .dir2mcp/cache/ocr/*` (cache will be rebuilt on next OCR operation)

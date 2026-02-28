@@ -181,6 +181,36 @@ func TestExtract_RetryStopsOnNonRetryableOrMax(t *testing.T) {
 	}
 }
 
+func TestExtract_PayloadTooLargeFailsFast(t *testing.T) {
+	attempts := 0
+	rt := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		attempts++
+		return newJSONResponse(http.StatusOK, `{"pages":[{"markdown":"ok"}]}`), nil
+	})
+
+	c := NewClient("https://api.mistral.ai", "key")
+	c.HTTPClient = &http.Client{Transport: rt}
+	c.MaxOCRPayloadBytes = 64
+
+	_, err := c.Extract(context.Background(), "file.pdf", []byte(strings.Repeat("a", 128)))
+	if err == nil {
+		t.Fatalf("expected payload too large error")
+	}
+	var pe *model.ProviderError
+	if !errors.As(err, &pe) {
+		t.Fatalf("expected provider error, got %T", err)
+	}
+	if pe.Retryable {
+		t.Fatalf("payload limit error should be non-retryable")
+	}
+	if !strings.Contains(pe.Message, "payload too large") {
+		t.Fatalf("unexpected error message: %s", pe.Message)
+	}
+	if attempts != 0 {
+		t.Fatalf("expected no HTTP attempts for preflight payload failure, got %d", attempts)
+	}
+}
+
 // Verify that supplying a custom model string to the client actually changes
 // the value sent in the OCR payload.  Regression against the earlier hardcode.
 func TestExtract_CustomModel(t *testing.T) {

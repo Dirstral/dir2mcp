@@ -424,7 +424,11 @@ func (a *App) runReindex(ctx context.Context) int {
 		return exitConfigInvalid
 	}
 
-	st := store.NewSQLiteStore(filepath.Join(".dir2mcp", "meta.sqlite"))
+	baseDir := strings.TrimSpace(cfg.StateDir)
+	if baseDir == "" {
+		baseDir = ".dir2mcp"
+	}
+	st := store.NewSQLiteStore(filepath.Join(baseDir, "meta.sqlite"))
 	defer func() {
 		if closeErr := st.Close(); closeErr != nil {
 			writef(a.stderr, "close store: %v\n", closeErr)

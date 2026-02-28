@@ -23,6 +23,9 @@ const (
 	defaultMaxRetries     = 3
 	defaultInitialBackoff = 250 * time.Millisecond
 	defaultMaxBackoff     = 2 * time.Second
+	// Bound OCR request payload size (data URL + base64) to avoid oversized
+	// requests that frequently fail upstream or time out in transit.
+	defaultMaxOCRPayloadBytes = 20 * 1024 * 1024
 
 	// DefaultOCRModel is the default Mistral model used for OCR requests when
 	// no other model is specified.  Consumers may override the value on the
@@ -51,6 +54,9 @@ type Client struct {
 	MaxRetries     int
 	InitialBackoff time.Duration
 	MaxBackoff     time.Duration
+	// MaxOCRPayloadBytes bounds the encoded OCR payload size (bytes) before
+	// issuing an OCR request. Values <= 0 fall back to defaultMaxOCRPayloadBytes.
+	MaxOCRPayloadBytes int
 
 	// DefaultOCRModel will be sent to the OCR endpoint if the caller does not
 	// specify an explicit model.  It is initialized to DefaultOCRModel by
@@ -67,13 +73,14 @@ func NewClient(baseURL, apiKey string) *Client {
 	}
 
 	return &Client{
-		BaseURL:        strings.TrimRight(baseURL, "/"),
-		APIKey:         apiKey,
-		HTTPClient:     &http.Client{Timeout: defaultRequestTimeout},
-		BatchSize:      defaultBatchSize,
-		MaxRetries:     defaultMaxRetries,
-		InitialBackoff: defaultInitialBackoff,
-		MaxBackoff:     defaultMaxBackoff,
+		BaseURL:            strings.TrimRight(baseURL, "/"),
+		APIKey:             apiKey,
+		HTTPClient:         &http.Client{Timeout: defaultRequestTimeout},
+		BatchSize:          defaultBatchSize,
+		MaxRetries:         defaultMaxRetries,
+		InitialBackoff:     defaultInitialBackoff,
+		MaxBackoff:         defaultMaxBackoff,
+		MaxOCRPayloadBytes: defaultMaxOCRPayloadBytes,
 		// ensure we always have a sensible default even if callers forget to
 		// set a model explicitly later on.
 		DefaultOCRModel: DefaultOCRModel,
@@ -378,13 +385,13 @@ func (c *Client) Extract(ctx context.Context, relPath string, data []byte) (stri
 // The helper intentionally mirrors the structure of embedBatchWithRetry so
 // behaviour is consistent between embedding and OCR operations.
 func (c *Client) extractWithRetry(ctx context.Context, relPath string, data []byte) (string, error) {
-	maxRetries := c.MaxRetries
-	if maxRetries < 0 {
-		maxRetries = 0
+	maxAttempts := c.MaxRetries
+	if maxAttempts <= 0 {
+		maxAttempts = 1
 	}
 
 	var lastErr error
-	for attempt := 0; attempt <= maxRetries; attempt++ {
+	for attempt := 0; attempt < maxAttempts; attempt++ {
 		out, err := c.extractOnce(ctx, relPath, data)
 		if err == nil {
 			return out, nil
@@ -392,7 +399,7 @@ func (c *Client) extractWithRetry(ctx context.Context, relPath string, data []by
 		lastErr = err
 
 		var providerErr *model.ProviderError
-		if !errors.As(err, &providerErr) || !providerErr.Retryable || attempt == maxRetries {
+		if !errors.As(err, &providerErr) || !providerErr.Retryable || attempt == maxAttempts-1 {
 			return "", err
 		}
 
@@ -449,6 +456,18 @@ func (c *Client) extractOnce(ctx context.Context, relPath string, data []byte) (
 	ocrModel := c.DefaultOCRModel
 	if strings.TrimSpace(ocrModel) == "" {
 		ocrModel = DefaultOCRModel
+	}
+	maxPayloadBytes := c.MaxOCRPayloadBytes
+	if maxPayloadBytes <= 0 {
+		maxPayloadBytes = defaultMaxOCRPayloadBytes
+	}
+	estimatedPayloadBytes := len("data:"+mimeType+";base64,") + base64.StdEncoding.EncodedLen(len(data))
+	if estimatedPayloadBytes > maxPayloadBytes {
+		return "", &model.ProviderError{
+			Code:      "MISTRAL_FAILED",
+			Message:   fmt.Sprintf("ocr payload too large (%d bytes, limit %d): reduce file size or increase MaxOCRPayloadBytes", estimatedPayloadBytes, maxPayloadBytes),
+			Retryable: false,
+		}
 	}
 	payload := ocrRequest{
 		Model: ocrModel,

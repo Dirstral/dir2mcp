@@ -208,7 +208,7 @@ func TestEmbeddingWorker_RunOnce_EmbeddingTransient(t *testing.T) {
 type panicEmbedder struct{}
 
 func (p *panicEmbedder) Embed(_ context.Context, _ string, _ []string) ([][]float32, error) {
-	panic("embedder should not be invoked for negative-label batches")
+	panic("embedder should not be invoked for zero-label batches")
 }
 
 func TestEmbeddingWorker_RunOnce_NegativeLabel(t *testing.T) {
