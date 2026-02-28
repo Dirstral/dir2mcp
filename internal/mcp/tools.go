@@ -531,13 +531,13 @@ func (s *Server) handleOpenFileTool(ctx context.Context, args map[string]interfa
 		if parseErr != nil {
 			return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: parseErr.Error(), Retryable: false}
 		}
-		maxChars = parsed
-	}
-	if maxChars <= 0 {
-		maxChars = 20000
-	}
-	if maxChars < 200 {
-		maxChars = 200
+		if parsed <= 0 {
+			maxChars = 20000
+		} else if parsed < 200 || parsed > 50000 {
+			return toolCallResult{}, &toolExecutionError{Code: "INVALID_RANGE", Message: "max_chars must be between 200 and 50000", Retryable: false}
+		} else {
+			maxChars = parsed
+		}
 	}
 
 	span := model.Span{}
@@ -546,9 +546,10 @@ func (s *Server) handleOpenFileTool(ctx context.Context, args map[string]interfa
 		if parseErr != nil {
 			return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: parseErr.Error(), Retryable: false}
 		}
-		if page > 0 {
-			span = model.Span{Kind: "page", Page: page}
+		if page < 1 {
+			return toolCallResult{}, &toolExecutionError{Code: "INVALID_RANGE", Message: "page must be >= 1", Retryable: false}
 		}
+		span = model.Span{Kind: "page", Page: page}
 	} else {
 		startMS, err := parseOptionalInteger(args, "start_ms")
 		if err != nil {
@@ -557,6 +558,9 @@ func (s *Server) handleOpenFileTool(ctx context.Context, args map[string]interfa
 		endMS, err := parseOptionalInteger(args, "end_ms")
 		if err != nil {
 			return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
+		}
+		if startMS < 0 || endMS < 0 {
+			return toolCallResult{}, &toolExecutionError{Code: "INVALID_RANGE", Message: "start_ms/end_ms must be >= 0", Retryable: false}
 		}
 		if startMS > 0 || endMS > 0 {
 			span = model.Span{Kind: "time", StartMS: startMS, EndMS: endMS}
