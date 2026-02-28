@@ -25,13 +25,17 @@ type ConnectionSession struct {
 
 // WriteConnectionJSON writes connection.json. If authMode is "file:<path>", sets token_source and token_file.
 func WriteConnectionJSON(stateDir, mcpURL, token, tokenSource, authMode string) error {
+	headers := map[string]string{
+		"MCP-Protocol-Version": "2025-11-25",
+	}
+	if token != "" && tokenSource != "none" {
+		headers["Authorization"] = "Bearer " + token
+	}
+
 	conn := ConnectionJSON{
 		Transport: "mcp_streamable_http",
 		URL:       mcpURL,
-		Headers: map[string]string{
-			"MCP-Protocol-Version": "2025-11-25",
-			"Authorization":       "Bearer " + token,
-		},
+		Headers:   headers,
 		Session: ConnectionSession{
 			UsesMCPSessionID:     true,
 			HeaderName:          "MCP-Session-Id",
