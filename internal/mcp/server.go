@@ -417,6 +417,10 @@ func generateSessionID() (string, error) {
 }
 
 func loadAuthToken(cfg config.Config) string {
+	if token := strings.TrimSpace(cfg.ResolvedAuthToken); token != "" {
+		return token
+	}
+
 	if token := strings.TrimSpace(os.Getenv(authTokenEnvVar)); token != "" {
 		return token
 	}

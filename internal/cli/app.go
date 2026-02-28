@@ -247,21 +247,7 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 		return exitConfigInvalid
 	}
 	cfg.AuthMode = auth.mode
-
-	previousAuthToken, hadPreviousAuthToken := os.LookupEnv(authTokenEnvVar)
-	if auth.mode == "file" {
-		if err := os.Setenv(authTokenEnvVar, auth.token); err != nil {
-			writef(a.stderr, "set auth token env: %v\n", err)
-			return exitGeneric
-		}
-		defer func() {
-			if hadPreviousAuthToken {
-				_ = os.Setenv(authTokenEnvVar, previousAuthToken)
-				return
-			}
-			_ = os.Unsetenv(authTokenEnvVar)
-		}()
-	}
+	cfg.ResolvedAuthToken = auth.token
 
 	stateDB := filepath.Join(cfg.StateDir, "meta.sqlite")
 	st := store.NewSQLiteStore(stateDB)
@@ -623,7 +609,7 @@ func writeSecretToken(path, token string) error {
 	if _, err := file.WriteString(token + "\n"); err != nil {
 		return err
 	}
-	return file.Chmod(0o600)
+	return nil
 }
 
 func buildMCPURL(addr, path string) string {
