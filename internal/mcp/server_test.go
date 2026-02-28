@@ -62,17 +62,23 @@ func TestServer_ToolsList(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected tools array, got: %#v", result["tools"])
 	}
+	names := map[string]struct{}{}
 	for idx, toolVal := range tools {
 		tool, ok := toolVal.(map[string]any)
 		if !ok {
 			t.Fatalf("expected tool object at index %d, got: %#v", idx, toolVal)
 		}
-		if _, ok := tool["name"].(string); !ok {
+		name, ok := tool["name"].(string)
+		if !ok || name == "" {
 			t.Fatalf("expected tool.name string at index %d, got: %#v", idx, tool["name"])
 		}
+		names[name] = struct{}{}
 	}
 	if len(tools) == 0 {
 		t.Fatal("expected at least one tool")
+	}
+	if _, ok := names["dir2mcp.search"]; !ok {
+		t.Fatalf("expected dir2mcp.search in tools/list")
 	}
 }
 
