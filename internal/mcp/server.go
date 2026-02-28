@@ -31,6 +31,7 @@ const (
 type Server struct {
 	cfg       config.Config
 	retriever model.Retriever
+	authToken string
 
 	sessionMu sync.RWMutex
 	sessions  map[string]time.Time
@@ -74,6 +75,7 @@ func NewServer(cfg config.Config, retriever model.Retriever) *Server {
 	return &Server{
 		cfg:       cfg,
 		retriever: retriever,
+		authToken: loadAuthToken(cfg),
 		sessions:  make(map[string]time.Time),
 	}
 }
@@ -122,6 +124,7 @@ func (s *Server) Run(ctx context.Context) error {
 
 func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
@@ -219,7 +222,7 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
 		return true
 	}
 
-	expectedToken := loadAuthToken(s.cfg)
+	expectedToken := s.authToken
 	authHeader := strings.TrimSpace(r.Header.Get("Authorization"))
 	const bearerPrefix = "bearer "
 
