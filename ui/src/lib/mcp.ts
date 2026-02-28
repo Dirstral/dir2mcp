@@ -84,7 +84,9 @@ export async function mcpCall<T>(
   args: Record<string, unknown>,
   signal?: AbortSignal
 ): Promise<T> {
-  const res = await fetch(`${apiUrl}/api/mcp`, {
+  const base = apiUrl || "";
+  const url = base ? `${base}/api/mcp` : "/api/mcp";
+  const res = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({

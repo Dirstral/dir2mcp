@@ -11,7 +11,8 @@ import {
   type OpenFileResult,
 } from "@/lib/mcp";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "";
+// Use "" for proxy mode (client calls Next.js /api/mcp which proxies to dir2mcp)
+const MCP_BASE = "";
 
 export default function SearchPage() {
   const [query, setQuery] = useState("");
@@ -24,7 +25,6 @@ export default function SearchPage() {
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
 
   const fetchSource = useCallback(async (hit: Hit) => {
-    if (!API_URL) return;
     setSourceLoading(true);
     try {
       const args: Record<string, unknown> = { rel_path: hit.rel_path };
@@ -38,7 +38,7 @@ export default function SearchPage() {
         args.start_ms = span.start_ms;
         args.end_ms = span.end_ms;
       }
-      const data = await mcpCall<OpenFileResult>(API_URL, "dir2mcp.open_file", args);
+      const data = await mcpCall<OpenFileResult>(MCP_BASE, "dir2mcp.open_file", args);
       setSourceModal({ hit, content: data.content });
     } catch (e) {
       setSourceModal({
@@ -63,28 +63,26 @@ export default function SearchPage() {
   const handleSubmit = useCallback(
     async (e: React.FormEvent) => {
       e.preventDefault();
-      if (!query.trim() || !API_URL) {
-        if (!API_URL) setError("Set NEXT_PUBLIC_API_URL to your dir2mcp up URL.");
-        return;
-      }
+      if (!query.trim()) return;
+      const controller = new AbortController();
       abortRef.current?.abort();
-      abortRef.current = new AbortController();
+      abortRef.current = controller;
       setError(null);
       setResult(null);
       setLoading(true);
       try {
         const data = await mcpCall<SearchResult>(
-          API_URL,
+          MCP_BASE,
           "dir2mcp.search",
           { query: query.trim(), k: 10 },
-          abortRef.current.signal
+          controller.signal
         );
         setResult(data);
       } catch (e) {
         if (e instanceof Error && e.name === "AbortError") return;
         setError(e instanceof Error ? e.message : "Request failed");
       } finally {
-        setLoading(false);
+        if (abortRef.current === controller) setLoading(false);
       }
     },
     [query]

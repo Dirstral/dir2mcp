@@ -5,7 +5,7 @@ This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-
 Copy `.env.example` to `.env.local` and configure:
 
 - `NEXT_PUBLIC_API_URL` — base URL printed by `dir2mcp up` (e.g. `http://127.0.0.1:52143`)
-- `API_TOKEN` — Bearer token from the connection block (for dashboard corpus/stats; server-only, never exposed to browser)
+- `API_TOKEN` — Bearer token from the connection block (for corpus and MCP proxy; server-only, never exposed to browser)
 
 Run `dir2mcp up` first, then copy the URL and token from the output. Do this before running the dev server.
 

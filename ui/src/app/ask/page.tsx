@@ -5,7 +5,8 @@ import { NavBar } from "@/components/NavBar";
 import { DocTypeBadge } from "@/components/DocTypeBadge";
 import { mcpCall, formatCitation, type Hit, type AskResult } from "@/lib/mcp";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "";
+// Use "" for proxy mode (client calls Next.js /api/mcp which proxies to dir2mcp)
+const MCP_BASE = "";
 
 export default function AskPage() {
   const [question, setQuestion] = useState("");
@@ -19,21 +20,18 @@ export default function AskPage() {
     async (e: React.FormEvent) => {
       e.preventDefault();
       if (!question.trim()) return;
-      if (!API_URL) {
-        setError("Set NEXT_PUBLIC_API_URL to your dir2mcp up URL.");
-        return;
-      }
+      const controller = new AbortController();
       abortRef.current?.abort();
-      abortRef.current = new AbortController();
+      abortRef.current = controller;
       setError(null);
       setResult(null);
       setLoading(true);
       try {
         const data = await mcpCall<AskResult>(
-          API_URL,
+          MCP_BASE,
           "dir2mcp.ask",
           { question: question.trim(), k: 10, mode: "answer" },
-          abortRef.current.signal
+          controller.signal
         );
         setResult(data);
         setSourcesOpen(false);
@@ -41,7 +39,7 @@ export default function AskPage() {
         if (e instanceof Error && e.name === "AbortError") return;
         setError(e instanceof Error ? e.message : "Request failed");
       } finally {
-        setLoading(false);
+        if (abortRef.current === controller) setLoading(false);
       }
     },
     [question]

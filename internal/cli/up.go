@@ -172,9 +172,9 @@ func runUp(cmd *cobra.Command, _ []string) error {
 	// Combined mux: MCP path + /api/mcp proxy (for web UI) + /api/corpus
 	mux := http.NewServeMux()
 	mux.Handle(upMcpPath, server.MCPHandler())
-	mux.HandleFunc("/api/mcp", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/mcp", requireBearer(token, func(w http.ResponseWriter, r *http.Request) {
 		proxyToMCP(w, r, mcpURL, token)
-	})
+	}))
 	mux.HandleFunc("/api/corpus", requireBearer(token, func(w http.ResponseWriter, r *http.Request) {
 		serveCorpusJSON(w, r, stateDir)
 	}))

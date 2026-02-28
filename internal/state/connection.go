@@ -2,6 +2,7 @@ package state
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -40,8 +41,12 @@ func WriteConnectionJSON(stateDir, mcpURL, token, tokenSource, authMode string) 
 		TokenSource: tokenSource,
 	}
 	if strings.HasPrefix(authMode, "file:") {
+		tokenFile := strings.TrimSpace(strings.TrimPrefix(authMode, "file:"))
+		if tokenFile == "" {
+			return errors.New(`invalid authMode: expected "file:<path>"`)
+		}
 		conn.TokenSource = "file"
-		conn.TokenFile = strings.TrimPrefix(authMode, "file:")
+		conn.TokenFile = tokenFile
 	}
 	data, err := json.MarshalIndent(conn, "", "  ")
 	if err != nil {

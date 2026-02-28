@@ -5,7 +5,7 @@ package config
 const DefaultYAML = `version: 1
 
 mistral:
-  api_key: ${MISTRAL_API_KEY}
+  api_key: "${MISTRAL_API_KEY}"
   chat_model: mistral-small-2506
   embed_text_model: mistral-embed
   embed_code_model: codestral-embed
@@ -47,11 +47,11 @@ chunking:
 stt:
   provider: mistral
   mistral:
-    api_key: ${MISTRAL_API_KEY}
+    api_key: "${MISTRAL_API_KEY}"
     model: voxtral-mini-latest
     timestamps: true
   elevenlabs:
-    api_key: ${ELEVENLABS_API_KEY}
+    api_key: "${ELEVENLABS_API_KEY}"
     model: scribe
     timestamps: true
 

@@ -7,9 +7,10 @@ import (
 )
 
 var reindexCmd = &cobra.Command{
-	Use:   "reindex",
-	Short: "Force full rebuild of the index",
-	RunE:  runReindex,
+	Use:    "reindex",
+	Short:  "Force full rebuild of the index",
+	Hidden: true, // Ingestion pipeline not implemented yet
+	RunE:   runReindex,
 }
 
 func runReindex(_ *cobra.Command, _ []string) error {
