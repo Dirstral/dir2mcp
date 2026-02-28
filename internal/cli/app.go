@@ -394,6 +394,11 @@ func (a *App) runAsk(args []string) int {
 
 func (a *App) runReindex(ctx context.Context) int {
 	st := store.NewSQLiteStore(filepath.Join(".dir2mcp", "meta.sqlite"))
+	defer func() {
+		if closeErr := st.Close(); closeErr != nil {
+			writef(a.stderr, "close store: %v\n", closeErr)
+		}
+	}()
 	ing := ingest.NewService(config.Default(), st)
 	err := ing.Reindex(ctx)
 	if errors.Is(err, model.ErrNotImplemented) {
