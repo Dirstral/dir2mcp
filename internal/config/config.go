@@ -22,8 +22,12 @@ type Config struct {
 	ProtocolVersion string
 	Public          bool
 	AuthMode        string
-	PathExcludes    []string
-	SecretPatterns  []string
+	// RateLimitRPS and RateLimitBurst define per-IP token bucket limits
+	// used by the MCP server when running in public mode.
+	RateLimitRPS   int
+	RateLimitBurst int
+	PathExcludes   []string
+	SecretPatterns []string
 	// ResolvedAuthToken is a runtime-only token value injected by CLI wiring.
 	// It is not loaded from disk and should not be persisted.
 	ResolvedAuthToken string
@@ -45,6 +49,8 @@ func Default() Config {
 		ProtocolVersion: DefaultProtocolVersion,
 		Public:          false,
 		AuthMode:        "auto",
+		RateLimitRPS:    60,
+		RateLimitBurst:  20,
 		PathExcludes: []string{
 			"**/.git/**",
 			"**/.dir2mcp/**",
@@ -119,6 +125,16 @@ func applyEnvOverrides(cfg *Config, overrideEnv map[string]string) {
 	}
 	if allowedOrigins, ok := envLookup("DIR2MCP_ALLOWED_ORIGINS", overrideEnv); ok {
 		cfg.AllowedOrigins = MergeAllowedOrigins(cfg.AllowedOrigins, allowedOrigins)
+	}
+	if rawRPS, ok := envLookup("DIR2MCP_RATE_LIMIT_RPS", overrideEnv); ok {
+		if rps, err := strconv.Atoi(strings.TrimSpace(rawRPS)); err == nil && rps >= 0 {
+			cfg.RateLimitRPS = rps
+		}
+	}
+	if rawBurst, ok := envLookup("DIR2MCP_RATE_LIMIT_BURST", overrideEnv); ok {
+		if burst, err := strconv.Atoi(strings.TrimSpace(rawBurst)); err == nil && burst >= 0 {
+			cfg.RateLimitBurst = burst
+		}
 	}
 }
 

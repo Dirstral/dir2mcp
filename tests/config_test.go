@@ -292,6 +292,79 @@ func TestLoad_AllowedOriginsEnvKeepsNonDefaultPortDistinct(t *testing.T) {
 	})
 }
 
+func TestDefault_RateLimitValues(t *testing.T) {
+	cfg := config.Default()
+	if cfg.RateLimitRPS != 60 {
+		t.Fatalf("RateLimitRPS=%d want=%d", cfg.RateLimitRPS, 60)
+	}
+	if cfg.RateLimitBurst != 20 {
+		t.Fatalf("RateLimitBurst=%d want=%d", cfg.RateLimitBurst, 20)
+	}
+}
+
+func TestLoad_RateLimitEnvOverrides(t *testing.T) {
+	tmp := t.TempDir()
+
+	withWorkingDir(t, tmp, func() {
+		t.Setenv("DIR2MCP_RATE_LIMIT_RPS", "75")
+		t.Setenv("DIR2MCP_RATE_LIMIT_BURST", "25")
+
+		cfg, err := config.Load("")
+		if err != nil {
+			t.Fatalf("Load failed: %v", err)
+		}
+
+		if cfg.RateLimitRPS != 75 {
+			t.Fatalf("RateLimitRPS=%d want=%d", cfg.RateLimitRPS, 75)
+		}
+		if cfg.RateLimitBurst != 25 {
+			t.Fatalf("RateLimitBurst=%d want=%d", cfg.RateLimitBurst, 25)
+		}
+	})
+}
+
+func TestLoad_RateLimitEnvInvalidValuesIgnored(t *testing.T) {
+	tmp := t.TempDir()
+
+	withWorkingDir(t, tmp, func() {
+		t.Setenv("DIR2MCP_RATE_LIMIT_RPS", "not-a-number")
+		t.Setenv("DIR2MCP_RATE_LIMIT_BURST", "-1")
+
+		cfg, err := config.Load("")
+		if err != nil {
+			t.Fatalf("Load failed: %v", err)
+		}
+
+		if cfg.RateLimitRPS != 60 {
+			t.Fatalf("RateLimitRPS=%d want default %d", cfg.RateLimitRPS, 60)
+		}
+		if cfg.RateLimitBurst != 20 {
+			t.Fatalf("RateLimitBurst=%d want default %d", cfg.RateLimitBurst, 20)
+		}
+	})
+}
+
+func TestLoad_RateLimitEnvAllowsZeroToDisable(t *testing.T) {
+	tmp := t.TempDir()
+
+	withWorkingDir(t, tmp, func() {
+		t.Setenv("DIR2MCP_RATE_LIMIT_RPS", "0")
+		t.Setenv("DIR2MCP_RATE_LIMIT_BURST", "0")
+
+		cfg, err := config.Load("")
+		if err != nil {
+			t.Fatalf("Load failed: %v", err)
+		}
+
+		if cfg.RateLimitRPS != 0 {
+			t.Fatalf("RateLimitRPS=%d want=%d", cfg.RateLimitRPS, 0)
+		}
+		if cfg.RateLimitBurst != 0 {
+			t.Fatalf("RateLimitBurst=%d want=%d", cfg.RateLimitBurst, 0)
+		}
+	})
+}
+
 func assertContains(t *testing.T, values []string, want string) {
 	t.Helper()
 	for _, value := range values {
