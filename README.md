@@ -136,7 +136,10 @@ export GITHUB_PERSONAL_ACCESS_TOKEN=your_pat_here
 export CONTEXT7_API_KEY=your_context7_api_key
 export MISTRAL_API_KEY=your_mistral_api_key
 export MISTRAL_BASE_URL=https://api.mistral.ai
+export DIR2MCP_ALLOWED_ORIGINS=https://elevenlabs.io
 ```
+
+`DIR2MCP_ALLOWED_ORIGINS` appends extra allowed origins for browser requests while keeping localhost defaults (`http://localhost`, `http://127.0.0.1`) enabled.
 
 ## Local `.env` support
 

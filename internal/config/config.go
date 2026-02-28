@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -27,7 +29,9 @@ type Config struct {
 	ResolvedAuthToken string
 	MistralAPIKey     string
 	MistralBaseURL    string
-	AllowedOrigins    []string
+	// AllowedOrigins is always initialized with local defaults and then extended
+	// via env/CLI comma-separated origin lists.
+	AllowedOrigins []string
 }
 
 func Default() Config {
@@ -103,6 +107,68 @@ func applyEnvOverrides(cfg *Config, overrideEnv map[string]string) {
 	if baseURL, ok := envLookup("MISTRAL_BASE_URL", overrideEnv); ok && strings.TrimSpace(baseURL) != "" {
 		cfg.MistralBaseURL = baseURL
 	}
+	if allowedOrigins, ok := envLookup("DIR2MCP_ALLOWED_ORIGINS", overrideEnv); ok {
+		cfg.AllowedOrigins = MergeAllowedOrigins(cfg.AllowedOrigins, allowedOrigins)
+	}
+}
+
+// MergeAllowedOrigins appends comma-separated origins to an existing allowlist,
+// preserving first-seen entries and deduplicating with case-insensitive host
+// matching.
+func MergeAllowedOrigins(existing []string, csv string) []string {
+	merged := make([]string, 0, len(existing))
+	seen := make(map[string]struct{}, len(existing))
+
+	add := func(origin string) {
+		origin = strings.TrimSpace(origin)
+		if origin == "" {
+			return
+		}
+		key := normalizeOriginKey(origin)
+		if key == "" {
+			return
+		}
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		merged = append(merged, origin)
+	}
+
+	for _, origin := range existing {
+		add(origin)
+	}
+	for _, origin := range strings.Split(csv, ",") {
+		add(origin)
+	}
+	return merged
+}
+
+func normalizeOriginKey(origin string) string {
+	origin = strings.TrimSpace(origin)
+	if origin == "" {
+		return ""
+	}
+
+	if strings.Contains(origin, "://") {
+		parsed, err := url.Parse(origin)
+		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+			return strings.ToLower(origin)
+		}
+		scheme := strings.ToLower(parsed.Scheme)
+		host := strings.ToLower(parsed.Hostname())
+		port := parsed.Port()
+		if port == "" {
+			return scheme + "://" + host
+		}
+		return scheme + "://" + host + ":" + port
+	}
+
+	if host, port, err := net.SplitHostPort(origin); err == nil {
+		return strings.ToLower(host) + ":" + port
+	}
+
+	return strings.ToLower(origin)
 }
 
 func loadDotEnvFiles(paths []string, overrideEnv map[string]string) error {
