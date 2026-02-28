@@ -39,4 +39,4 @@ ci: vet test
 
 benchmark:
 	# run the large-corpus retrieval benchmark only
-	go test -bench BenchmarkSearchBothLargeCorpus -run ^$$ ./internal/retrieval
+	go test -bench BenchmarkSearchBothLargeCorpus -run ^$$ -benchmem ./internal/retrieval

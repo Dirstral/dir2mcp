@@ -84,6 +84,13 @@ func buildLargeCorpusService(tb testing.TB, total int) *Service {
 			tb.Fatalf("textIdx.Add(%d) failed: %v", i, err)
 		}
 		if i%3 == 0 {
+			// we intentionally reuse the same `label` value here that was already
+			// added to `textIdx` above. since multiples of 3 are also even numbers
+			// in this loop, this creates duplicate IDs across the two indexes.
+			// the test later searches in "both" mode and the Service deduplicates
+			// hits coming from textIdx and codeIdx. documenting the design choice
+			// helps future readers understand why some labels appear in both
+			// indexes and ensures coverage of the deduplication logic.
 			if err := codeIdx.Add(label, []float32{1, 0}); err != nil {
 				tb.Fatalf("codeIdx.Add(%d) failed: %v", i, err)
 			}

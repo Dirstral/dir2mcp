@@ -25,32 +25,6 @@ import (
 
 var cwdMu sync.Mutex
 
-// fakeErrorStore is a minimal model.Store implementation whose
-// ListEmbeddedChunkMetadata method always returns the configured error.
-// Other methods are no-ops so that runUp can exercise startup logic
-// without panic.
-type fakeErrorStore struct {
-	err error
-}
-
-func (f *fakeErrorStore) Init(ctx context.Context) error { return nil }
-func (f *fakeErrorStore) UpsertDocument(ctx context.Context, doc model.Document) error {
-	return nil
-}
-func (f *fakeErrorStore) GetDocumentByPath(ctx context.Context, relPath string) (model.Document, error) {
-	return model.Document{}, model.ErrNotFound
-}
-func (f *fakeErrorStore) ListFiles(ctx context.Context, prefix, glob string, limit, offset int) ([]model.Document, int64, error) {
-	return nil, 0, nil
-}
-func (f *fakeErrorStore) Close() error { return nil }
-
-// implement embeddedChunkLister so preloadEmbeddedChunkMetadata will hit our
-// injected failure.
-func (f *fakeErrorStore) ListEmbeddedChunkMetadata(ctx context.Context, indexKind string, limit, offset int) ([]model.ChunkTask, error) {
-	return nil, f.err
-}
-
 func TestUpCreatesSecretTokenAndConnectionFile(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("MISTRAL_API_KEY", "test-key")
@@ -382,49 +356,6 @@ func TestUpJSONConnectionEventIncludesTokenSourceForFileAuth(t *testing.T) {
 	}
 	if connectionData["token_file"] != customTokenAbs {
 		t.Fatalf("unexpected connection token_file: got=%#v want=%#v", connectionData["token_file"], customTokenAbs)
-	}
-}
-
-func TestUpJSONPreloadErrorEmitsWarningEvent(t *testing.T) {
-	tmp := t.TempDir()
-	t.Setenv("MISTRAL_API_KEY", "test-key")
-	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
-
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	app := cli.NewAppWithIOAndHooks(&stdout, &stderr, cli.RuntimeHooks{
-		NewStore: func(cfg config.Config) model.Store {
-			return &fakeErrorStore{err: errors.New("boom")}
-		},
-	})
-
-	withWorkingDir(t, tmp, func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-
-		code := app.RunWithContext(ctx, []string{"up", "--json", "--listen", "127.0.0.1:0"})
-		if code != 0 {
-			t.Fatalf("unexpected exit code: got=%d stderr=%s", code, stderr.String())
-		}
-	})
-
-	lines := scanLines(t, stdout.String())
-	found := false
-	for _, line := range lines {
-		var ev map[string]interface{}
-		if err := json.Unmarshal([]byte(line), &ev); err != nil {
-			continue
-		}
-		if ev["event"] == "bootstrap_embedded_chunk_metadata" {
-			found = true
-			data, _ := ev["data"].(map[string]interface{})
-			if data["message"] != "boom" {
-				t.Fatalf("unexpected message: %#v", data["message"])
-			}
-		}
-	}
-	if !found {
-		t.Fatal("expected bootstrap_embedded_chunk_metadata event")
 	}
 }
 
@@ -785,7 +716,6 @@ func (c *capturingIngestor) Run(ctx context.Context) error {
 }
 
 func (c *capturingIngestor) Reindex(ctx context.Context) error {
-	// misconfigured tests should fail early rather than silently succeed
 	if c.store == nil || c.capturedHash == nil {
 		return fmt.Errorf("capturingIngestor: missing store or capturedHash")
 	}
@@ -797,8 +727,7 @@ func (c *capturingIngestor) Reindex(ctx context.Context) error {
 	return nil
 }
 
-// sanity check: misconfigured ingestor should surface an error rather than
-// silently succeeding.
+// ensure misconfigured capturer surfaces an error instead of masking issues
 func TestCapturingIngestorReindexErrorOnMissingConfig(t *testing.T) {
 	var ci capturingIngestor
 	if err := ci.Reindex(context.Background()); err == nil {

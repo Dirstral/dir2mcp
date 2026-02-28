@@ -60,6 +60,7 @@ type App struct {
 	stderr io.Writer
 
 	newIngestor func(config.Config, model.Store) model.Ingestor
+	newStore    func(config.Config) model.Store
 }
 
 type indexingStateAware interface {
@@ -80,6 +81,7 @@ type activeDocCountStore interface {
 
 type RuntimeHooks struct {
 	NewIngestor func(config.Config, model.Store) model.Ingestor
+	NewStore    func(config.Config) model.Store
 }
 
 type globalOptions struct {
@@ -97,6 +99,9 @@ type upOptions struct {
 	listen              string
 	mcpPath             string
 	allowedOrigins      string
+	// embed model overrides, set via flags or env/config
+	embedModelText string
+	embedModelCode string
 }
 
 type authMaterial struct {
@@ -172,6 +177,11 @@ func NewAppWithIO(stdout, stderr io.Writer) *App {
 			}
 			return svc
 		},
+		// default store constructor uses sqlite in the configured state
+		// directory.  tests can override via RuntimeHooks.NewStore.
+		newStore: func(cfg config.Config) model.Store {
+			return store.NewSQLiteStore(filepath.Join(cfg.StateDir, "meta.sqlite"))
+		},
 	}
 }
 
@@ -179,6 +189,9 @@ func NewAppWithIOAndHooks(stdout, stderr io.Writer, hooks RuntimeHooks) *App {
 	app := NewAppWithIO(stdout, stderr)
 	if hooks.NewIngestor != nil {
 		app.newIngestor = hooks.NewIngestor
+	}
+	if hooks.NewStore != nil {
+		app.newStore = hooks.NewStore
 	}
 	return app
 }
@@ -243,6 +256,7 @@ func (a *App) printUsage() {
 	writeln(a.stdout, "dir2mcp skeleton")
 	writeln(a.stdout, "usage: dir2mcp [--json] [--non-interactive] <command>")
 	writeln(a.stdout, "commands: up, status, ask, reindex, config, version")
+	writeln(a.stdout, "for 'up' the following flags are available: --listen, --mcp-path, --public, --read-only, --auth, --allowed-origins, --embed-model-text, --embed-model-code, ...")
 }
 
 func (a *App) runUp(ctx context.Context, opts upOptions) int {
@@ -263,6 +277,12 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	}
 	if opts.allowedOrigins != "" {
 		cfg.AllowedOrigins = config.MergeAllowedOrigins(cfg.AllowedOrigins, opts.allowedOrigins)
+	}
+	if opts.embedModelText != "" {
+		cfg.EmbedModelText = opts.embedModelText
+	}
+	if opts.embedModelCode != "" {
+		cfg.EmbedModelCode = opts.embedModelCode
 	}
 	if opts.public {
 		cfg.Public = true
@@ -320,7 +340,12 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	cfg.ResolvedAuthToken = auth.token
 
 	stateDB := filepath.Join(cfg.StateDir, "meta.sqlite")
-	st := store.NewSQLiteStore(stateDB)
+	var st model.Store
+	if a.newStore != nil {
+		st = a.newStore(cfg)
+	} else {
+		st = store.NewSQLiteStore(stateDB)
+	}
 	defer func() {
 		_ = st.Close()
 	}()
@@ -358,9 +383,23 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	ret := retrieval.NewService(st, textIx, client, client)
 	ret.SetCodeIndex(codeIx)
 	ret.SetRootDir(cfg.RootDir)
-	preloadedChunks, err := preloadEmbeddedChunkMetadata(ctx, st, ret)
-	if err != nil {
-		writef(a.stderr, "bootstrap embedded chunk metadata: %v\n", err)
+
+	// events are emitted to stdout only after we create the emitter; moving
+	// creation before the preload call lets us report failures from that
+	// bootstrap step as structured events (see SPEC.md for NDJSON schema).
+	emitter := newNDJSONEmitter(a.stdout, opts.jsonOutput)
+
+	preloadedChunks := 0
+	if metadataStore, ok := st.(embeddedChunkLister); ok {
+		preloadedChunks, err = preloadEmbeddedChunkMetadata(ctx, metadataStore, ret)
+		if err != nil {
+			// surface the problem in both stderr and the NDJSON event stream so
+			// automation can detect a bootstrap warning.
+			writef(a.stderr, "bootstrap embedded chunk metadata: %v\n", err)
+			emitter.Emit("warning", "bootstrap_embedded_chunk_metadata", map[string]interface{}{
+				"message": err.Error(),
+			})
+		}
 	}
 	indexingState := appstate.NewIndexingState(appstate.ModeIncremental)
 	if preloadedChunks > 0 {
@@ -388,7 +427,6 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 		stateAware.SetIndexingState(indexingState)
 	}
 
-	emitter := newNDJSONEmitter(a.stdout, opts.jsonOutput)
 	emitter.Emit("info", "index_loaded", map[string]interface{}{
 		"state_dir": cfg.StateDir,
 	})
@@ -422,7 +460,9 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 
 	embedErrCh := make(chan error, 4)
 	if !opts.readOnly {
-		startEmbeddingWorkers(runCtx, st, textIx, codeIx, client, ret, indexingState, embedErrCh)
+		if chunkSource, ok := st.(index.ChunkSource); ok {
+			startEmbeddingWorkers(runCtx, chunkSource, textIx, codeIx, client, ret, indexingState, embedErrCh, cfg.EmbedModelText, cfg.EmbedModelCode)
+		}
 	}
 	mcpAddr := ln.Addr().String()
 	if cfg.Public {
@@ -578,6 +618,7 @@ func startEmbeddingWorkers(
 	ret *retrieval.Service,
 	indexingState *appstate.IndexingState,
 	errCh chan<- error,
+	textModel, codeModel string,
 ) {
 	if st == nil || embedder == nil {
 		return
@@ -592,8 +633,8 @@ func startEmbeddingWorkers(
 			Source:       st,
 			Index:        ix,
 			Embedder:     embedder,
-			ModelForText: "mistral-embed",
-			ModelForCode: "codestral-embed",
+			ModelForText: textModel,
+			ModelForCode: codeModel,
 			BatchSize:    32,
 			Logger:       log.Default(),
 			OnIndexedChunk: func(label uint64, metadata model.ChunkMetadata) {
@@ -772,6 +813,8 @@ func parseUpOptions(global globalOptions, args []string) (upOptions, error) {
 	fs.StringVar(&opts.listen, "listen", "", "listen address")
 	fs.StringVar(&opts.mcpPath, "mcp-path", "", "MCP route path")
 	fs.StringVar(&opts.allowedOrigins, "allowed-origins", "", "comma-separated origins to append to the allowlist")
+	fs.StringVar(&opts.embedModelText, "embed-model-text", "", "override embedding model used for text chunks")
+	fs.StringVar(&opts.embedModelCode, "embed-model-code", "", "override embedding model used for code chunks")
 	if err := fs.Parse(args); err != nil {
 		return upOptions{}, err
 	}

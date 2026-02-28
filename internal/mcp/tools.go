@@ -570,6 +570,7 @@ func (s *Server) handleAskTool(ctx context.Context, args map[string]interface{})
 	}
 
 	askResult, askErr := s.retriever.Ask(ctx, question, model.SearchQuery{
+		Query:      question,
 		K:          k,
 		Index:      indexName,
 		PathPrefix: pathPrefix,
@@ -583,7 +584,8 @@ func (s *Server) handleAskTool(ctx context.Context, args map[string]interface{})
 		if errors.Is(askErr, model.ErrIndexNotReady) || errors.Is(askErr, model.ErrIndexNotConfigured) {
 			code = "INDEX_NOT_READY"
 			message = "index not ready"
-			retryable = false
+			// retryable stays true to encourage callers to retry once the
+			// index becomes available, matching handleSearchTool/handleAskAudioTool
 		}
 		return toolCallResult{}, &toolExecutionError{Code: code, Message: message, Retryable: retryable}
 	}

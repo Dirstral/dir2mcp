@@ -330,6 +330,34 @@ func TestDefault_RateLimitValues(t *testing.T) {
 	}
 }
 
+func TestDefault_EmbedModels(t *testing.T) {
+	cfg := config.Default()
+	if cfg.EmbedModelText != "mistral-embed" {
+		t.Fatalf("unexpected default text embed model: %q", cfg.EmbedModelText)
+	}
+	if cfg.EmbedModelCode != "codestral-embed" {
+		t.Fatalf("unexpected default code embed model: %q", cfg.EmbedModelCode)
+	}
+}
+
+func TestLoad_EnvOverridesEmbedModels(t *testing.T) {
+	tmp := t.TempDir()
+	testutil.WithWorkingDir(t, tmp, func() {
+		t.Setenv("DIR2MCP_EMBED_MODEL_TEXT", "foo-model")
+		t.Setenv("DIR2MCP_EMBED_MODEL_CODE", "bar-model")
+		cfg, err := config.Load("")
+		if err != nil {
+			t.Fatalf("Load failed: %v", err)
+		}
+		if cfg.EmbedModelText != "foo-model" {
+			t.Fatalf("unexpected embed model text: %q", cfg.EmbedModelText)
+		}
+		if cfg.EmbedModelCode != "bar-model" {
+			t.Fatalf("unexpected embed model code: %q", cfg.EmbedModelCode)
+		}
+	})
+}
+
 func TestLoad_RateLimitEnvOverrides(t *testing.T) {
 	tmp := t.TempDir()
 

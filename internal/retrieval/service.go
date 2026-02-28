@@ -151,6 +151,22 @@ func (s *Service) logf(format string, args ...interface{}) {
 	logger.Printf(format, args...)
 }
 
+// truncateQuestion returns a shortened representation of the question
+// suitable for logging. If the original string is longer than 64
+// characters it is trimmed and an ellipsis appended.  Empty input yields
+// a placeholder so callers don't accidentally log an empty quoted string.
+func truncateQuestion(q string) string {
+	q = strings.TrimSpace(q)
+	if q == "" {
+		return "<empty>"
+	}
+	const max = 64
+	if len(q) <= max {
+		return q
+	}
+	return q[:max] + "…"
+}
+
 func (s *Service) SetQueryEmbeddingModel(modelName string) {
 	if strings.TrimSpace(modelName) == "" {
 		return
@@ -351,8 +367,10 @@ func (s *Service) Ask(ctx context.Context, question string, query model.SearchQu
 		generated, genErr := s.gen.Generate(ctx, prompt)
 		if genErr != nil {
 			// log the error so callers have visibility; fall back to the
-			// precomputed answer when generation fails.
-			s.logf("generator error for question %q: %v", question, genErr)
+			// precomputed answer when generation fails.  avoid recording the
+			// entire question in logs since it may contain sensitive data.
+			safeQuestion := truncateQuestion(question)
+			s.logf("generator error for question %q: %v", safeQuestion, genErr)
 		} else {
 			if trimmed := strings.TrimSpace(generated); trimmed != "" {
 				answer = trimmed
