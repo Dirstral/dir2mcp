@@ -12,3 +12,30 @@ up: build
 .PHONY: test
 test:
 	go test ./...
+.PHONY: help fmt vet lint test check ci
+
+help:
+	@echo "Targets:"
+	@echo "  fmt    - format Go code"
+	@echo "  vet    - run go vet"
+	@echo "  lint   - run golangci-lint"
+	@echo "  test   - run go test"
+	@echo "  check  - fmt + vet + lint + test"
+	@echo "  ci     - vet + test (CI-safe default)"
+
+fmt:
+	gofmt -w $$(find cmd internal tests -name '*.go')
+
+vet:
+	go vet ./...
+
+lint:
+	@command -v golangci-lint >/dev/null 2>&1 || (echo "golangci-lint is required. Install: https://golangci-lint.run/welcome/install/" && exit 1)
+	golangci-lint run
+
+test:
+	go test ./...
+
+check: fmt vet lint test
+
+ci: vet test

@@ -126,3 +126,17 @@ EOCFG
 export GITHUB_PERSONAL_ACCESS_TOKEN=your_pat_here
 export CONTEXT7_API_KEY=your_context7_api_key
 ```
+
+## Development checks
+
+```bash
+make fmt
+make vet
+make lint
+make test
+make check
+```
+
+Notes:
+- `make lint` requires `golangci-lint` installed locally.
+- CI runs lint + build + vet + test on pushes and PRs to `main`.
