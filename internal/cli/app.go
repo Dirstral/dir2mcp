@@ -71,7 +71,7 @@ func (a *App) runUp() int {
 	stateDB := filepath.Join(cfg.StateDir, "meta.sqlite")
 	st := store.NewSQLiteStore(stateDB)
 	ix := index.NewHNSWIndex(filepath.Join(cfg.StateDir, "vectors_text.hnsw"))
-	client := mistral.NewClient("", "")
+	client := mistral.NewClient(cfg.MistralBaseURL, cfg.MistralAPIKey)
 	ret := retrieval.NewService(st, ix, client)
 	mcpServer := mcp.NewServer(cfg, ret)
 	ing := ingest.NewService(cfg, st)
@@ -123,8 +123,20 @@ func (a *App) runConfig(args []string) int {
 	case "init":
 		fmt.Println("config init skeleton: not implemented")
 	case "print":
-		cfg := config.Default()
-		fmt.Printf("root=%s state_dir=%s listen=%s mcp_path=%s\n", cfg.RootDir, cfg.StateDir, cfg.ListenAddr, cfg.MCPPath)
+		cfg, err := config.Load(".dir2mcp.yaml")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "load config: %v\n", err)
+			return 2
+		}
+		fmt.Printf(
+			"root=%s state_dir=%s listen=%s mcp_path=%s mistral_base_url=%s mistral_api_key_set=%t\n",
+			cfg.RootDir,
+			cfg.StateDir,
+			cfg.ListenAddr,
+			cfg.MCPPath,
+			cfg.MistralBaseURL,
+			cfg.MistralAPIKey != "",
+		)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown config subcommand: %s\n", args[0])
 		return 1
