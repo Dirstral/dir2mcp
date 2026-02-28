@@ -1,0 +1,204 @@
+package tests
+
+import (
+	"bufio"
+	"os"
+	"path/filepath"
+	"regexp"
+	"runtime"
+	"strconv"
+	"strings"
+	"testing"
+)
+
+const jwtPattern = `(?i)(?:authorization\s*[:=]\s*bearer\s+|(?:access|id|refresh)_token\s*[:=]\s*)[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}`
+const bearerPattern = `(?i)token\s*[:=]\s*[A-Za-z0-9_.-]{20,}`
+
+func readCorpus(t *testing.T, filePath string) []string {
+	t.Helper()
+
+	file, err := os.Open(filePath)
+	if err != nil {
+		t.Fatalf("failed to open corpus %s: %v", filePath, err)
+	}
+	defer file.Close()
+
+	var lines []string
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		lines = append(lines, line)
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatalf("failed scanning corpus %s: %v", filePath, err)
+	}
+	return lines
+}
+
+func repoRoot(t *testing.T) string {
+	t.Helper()
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	return filepath.Dir(filepath.Dir(thisFile))
+}
+
+func TestJWTSecretPattern_Corpus(t *testing.T) {
+	re, err := regexp.Compile(jwtPattern)
+	if err != nil {
+		t.Fatalf("invalid regex: %v", err)
+	}
+
+	root := repoRoot(t)
+	positive := readCorpus(t, filepath.Join(root, "tests", "fixtures", "secret_patterns", "jwt_positive.txt"))
+	negative := readCorpus(t, filepath.Join(root, "tests", "fixtures", "secret_patterns", "jwt_negative.txt"))
+
+	positiveMatches := 0
+	for _, sample := range positive {
+		if re.MatchString(sample) {
+			positiveMatches++
+		} else {
+			t.Errorf("expected positive sample to match: %q", sample)
+		}
+	}
+
+	falsePositives := 0
+	for _, sample := range negative {
+		if re.MatchString(sample) {
+			falsePositives++
+			t.Errorf("expected negative sample not to match: %q", sample)
+		}
+	}
+
+	t.Logf("jwt regex corpus stats: positives=%d/%d matched, false_positives=%d/%d", positiveMatches, len(positive), falsePositives, len(negative))
+}
+
+func TestBearerSecretPattern_Corpus(t *testing.T) {
+	re, err := regexp.Compile(bearerPattern)
+	if err != nil {
+		t.Fatalf("invalid regex: %v", err)
+	}
+
+	root := repoRoot(t)
+	positive := readCorpus(t, filepath.Join(root, "tests", "fixtures", "secret_patterns", "bearer_positive.txt"))
+	negative := readCorpus(t, filepath.Join(root, "tests", "fixtures", "secret_patterns", "bearer_negative.txt"))
+
+	positiveMatches := 0
+	for _, sample := range positive {
+		if re.MatchString(sample) {
+			positiveMatches++
+		} else {
+			t.Errorf("expected positive sample to match: %q", sample)
+		}
+	}
+
+	falsePositives := 0
+	for _, sample := range negative {
+		if re.MatchString(sample) {
+			falsePositives++
+			t.Errorf("expected negative sample not to match: %q", sample)
+		}
+	}
+
+	t.Logf("bearer regex corpus stats: positives=%d/%d matched, false_positives=%d/%d", positiveMatches, len(positive), falsePositives, len(negative))
+}
+
+func parseSecretPatternsFromSpec(t *testing.T) []string {
+	t.Helper()
+
+	root := repoRoot(t)
+	specPath := filepath.Join(root, "SPEC.md")
+	file, err := os.Open(specPath)
+	if err != nil {
+		t.Fatalf("failed to open SPEC.md: %v", err)
+	}
+	defer file.Close()
+
+	var patterns []string
+	insideSecretPatterns := false
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := scanner.Text()
+		trimmed := strings.TrimSpace(line)
+
+		if trimmed == "secret_patterns:" {
+			insideSecretPatterns = true
+			continue
+		}
+
+		if !insideSecretPatterns {
+			continue
+		}
+
+		if strings.HasPrefix(trimmed, "- ") {
+			value := strings.TrimSpace(strings.TrimPrefix(trimmed, "- "))
+			if strings.HasPrefix(value, "'") && strings.HasSuffix(value, "'") && len(value) >= 2 {
+				value = strings.TrimSuffix(strings.TrimPrefix(value, "'"), "'")
+				value = strings.ReplaceAll(value, "''", "'")
+				patterns = append(patterns, value)
+				continue
+			}
+
+			if strings.HasPrefix(value, "\"") && strings.HasSuffix(value, "\"") {
+				unquoted, unquoteError := strconv.Unquote(value)
+				if unquoteError != nil {
+					t.Fatalf("failed to unquote pattern %q: %v", value, unquoteError)
+				}
+				patterns = append(patterns, unquoted)
+				continue
+			}
+
+			patterns = append(patterns, value)
+			continue
+		}
+
+		if trimmed == "```" || (!strings.HasPrefix(line, "    ") && !strings.HasPrefix(line, "  ")) {
+			break
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		t.Fatalf("failed scanning SPEC.md: %v", err)
+	}
+
+	if len(patterns) == 0 {
+		t.Fatal("did not find secret_patterns entries in SPEC.md")
+	}
+
+	return patterns
+}
+
+func TestSpecYAMLSecretPatterns_Compile_JWTAndBearer(t *testing.T) {
+	patterns := parseSecretPatternsFromSpec(t)
+
+	var jwtFromSpec string
+	var bearerFromSpec string
+
+	for _, pattern := range patterns {
+		if strings.Contains(pattern, "authorization") && strings.Contains(pattern, "refresh") {
+			jwtFromSpec = pattern
+		}
+		if strings.Contains(pattern, "token\\s*[:=]") {
+			bearerFromSpec = pattern
+		}
+	}
+
+	if jwtFromSpec == "" {
+		t.Fatal("JWT pattern not found in SPEC secret_patterns")
+	}
+	if bearerFromSpec == "" {
+		t.Fatal("bearer token pattern not found in SPEC secret_patterns")
+	}
+
+	if _, err := regexp.Compile(jwtFromSpec); err != nil {
+		t.Fatalf("JWT pattern from SPEC failed to compile: %v", err)
+	}
+	if _, err := regexp.Compile(bearerFromSpec); err != nil {
+		t.Fatalf("bearer pattern from SPEC failed to compile: %v", err)
+	}
+}

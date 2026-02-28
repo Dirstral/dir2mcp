@@ -1,0 +1,8 @@
+version=1.2.3
+release_tag=v2.10.4
+plain dotted text foo.bar.baz
+token=abc123
+bearer maybe-but-no-jwt
+x.y.z
+AKIA1234567890ABCDEF
+api_1234567890abcdef1234567890abcdef

@@ -1,0 +1,6 @@
+token=short
+api_token=12345
+not_a_token_field: value
+version=1.2.3
+Authorization: Bearer abc.def.ghi
+plain text without credentials
