@@ -77,6 +77,30 @@ func TestSQLiteStore_PendingChunkLifecycle(t *testing.T) {
 	}
 }
 
+func TestSQLiteStore_UpsertChunkTask_RequiresRelPath(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "meta.sqlite")
+	st := NewSQLiteStore(dbPath)
+	defer func() { _ = st.Close() }()
+
+	if err := st.Init(ctx); err != nil {
+		t.Fatalf("Init failed: %v", err)
+	}
+
+	err := st.UpsertChunkTask(ctx, model.ChunkTask{
+		Label:     1,
+		Text:      "some text",
+		IndexKind: "text",
+		Metadata: model.ChunkMetadata{
+			ChunkID: 1,
+			RelPath: "",
+		},
+	})
+	if err == nil {
+		t.Fatal("expected error for empty RelPath, got nil")
+	}
+}
+
 // verifyChunkIndexes ensures the sqlite initialization created the indexes we
 // added to avoid full table scans. A missing index would mean queries like
 // NextPending or path lookups could be slow.

@@ -302,6 +302,10 @@ func (s *Server) handleToolsCall(ctx context.Context, w http.ResponseWriter, id 
 		return
 	}
 
+	if len(raw) == 0 {
+		writeError(w, http.StatusBadRequest, id, -32602, "params is required", "MISSING_FIELD", false)
+		return
+	}
 	var params toolsCallParams
 	if err := json.Unmarshal(raw, &params); err != nil {
 		writeError(w, http.StatusBadRequest, id, -32602, "invalid params", "INVALID_FIELD", false)
