@@ -85,8 +85,12 @@ func TestSearch_ReturnsRankedHitsWithFilters(t *testing.T) {
 
 func TestSearch_FileGlobFilter(t *testing.T) {
 	idx := index.NewHNSWIndex("")
-	_ = idx.Add(10, []float32{1, 0})
-	_ = idx.Add(20, []float32{0.8, 0.2})
+	if err := idx.Add(10, []float32{1, 0}); err != nil {
+		t.Fatalf("idx.Add failed: %v", err)
+	}
+	if err := idx.Add(20, []float32{0.8, 0.2}); err != nil {
+		t.Fatalf("idx.Add failed: %v", err)
+	}
 
 	svc := NewService(nil, idx, &fakeEmbedder{vectorsByModel: map[string][]float32{
 		"mistral-embed":   {1, 0},
@@ -112,25 +116,33 @@ func TestSearch_OverfetchMultiplier_DefaultAndConfigurable(t *testing.T) {
 	fi := &fakeIndex{}
 	svc := NewService(nil, fi, &fakeEmbedder{vectorsByModel: map[string][]float32{}}, nil)
 	// first search should use default multiplier (5)
-	_, _ = svc.Search(context.Background(), model.SearchQuery{Query: "x", K: 3})
+	if _, err := svc.Search(context.Background(), model.SearchQuery{Query: "x", K: 3}); err != nil {
+		t.Fatalf("Search error: %v", err)
+	}
 	if fi.lastK != 3*5 {
 		t.Fatalf("expected default overfetch 5x (got %d)", fi.lastK)
 	}
 	// change multiplier to a smaller value and verify it takes effect
 	svc.SetOverfetchMultiplier(2)
-	_, _ = svc.Search(context.Background(), model.SearchQuery{Query: "x", K: 3})
+	if _, err := svc.Search(context.Background(), model.SearchQuery{Query: "x", K: 3}); err != nil {
+		t.Fatalf("Search error: %v", err)
+	}
 	if fi.lastK != 3*2 {
 		t.Fatalf("expected overfetch 2x after set (got %d)", fi.lastK)
 	}
 	// invalid values should be normalized
 	svc.SetOverfetchMultiplier(0)
-	_, _ = svc.Search(context.Background(), model.SearchQuery{Query: "x", K: 1})
+	if _, err := svc.Search(context.Background(), model.SearchQuery{Query: "x", K: 1}); err != nil {
+		t.Fatalf("Search error: %v", err)
+	}
 	if fi.lastK != 1*1 {
 		t.Fatalf("multiplier lower bound not enforced (got %d)", fi.lastK)
 	}
 	// extremely large value should be capped
 	svc.SetOverfetchMultiplier(1000)
-	_, _ = svc.Search(context.Background(), model.SearchQuery{Query: "x", K: 1})
+	if _, err := svc.Search(context.Background(), model.SearchQuery{Query: "x", K: 1}); err != nil {
+		t.Fatalf("Search error: %v", err)
+	}
 	if fi.lastK > 100*1 {
 		t.Fatalf("multiplier upper cap not enforced (got %d)", fi.lastK)
 	}
@@ -139,10 +151,18 @@ func TestSearch_OverfetchMultiplier_DefaultAndConfigurable(t *testing.T) {
 func TestSearch_BothMode_DedupesAndNormalizes(t *testing.T) {
 	textIdx := index.NewHNSWIndex("")
 	codeIdx := index.NewHNSWIndex("")
-	_ = textIdx.Add(1, []float32{1, 0})
-	_ = textIdx.Add(2, []float32{0.8, 0.2})
-	_ = codeIdx.Add(2, []float32{0.9, 0.1}) // duplicate label across indexes
-	_ = codeIdx.Add(3, []float32{1, 0})
+	if err := textIdx.Add(1, []float32{1, 0}); err != nil {
+		t.Fatalf("textIdx.Add failed: %v", err)
+	}
+	if err := textIdx.Add(2, []float32{0.8, 0.2}); err != nil {
+		t.Fatalf("textIdx.Add failed: %v", err)
+	}
+	if err := codeIdx.Add(2, []float32{0.9, 0.1}); err != nil { // duplicate label across indexes
+		t.Fatalf("codeIdx.Add failed: %v", err)
+	}
+	if err := codeIdx.Add(3, []float32{1, 0}); err != nil {
+		t.Fatalf("codeIdx.Add failed: %v", err)
+	}
 
 	svc := NewService(nil, textIdx, &fakeEmbedder{vectorsByModel: map[string][]float32{
 		"mistral-embed":   {1, 0},

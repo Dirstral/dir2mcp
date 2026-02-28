@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -139,8 +140,13 @@ func TestServer_ToolsCall_Search(t *testing.T) {
 	if hitObj["DocType"] != hits[0].DocType {
 		t.Fatalf("unexpected DocType: got %v, want %s", hitObj["DocType"], hits[0].DocType)
 	}
-	if hitObj["Score"] != hits[0].Score {
-		t.Fatalf("unexpected Score: got %v, want %f", hitObj["Score"], hits[0].Score)
+	// compare scores with a small epsilon to avoid float equality issues
+	scoreVal, ok := hitObj["Score"].(float64)
+	if !ok {
+		t.Fatalf("expected hit score number, got %#v", hitObj["Score"])
+	}
+	if delta := math.Abs(scoreVal - hits[0].Score); delta > 1e-6 {
+		t.Fatalf("unexpected Score: got %v, want %f (delta %g)", scoreVal, hits[0].Score, delta)
 	}
 	// ensure the k we sent is echoed back
 	kVal, ok := structured["k"].(float64)
@@ -178,9 +184,13 @@ func TestServer_ToolsCall_Search_DefaultK(t *testing.T) {
 		t.Fatalf("expected no error, got %v", resp["error"])
 	}
 
-	structured, ok := resp["result"].(map[string]any)["structuredContent"].(map[string]any)
+	resultMap, ok := resp["result"].(map[string]any)
 	if !ok {
-		t.Fatalf("expected structuredContent object, got: %#v", resp["result"])
+		t.Fatalf("expected result object, got: %#v", resp["result"])
+	}
+	structured, ok := resultMap["structuredContent"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected structuredContent object, got: %#v", resultMap["structuredContent"])
 	}
 	kVal, ok := structured["k"].(float64)
 	if !ok {
@@ -191,13 +201,13 @@ func TestServer_ToolsCall_Search_DefaultK(t *testing.T) {
 	}
 }
 
-func TestServer_ToolsCall_Search_NegativeK(t *testing.T) {
+func TestServer_ToolsCall_Search_NonPositiveK(t *testing.T) {
 	hits := []model.SearchHit{{ChunkID: 99, RelPath: "bar.txt", DocType: "txt", Score: 0.5}}
 	cfg := config.Default()
 	cfg.AuthMode = "none"
 	srv := NewServer(cfg, &fakeRetriever{hits: hits})
 	sessionID := initializeSession(t, srv)
-	// send a non‑positive k; should also fall back to default
+	// send a non-positive k (zero in this case); should also fall back to default
 	reqBody := `{"jsonrpc":"2.0","id":"req-3","method":"tools/call","params":{"name":"dir2mcp.search","arguments":{"query":"hello","k":0}}}`
 	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(reqBody))
 	req.Header.Set("Content-Type", "application/json")
@@ -217,9 +227,13 @@ func TestServer_ToolsCall_Search_NegativeK(t *testing.T) {
 		t.Fatalf("expected no error, got %v", resp["error"])
 	}
 
-	structured, ok := resp["result"].(map[string]any)["structuredContent"].(map[string]any)
+	resultMap, ok := resp["result"].(map[string]any)
 	if !ok {
-		t.Fatalf("expected structuredContent object, got: %#v", resp["result"])
+		t.Fatalf("expected result object, got: %#v", resp["result"])
+	}
+	structured, ok := resultMap["structuredContent"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected structuredContent object, got: %#v", resultMap["structuredContent"])
 	}
 	kVal, ok := structured["k"].(float64)
 	if !ok {

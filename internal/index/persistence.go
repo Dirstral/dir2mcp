@@ -140,7 +140,12 @@ func (m *PersistenceManager) Start(ctx context.Context) {
 	}()
 }
 
-func (m *PersistenceManager) StopAndSave() error {
+// StopAndSave cancels any running autosave goroutine and waits for it
+// to exit before performing a final SaveAll. The provided context is used to
+// bound the wait; if it expires the method returns ctx.Err() and the final
+// save may not occur. This prevents callers (such as CLI shutdown hooks)
+// from blocking forever on uncooperative indices or hung goroutines.
+func (m *PersistenceManager) StopAndSave(ctx context.Context) error {
 	m.stateMu.Lock()
 	cancel := m.cancel
 	m.cancel = nil
@@ -149,11 +154,19 @@ func (m *PersistenceManager) StopAndSave() error {
 	if cancel != nil {
 		cancel()
 	}
-	m.wg.Wait()
 
-	m.stateMu.Lock()
-	m.running = false
-	m.stateMu.Unlock()
+	done := make(chan struct{})
+	go func() {
+		m.wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// normal
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 
 	return m.SaveAll()
 }

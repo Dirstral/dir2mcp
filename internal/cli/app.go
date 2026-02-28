@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
@@ -103,7 +104,10 @@ func (a *App) runUp() int {
 	}
 	persistence.Start(runCtx)
 	defer func() {
-		if saveErr := persistence.StopAndSave(); saveErr != nil {
+		// give the final save a short deadline so shutdown cannot hang
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if saveErr := persistence.StopAndSave(ctx); saveErr != nil {
 			fmt.Fprintf(os.Stderr, "final index save error: %v\n", saveErr)
 		}
 	}()
@@ -139,12 +143,16 @@ func (a *App) runUp() int {
 	fmt.Printf("MCP endpoint: http://%s%s\n", cfg.ListenAddr, cfg.MCPPath)
 	fmt.Println("Starting embedding workers and MCP server...")
 
+	var wg sync.WaitGroup
+	wg.Add(2)
 	go func() {
+		defer wg.Done()
 		if err := textWorker.Run(runCtx, 2*time.Second, "text"); err != nil && !errors.Is(err, context.Canceled) {
 			fmt.Fprintf(os.Stderr, "text worker stopped: %v\n", err)
 		}
 	}()
 	go func() {
+		defer wg.Done()
 		if err := codeWorker.Run(runCtx, 2*time.Second, "code"); err != nil && !errors.Is(err, context.Canceled) {
 			fmt.Fprintf(os.Stderr, "code worker stopped: %v\n", err)
 		}
@@ -153,8 +161,12 @@ func (a *App) runUp() int {
 	_ = ing
 	if err := mcpServer.Run(runCtx); err != nil && !errors.Is(err, context.Canceled) {
 		fmt.Fprintf(os.Stderr, "mcp server: %v\n", err)
+		// ensure workers observe cancellation and can exit before waiting
+		stop()
+		wg.Wait()
 		return 4
 	}
+	wg.Wait()
 	return 0
 }
 
@@ -229,6 +241,10 @@ func bootstrapMetadata(ctx context.Context, st embeddedMetadataStore, ret *retri
 	for _, kind := range []string{"text", "code"} {
 		offset := 0
 		for {
+			// stop if the caller's context is already done
+			if ctx.Err() != nil {
+				return
+			}
 			tasks, err := st.ListEmbeddedChunkMetadata(ctx, kind, pageSize, offset)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "metadata bootstrap warning (%s): %v\n", kind, err)
@@ -238,6 +254,9 @@ func bootstrapMetadata(ctx context.Context, st embeddedMetadataStore, ret *retri
 				break
 			}
 			for _, task := range tasks {
+				if ctx.Err() != nil {
+					return
+				}
 				ret.SetChunkMetadataForIndex(kind, uint64(task.Label), model.SearchHit{
 					ChunkID: task.Metadata.ChunkID,
 					RelPath: task.Metadata.RelPath,

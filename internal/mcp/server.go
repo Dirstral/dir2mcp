@@ -135,7 +135,11 @@ func (s *Server) Run(ctx context.Context) error {
 	case <-runCtx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_ = server.Shutdown(shutdownCtx)
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			// log shutdown failures for observability; server may already be
+			// closing or encountering an error
+			log.Printf("warning: server shutdown error: %v", err)
+		}
 		return nil
 	case err := <-errCh:
 		return err
@@ -329,7 +333,21 @@ func (s *Server) handleToolsCall(ctx context.Context, w http.ResponseWriter, id 
 		})
 		if err != nil {
 			log.Printf("tools/call search failed: id=%v tool=%s err=%v", id, params.Name, err)
-			writeError(w, http.StatusOK, id, -32000, "internal server error", "INDEX_NOT_READY", true)
+			// choose a canonical code/message based on the error.  At present the
+			// retriever may return an error when the index is not yet available or
+			// configured; in that case we want the caller to see INDEX_NOT_READY
+			// and a matching message.  Otherwise fall back to a generic internal
+			// error code as defined in SPEC.md.
+			canon := "INTERNAL_ERROR"
+			msg := "internal server error"
+			if err != nil {
+				e := err.Error()
+				if strings.Contains(e, "not ready") || strings.Contains(e, "not configured") {
+					canon = "INDEX_NOT_READY"
+					msg = "index not ready"
+				}
+			}
+			writeError(w, http.StatusOK, id, -32000, msg, canon, true)
 			return
 		}
 
@@ -539,6 +557,11 @@ func loadAuthToken(cfg config.Config) string {
 	path := filepath.Join(cfg.StateDir, "secret.token")
 	content, err := os.ReadFile(path)
 	if err != nil {
+		// Log a warning so operators can diagnose missing tokens.  The
+		// caller will still receive an empty string, which means no auth
+		// token will be presented and certain AuthMode operations may be
+		// blocked.
+		log.Printf("warning: could not load auth token from %s: %v", path, err)
 		return ""
 	}
 	return strings.TrimSpace(string(content))
@@ -577,7 +600,10 @@ func isOriginAllowed(origin string, allowlist []string) bool {
 			}
 
 			normalizedAllowed := parsedAllowed.Scheme + "://" + strings.ToLower(parsedAllowed.Host)
-			if strings.EqualFold(normalizedAllowed, normalizedOrigin) {
+			// both normalizedAllowed and normalizedOrigin have lowercase hosts and
+			// scheme compared earlier using EqualFold, so a simple equality check
+			// suffices here.
+			if normalizedAllowed == normalizedOrigin {
 				return true
 			}
 			continue

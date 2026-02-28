@@ -67,8 +67,9 @@ func TestHNSWIndex_DimensionMismatch(t *testing.T) {
 	if len(labels) != 1 || labels[0] != 1 {
 		t.Fatalf("unexpected labels after mismatch: %v", labels)
 	}
-	if idx.Metrics.DimensionMismatch != 1 {
-		t.Fatalf("expected metric increment, got %d", idx.Metrics.DimensionMismatch)
+	// read via Load to respect the atomic.Int64 API
+	if idx.Metrics.DimensionMismatch.Load() != 1 {
+		t.Fatalf("expected metric increment, got %d", idx.Metrics.DimensionMismatch.Load())
 	}
 	if !strings.Contains(buf.String(), "dimension mismatch") {
 		t.Fatalf("expected log message, got %q", buf.String())
@@ -116,8 +117,12 @@ func TestHNSWIndex_SearchEmptyIndex(t *testing.T) {
 
 func TestHNSWIndex_KGreaterThanItems(t *testing.T) {
 	idx := NewHNSWIndex("")
-	_ = idx.Add(10, []float32{1, 0})
-	_ = idx.Add(20, []float32{0, 1})
+	if err := idx.Add(10, []float32{1, 0}); err != nil {
+		t.Fatalf("add failed: %v", err)
+	}
+	if err := idx.Add(20, []float32{0, 1}); err != nil {
+		t.Fatalf("add failed: %v", err)
+	}
 
 	labels, scores, err := idx.Search([]float32{1, 0}, 5)
 	if err != nil {

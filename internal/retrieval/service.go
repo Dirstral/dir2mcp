@@ -12,6 +12,14 @@ import (
 	"github.com/Dirstral/dir2mcp/internal/model"
 )
 
+var (
+	// compiled regexes used by looksLikeCodeQuery; moved out of the
+	// function to avoid rebuilding on every invocation.
+	codeKeywordRe   = regexp.MustCompile(`\b(func|class|package|import|return|if|for|while|switch|case)\b`)
+	codePunctRe     = regexp.MustCompile(`[(){}\[\];]`)
+	fileExtensionRe = regexp.MustCompile(`\.(js|ts|py|go|java|rb|cpp|c|cs|html|css|json|yaml|yml)\b`)
+)
+
 // Service implements retrieval operations over embedded data.
 // It holds necessary components like store, index, embedder and
 // supports configurable overfetching during searches. OverfetchMultiplier
@@ -228,14 +236,14 @@ func (s *Service) searchSingleIndex(ctx context.Context, query string, k int, mo
 	}
 
 	// compute number of neighbors to request from index according to the
-	// current overfetch multiplier. read under lock to avoid races with
-	// SetOverfetchMultiplier.
+	// current overfetch multiplier. Read under lock to avoid races with
+	// SetOverfetchMultiplier. The multiplier is initialized to 5 in the
+	// constructor and SetOverfetchMultiplier already clamps values to the
+	// [1,100] range, so it is guaranteed to be at least 1 and no further
+	// defensive adjustment is necessary.
 	s.metaMu.RLock()
 	overfetchMultiplier := s.overfetchMultiplier
 	s.metaMu.RUnlock()
-	if overfetchMultiplier < 1 {
-		overfetchMultiplier = 1
-	}
 	n := k * overfetchMultiplier
 	labels, scores, err := idx.Search(vectors[0], n)
 	if err != nil {
@@ -333,17 +341,14 @@ func looksLikeCodeQuery(query string) bool {
 	q := strings.ToLower(query)
 
 	// keyword pattern with word boundaries to avoid matching substrings.
-	kwRe := regexp.MustCompile(`\b(func|class|package|import|return|if|for|while|switch|case)\b`)
-	hasKw := kwRe.MatchString(q)
+	hasKw := codeKeywordRe.MatchString(q)
 	// punctuation tokens commonly found in code
-	punctRe := regexp.MustCompile(`[(){}\[\];]`)
-	hasPunct := punctRe.MatchString(q)
+	hasPunct := codePunctRe.MatchString(q)
 	// fenced code blocks or backticks
 	hasFenced := strings.Contains(q, "```")
 	hasBacktick := strings.Contains(q, "`")
-	// file extension-like indicator (.go, .py, .java, etc.)
-	fileExtRe := regexp.MustCompile(`\.[a-z0-9]{1,4}`)
-	hasFileExt := fileExtRe.MatchString(q)
+	// file extension-like indicator – restrict to common code extensions and ensure a word boundary
+	hasFileExt := fileExtensionRe.MatchString(q)
 
 	// a strong signal: keyword + punctuation nearby
 	if hasKw && hasPunct {

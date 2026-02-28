@@ -316,14 +316,16 @@ func (s *SQLiteStore) ListEmbeddedChunkMetadata(ctx context.Context, indexKind s
 		offset = 0
 	}
 
-	args := []any{"ok", limit, offset}
+	args := []any{"ok"}
 	query := `SELECT chunk_id, rel_path, doc_type, rep_type, text, index_kind
 	          FROM chunks
 	          WHERE embedding_status = ? AND deleted = 0`
 	if strings.TrimSpace(indexKind) != "" {
 		query += ` AND index_kind = ?`
-		args = []any{"ok", indexKind, limit, offset}
+		args = append(args, indexKind)
 	}
+	// limit and offset placeholders always come last
+	args = append(args, limit, offset)
 	query += ` ORDER BY chunk_id LIMIT ? OFFSET ?`
 
 	rows, err := db.QueryContext(ctx, query, args...)

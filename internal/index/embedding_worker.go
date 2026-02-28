@@ -42,8 +42,7 @@ type EmbeddingWorker struct {
 	// allows callers that embed EmbeddingWorker to override the behaviour
 	// without having to duplicate the entire Run implementation.
 	//
-	// Production code should rarely set this field; it is unexported so only
-	// packages within index can access it.
+	// Production code should rarely set this field.
 	RunOnceFunc func(ctx context.Context, indexKind string) (int, error)
 }
 
@@ -89,10 +88,24 @@ func (w *EmbeddingWorker) RunOnce(ctx context.Context, indexKind string) (int, e
 	}
 
 	for idx := range tasks {
-		if addErr := w.Index.Add(uint64(tasks[idx].Label), vectors[idx]); addErr != nil {
+		if tasks[idx].Label < 0 {
 			// Mark successfully indexed chunks before this failure
 			if idx > 0 {
-				_ = w.Source.MarkEmbedded(ctx, labels[:idx])
+				if err := w.Source.MarkEmbedded(ctx, labels[:idx]); err != nil {
+					w.logf("mark embedded warning: failed to mark %d chunks as embedded before negative-label error: %v labels=%v", idx, err, labels[:idx])
+				}
+			}
+			reason := "negative label not supported"
+			if mfErr := w.Source.MarkFailed(ctx, labels[idx:idx+1], reason); mfErr != nil {
+				w.logf("mark failed update error: %v (reason: %s) labels=%v", mfErr, reason, labels[idx:idx+1])
+			}
+			return idx, errors.New(reason)
+		}
+		if addErr := w.Index.Add(uint64(tasks[idx].Label), vectors[idx]); addErr != nil {
+			if idx > 0 {
+				if err := w.Source.MarkEmbedded(ctx, labels[:idx]); err != nil {
+					w.logf("mark embedded warning: failed to mark %d chunks as embedded before index error: %v labels=%v", idx, err, labels[:idx])
+				}
 			}
 			if mfErr := w.Source.MarkFailed(ctx, labels[idx:idx+1], addErr.Error()); mfErr != nil {
 				w.logf("mark failed update error: %v (index error: %v) labels=%v", mfErr, addErr, labels[idx:idx+1])
@@ -132,10 +145,8 @@ func (w *EmbeddingWorker) Run(ctx context.Context, interval time.Duration, index
 
 	// start backoff at the same interval passed in so tests using very small
 	// intervals won't sleep for a full second on the first retry.
+	// interval is guaranteed positive above, so we can assign directly.
 	backoff := interval
-	if backoff <= 0 {
-		backoff = time.Second
-	}
 	const maxBackoff = 30 * time.Second
 
 	for {
@@ -176,9 +187,6 @@ func (w *EmbeddingWorker) Run(ctx context.Context, interval time.Duration, index
 			}
 			// success, reset backoff to minimum
 			backoff = interval
-			if backoff <= 0 {
-				backoff = time.Second
-			}
 		}
 	}
 }

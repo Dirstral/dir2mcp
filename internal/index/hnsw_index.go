@@ -33,9 +33,16 @@ type HNSWIndex struct {
 // Additional fields may be added in future if callers require them.
 // Only the dimension mismatch counter is currently defined.
 type HNSWIndexMetrics struct {
-	DimensionMismatch int64
+	// DimensionMismatch tracks how many times a provided query vector
+	// didn't match the length of a stored vector.  We use atomic.Int64
+	// instead of a plain int64 so that metrics can be read concurrently
+	// on 32‑bit architectures without data races.
+	DimensionMismatch atomic.Int64
 }
 
+// NewHNSWIndex creates an empty in-memory HNSW index. The optional
+// path argument is used by Save/Load; if non-empty those methods will
+// persist to the given file.
 func NewHNSWIndex(path string) *HNSWIndex {
 	return &HNSWIndex{
 		path:    path,
@@ -70,17 +77,31 @@ func (i *HNSWIndex) Search(vector []float32, k int) ([]uint64, []float32, error)
 		score float32
 	}
 
-	i.mu.RLock()
-	defer i.mu.RUnlock()
+	// We only hold the read lock long enough to inspect each vector's
+	// length and, if a mismatch occurs, bump the metric.  Logging is done
+	// afterward so that any I/O or mutex inside the logger doesn't block
+	// other readers.
+	var mismatches []struct {
+		label    uint64
+		candLen  int
+		queryLen int
+	}
 
+	i.mu.RLock()
+	// not using defer so we can unlock before logging
 	scoredItems := make([]scored, 0, len(i.vectors))
 	for label, candidate := range i.vectors {
 		if len(candidate) != len(vector) {
-			// dimension mismatch: log and bump metric if configured but
-			// otherwise behave exactly as before by skipping the vector.
-			i.logf("dimension mismatch: label=%d candidate_len=%d query_len=%d", label, len(candidate), len(vector))
+			mismatches = append(mismatches, struct {
+				label    uint64
+				candLen  int
+				queryLen int
+			}{label, len(candidate), len(vector)})
 			if i.Metrics != nil {
-				atomic.AddInt64(&i.Metrics.DimensionMismatch, 1)
+				// still safe to update under lock but atomic so we could also do
+				// it afterwards; keeping it here keeps the counter closer to the
+				// observation point without holding the lock too long.
+				i.Metrics.DimensionMismatch.Add(1)
 			}
 			continue
 		}
@@ -88,6 +109,12 @@ func (i *HNSWIndex) Search(vector []float32, k int) ([]uint64, []float32, error)
 			label: label,
 			score: cosineSimilarity(vector, candidate),
 		})
+	}
+	i.mu.RUnlock()
+
+	// perform logging outside the lock to avoid blocking other routines
+	for _, m := range mismatches {
+		i.logf("dimension mismatch: label=%d candidate_len=%d query_len=%d", m.label, m.candLen, m.queryLen)
 	}
 
 	sort.Slice(scoredItems, func(a, b int) bool {

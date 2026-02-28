@@ -129,7 +129,7 @@ func TestPersistenceManager_AutoSaveAndStop(t *testing.T) {
 		t.Fatalf("timeout waiting for auto-save tick")
 	}
 
-	if err := pm.StopAndSave(); err != nil {
+	if err := pm.StopAndSave(context.Background()); err != nil {
 		t.Fatalf("StopAndSave failed: %v", err)
 	}
 	// the final save during StopAndSave should also signal
@@ -187,13 +187,30 @@ func TestPersistenceManager_LoadAll_CancelDuring(t *testing.T) {
 	}()
 
 	// wait for the first load to start, then cancel
-	<-first.started
+	select {
+	case <-first.started:
+		// good, proceed
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for first load to start")
+	}
 	cancel()
-	// let the first load finish now that we've cancelled
+	// let the first load finish now that we've cancelled; but don't
+	// block indefinitely if something goes wrong.
+	select {
+	case <-time.After(time.Second):
+		t.Fatal("timeout before allowing first load to finish")
+	default:
+	}
 	close(first.done)
 
-	if err := <-errCh; err == nil {
-		t.Fatalf("expected error from cancelled context during iteration")
+	// collect the result, timing out if LoadAll hung
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Fatalf("expected error from cancelled context during iteration")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("LoadAll did not return after cancellation")
 	}
 	if atomic.LoadInt32(&second.loadCalls) != 0 {
 		t.Fatalf("second index should not be loaded after cancellation")
