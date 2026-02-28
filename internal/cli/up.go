@@ -179,12 +179,12 @@ func runUp(cmd *cobra.Command, _ []string) error {
 	mux.HandleFunc("/api/mcp", func(w http.ResponseWriter, r *http.Request) {
 		proxyToMCP(w, r, mcpURL, token)
 	})
-	mux.HandleFunc("/api/corpus", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/corpus", requireBearer(token, func(w http.ResponseWriter, r *http.Request) {
 		serveCorpusJSON(w, r, stateDir)
-	})
-	mux.HandleFunc("/api/connection", func(w http.ResponseWriter, r *http.Request) {
+	}))
+	mux.HandleFunc("/api/connection", requireBearer(token, func(w http.ResponseWriter, r *http.Request) {
 		serveConnectionJSON(w, r, stateDir)
-	})
+	}))
 	allowedOrigins := cfg.Security.AllowedOrigins
 	if len(allowedOrigins) == 0 {
 		allowedOrigins = []string{"http://localhost:3000", "http://127.0.0.1:3000"}
@@ -196,6 +196,12 @@ func runUp(cmd *cobra.Command, _ []string) error {
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       60 * time.Second,
+	}
+	if upTLSCert != "" || upTLSKey != "" {
+		if upTLSCert == "" || upTLSKey == "" {
+			exitWith(ExitConfigInvalid, "ERROR: both --tls-cert and --tls-key are required")
+		}
+		return srv.ServeTLS(listener, upTLSCert, upTLSKey)
 	}
 	return srv.Serve(listener)
 }
@@ -225,6 +231,24 @@ func corsForAPI(next http.Handler, allowedOrigins []string) http.Handler {
 
 const maxProxyBody = 1 << 20 // 1MB limit for proxy request body
 
+var proxyHTTPClient = &http.Client{Timeout: 30 * time.Second}
+
+// requireBearer returns a handler that calls next only if Authorization: Bearer <expectedToken> matches.
+func requireBearer(expectedToken string, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		auth := r.Header.Get("Authorization")
+		if auth == "" || !strings.HasPrefix(auth, "Bearer ") {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if strings.TrimPrefix(auth, "Bearer ") != expectedToken {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next(w, r)
+	}
+}
+
 // proxyToMCP forwards the request to mcpURL with Authorization: Bearer token.
 func proxyToMCP(w http.ResponseWriter, r *http.Request, mcpURL, token string) {
 	if r.Method != http.MethodPost {
@@ -248,7 +272,7 @@ func proxyToMCP(w http.ResponseWriter, r *http.Request, mcpURL, token string) {
 	req.Header.Set("Content-Type", r.Header.Get("Content-Type"))
 	req.Header.Set("MCP-Protocol-Version", "2025-11-25")
 	req.Header.Set("Authorization", "Bearer "+token)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := proxyHTTPClient.Do(req)
 	if err != nil {
 		http.Error(w, "upstream request failed", http.StatusBadGateway)
 		return

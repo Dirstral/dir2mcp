@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/Dirstral/dir2mcp/internal/state"
 	"github.com/spf13/cobra"
 )
 
@@ -39,41 +40,15 @@ func runStatus(_ *cobra.Command, _ []string) error {
 		return err
 	}
 
-	var corpus struct {
-		Root    string `json:"root"`
-		Profile struct {
-			DocCounts map[string]int `json:"doc_counts"`
-			CodeRatio float64       `json:"code_ratio"`
-		} `json:"profile"`
-		Models struct {
-			EmbedText   string `json:"embed_text"`
-			EmbedCode   string `json:"embed_code"`
-			OCR         string `json:"ocr"`
-			STTProvider string `json:"stt_provider"`
-			STTModel    string `json:"stt_model"`
-			Chat        string `json:"chat"`
-		} `json:"models"`
-		Indexing struct {
-			JobID           string `json:"job_id"`
-			Running         bool   `json:"running"`
-			Mode            string `json:"mode"`
-			Scanned         int    `json:"scanned"`
-			Indexed         int    `json:"indexed"`
-			Skipped         int    `json:"skipped"`
-			Deleted         int    `json:"deleted"`
-			Representations int    `json:"representations"`
-			ChunksTotal     int    `json:"chunks_total"`
-			EmbeddedOk      int    `json:"embedded_ok"`
-			Errors          int    `json:"errors"`
-		} `json:"indexing"`
-	}
+	var corpus state.CorpusJSON
 	if err := json.Unmarshal(data, &corpus); err != nil {
 		return err
 	}
 
 	fmt.Println("Root:", corpus.Root)
 	fmt.Println("State:", stateDir)
-	if corpus.Models.Chat != "" || corpus.Models.EmbedText != "" {
+	if corpus.Models.EmbedText != "" || corpus.Models.EmbedCode != "" || corpus.Models.OCR != "" ||
+		corpus.Models.STTProvider != "" || corpus.Models.Chat != "" {
 		fmt.Println("Models: embed_text="+corpus.Models.EmbedText, "embed_code="+corpus.Models.EmbedCode, "ocr="+corpus.Models.OCR, "stt="+corpus.Models.STTProvider+"/"+corpus.Models.STTModel, "chat="+corpus.Models.Chat)
 	}
 	mode := corpus.Indexing.Mode

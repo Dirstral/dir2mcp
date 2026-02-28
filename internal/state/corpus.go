@@ -41,19 +41,41 @@ type CorpusIndexing struct {
 	Indexed        int    `json:"indexed"`
 	Skipped        int    `json:"skipped"`
 	Deleted        int    `json:"deleted"`
-	Representations int   `json:"representations"`
+	Representations int    `json:"representations"`
 	ChunksTotal   int    `json:"chunks_total"`
 	EmbeddedOk    int    `json:"embedded_ok"`
 	Errors        int    `json:"errors"`
 }
 
-// WriteCorpusJSON writes corpus.json to stateDir.
+// WriteCorpusJSON writes corpus.json to stateDir atomically to avoid corruption on interrupt.
 func WriteCorpusJSON(stateDir string, c *CorpusJSON) error {
 	data, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(stateDir, "corpus.json"), data, 0600)
+	target := filepath.Join(stateDir, "corpus.json")
+	f, err := os.CreateTemp(stateDir, "corpus.json.*.tmp")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	defer os.Remove(tmp)
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Chmod(0600); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp, target)
 }
 
 // InitialCorpus returns a new CorpusJSON with zeros and mode "incremental", filled from cfg.

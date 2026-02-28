@@ -1,5 +1,9 @@
 This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
+## Environment
+
+Copy `.env.example` to `.env.local` and set `NEXT_PUBLIC_API_URL` to the base URL printed by `dir2mcp up` (e.g. `http://127.0.0.1:52143`). Do this before running the dev server.
+
 ## Getting Started
 
 First, run the development server:

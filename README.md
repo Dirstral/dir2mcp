@@ -45,7 +45,7 @@ cp .env.example .env.local
 npm run dev
 ```
 
-Open http://localhost:3000. The dashboard fetches `/api/corpus` from the dir2mcp server; Search and Ask are scaffolded and will call MCP tools when implemented.
+Open http://localhost:3000. The dashboard fetches `/api/corpus` from the dir2mcp server. Search and Ask are scaffolded to call MCP tools; backend behavior may be partial or stubbed at this time.
 
 ## Documentation
 
