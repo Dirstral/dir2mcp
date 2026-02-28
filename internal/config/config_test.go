@@ -6,70 +6,72 @@ import (
 	"testing"
 )
 
-func TestLoad_UsesDotEnvWhenEnvMissing(t *testing.T) {
+func TestLoad_UsesDotEnvWhenEnvIsMissing(t *testing.T) {
 	tmp := t.TempDir()
-	writeFile(t, filepath.Join(tmp, ".env"), "MISTRAL_API_KEY=from_dotenv\n")
+	writeFile(t, filepath.Join(tmp, ".env"), "MISTRAL_API_KEY=from_dotenv\nMISTRAL_BASE_URL=https://dotenv.local\n")
 
 	withWorkingDir(t, tmp, func() {
-		t.Setenv("MISTRAL_API_KEY", "")
-		cfg, err := Load(Options{
-			ConfigPath:   ".dir2mcp.yaml",
-			RootDir:      ".",
-			StateDir:     ".dir2mcp",
-			SkipValidate: true,
-		})
+		testEnv := map[string]string{}
+		cfg, err := load("", testEnv)
 		if err != nil {
 			t.Fatalf("Load failed: %v", err)
 		}
-		if cfg.Mistral.APIKey != "from_dotenv" {
-			t.Fatalf("unexpected api key: %q", cfg.Mistral.APIKey)
+		if cfg.MistralAPIKey != "from_dotenv" {
+			t.Fatalf("unexpected api key: %q", cfg.MistralAPIKey)
+		}
+		if cfg.MistralBaseURL != "https://dotenv.local" {
+			t.Fatalf("unexpected base URL: %q", cfg.MistralBaseURL)
 		}
 	})
 }
 
 func TestLoad_EnvOverridesDotEnv(t *testing.T) {
 	tmp := t.TempDir()
-	writeFile(t, filepath.Join(tmp, ".env"), "MISTRAL_API_KEY=from_dotenv\n")
+	writeFile(t, filepath.Join(tmp, ".env"), "MISTRAL_API_KEY=from_dotenv\nMISTRAL_BASE_URL=https://dotenv.local\n")
 
 	withWorkingDir(t, tmp, func() {
-		t.Setenv("MISTRAL_API_KEY", "from_env")
-		cfg, err := Load(Options{
-			ConfigPath:   ".dir2mcp.yaml",
-			RootDir:      ".",
-			StateDir:     ".dir2mcp",
-			SkipValidate: true,
-		})
+		testEnv := map[string]string{
+			"MISTRAL_API_KEY":  "from_env",
+			"MISTRAL_BASE_URL": "https://env.local",
+		}
+		cfg, err := load("", testEnv)
 		if err != nil {
 			t.Fatalf("Load failed: %v", err)
 		}
-		if cfg.Mistral.APIKey != "from_env" {
-			t.Fatalf("unexpected api key: %q", cfg.Mistral.APIKey)
+		if cfg.MistralAPIKey != "from_env" {
+			t.Fatalf("unexpected api key: %q", cfg.MistralAPIKey)
+		}
+		if cfg.MistralBaseURL != "https://env.local" {
+			t.Fatalf("unexpected base URL: %q", cfg.MistralBaseURL)
 		}
 	})
 }
 
 func TestLoad_DotEnvLocalOverridesDotEnv(t *testing.T) {
 	tmp := t.TempDir()
-	writeFile(t, filepath.Join(tmp, ".env"), "MISTRAL_API_KEY=from_env_file\n")
-	writeFile(t, filepath.Join(tmp, ".env.local"), "MISTRAL_API_KEY=from_env_local\n")
+	writeFile(t, filepath.Join(tmp, ".env"), "MISTRAL_API_KEY=from_env_file\nMISTRAL_BASE_URL=https://env-file.local\n")
+	writeFile(t, filepath.Join(tmp, ".env.local"), "MISTRAL_API_KEY=from_env_local\nMISTRAL_BASE_URL=https://env-local.local\n")
 
 	withWorkingDir(t, tmp, func() {
-		t.Setenv("MISTRAL_API_KEY", "")
-		cfg, err := Load(Options{
-			ConfigPath:   ".dir2mcp.yaml",
-			RootDir:      ".",
-			StateDir:     ".dir2mcp",
-			SkipValidate: true,
-		})
+		testEnv := map[string]string{}
+		cfg, err := load("", testEnv)
 		if err != nil {
 			t.Fatalf("Load failed: %v", err)
 		}
-		if cfg.Mistral.APIKey != "from_env_local" {
-			t.Fatalf("unexpected api key: %q", cfg.Mistral.APIKey)
+		if cfg.MistralAPIKey != "from_env_local" {
+			t.Fatalf("unexpected api key: %q", cfg.MistralAPIKey)
+		}
+		if cfg.MistralBaseURL != "https://env-local.local" {
+			t.Fatalf("unexpected base URL: %q", cfg.MistralBaseURL)
 		}
 	})
 }
 
+// withWorkingDir changes the process working directory for the duration of fn.
+// Because cwd is process-global, this helper is incompatible with t.Parallel()
+// and must not be used in tests that call t.Parallel(). Tests that need
+// concurrency should isolate execution (for example in a subprocess) or use
+// explicit synchronization (for example a shared mutex).
 func withWorkingDir(t *testing.T, dir string, fn func()) {
 	t.Helper()
 	original, err := os.Getwd()

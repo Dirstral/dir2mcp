@@ -1,15 +1,12 @@
 package main
 
 import (
-	"fmt"
 	"os"
 
 	"github.com/Dirstral/dir2mcp/internal/cli"
 )
 
 func main() {
-	if err := cli.Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
+	app := cli.NewApp()
+	os.Exit(app.Run(os.Args[1:]))
 }

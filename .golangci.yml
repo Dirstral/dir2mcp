@@ -1,8 +1,10 @@
-# Valid for golangci-lint 1.61+ (no "version" or "linters.default")
+version: "2"
+
 run:
   timeout: 3m
 
 linters:
+  default: none
   enable:
     - errcheck
     - govet
