@@ -33,22 +33,22 @@
 
 ```
 [Tool Call] dir2mcp.open_file
-  { "rel_path": "internal/mcp/server.go", "start_line": 125, "end_line": 144 }
+  { "rel_path": "internal/mcp/server.go", "start_line": 125, "end_line": 149 }
 
 [Tool Result]
   {
     "rel_path": "internal/mcp/server.go",
     "doc_type": "code",
-    "content": "func corsMiddleware(next http.Handler, allowedOrigins []string) http.Handler {\n\treturn http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {\n\t\torigin := r.Header.Get(\"Origin\")\n\t\tif origin != \"\" && isOriginAllowed(origin, allowedOrigins) {\n\t\t\tw.Header().Set(\"Access-Control-Allow-Origin\", origin)\n\t\t\tw.Header().Set(\"Access-Control-Allow-Methods\", \"POST, OPTIONS\")\n\t\t\tw.Header().Set(\"Access-Control-Allow-Headers\", \"Content-Type, Authorization, MCP-Protocol-Version, MCP-Session-Id\")\n\t\t\tw.Header().Set(\"Access-Control-Expose-Headers\", \"MCP-Session-Id\")\n\t\t\tw.Header().Set(\"Access-Control-Max-Age\", \"86400\")\n\t\t\tw.Header().Set(\"Vary\", \"Origin\")\n\t\t}\n\t\tif r.Method == http.MethodOptions {\n\t\t\tw.WriteHeader(http.StatusNoContent)\n\t\t\treturn\n\t\t}\n\t\tnext.ServeHTTP(w, r)\n\t})\n}",
+    "content": "func (s *Server) corsMiddleware(next http.Handler) http.Handler {\n\treturn http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {\n\t\torigin := strings.TrimSpace(r.Header.Get(\"Origin\"))\n\t\tif origin != \"\" && isOriginAllowed(origin, s.cfg.AllowedOrigins) {\n\t\t\tw.Header().Set(\"Access-Control-Allow-Origin\", origin)\n\t\t\tw.Header().Set(\"Access-Control-Allow-Methods\", \"POST, OPTIONS\")\n\t\t\tw.Header().Set(\"Access-Control-Allow-Headers\", \"Content-Type, Authorization, MCP-Protocol-Version, MCP-Session-Id\")\n\t\t\tw.Header().Set(\"Access-Control-Expose-Headers\", \"MCP-Session-Id\")\n\t\t\tw.Header().Set(\"Access-Control-Max-Age\", \"86400\")\n\t\t\tw.Header().Set(\"Vary\", \"Origin\")\n\t\t}\n\n\t\taccessControlRequestMethod := strings.TrimSpace(r.Header.Get(\"Access-Control-Request-Method\"))\n\t\taccessControlRequestHeaders := strings.TrimSpace(r.Header.Get(\"Access-Control-Request-Headers\"))\n\t\tisPreflight := r.Method == http.MethodOptions &&\n\t\t\torigin != \"\" &&\n\t\t\t(accessControlRequestMethod != \"\" || accessControlRequestHeaders != \"\")\n\t\tif isPreflight {\n\t\t\tw.WriteHeader(http.StatusNoContent)\n\t\t\treturn\n\t\t}\n\n\t\tnext.ServeHTTP(w, r)\n\t})\n}",
     "truncated": false
   }
 ```
 
-**Agent:** CORS is handled by a middleware function in `internal/mcp/server.go`, lines 125 through 144. Here's how it works:
+**Agent:** CORS is handled by a middleware function in `internal/mcp/server.go`, lines 125 through 149. Here's how it works:
 
 1. The middleware checks if the request's `Origin` header is in the allowed origins list.
 2. If the origin is allowed, it sets the standard CORS headers — `Access-Control-Allow-Origin`, `Allow-Methods` (POST and OPTIONS), `Allow-Headers` (including `Authorization` and `MCP-Session-Id`), and a max-age of 86,400 seconds (24 hours).
-3. For OPTIONS preflight requests, it returns HTTP 204 with no body.
+3. For OPTIONS requests that include preflight headers (`Origin` plus `Access-Control-Request-*`), it returns HTTP 204 with no body.
 4. For all other requests, it passes through to the next handler.
 
 The origin validation itself is in the `isOriginAllowed` function, which does case-insensitive hostname matching and supports both full URLs and simple hostname entries. There are also tests for this in `tests/issue37/cors_public_test.go` that verify preflight returns 204, disallowed origins get 403, and allowed origins get the correct headers.
@@ -139,7 +139,7 @@ It's a Go project with a `go.mod` file. Would you like me to look deeper into an
         "rel_path": "internal/mcp/server.go",
         "score": 0.82,
         "snippet": "authHeader := strings.TrimSpace(r.Header.Get(\"Authorization\")) ...",
-        "span": { "kind": "lines", "start_line": 308, "end_line": 334 }
+        "span": { "kind": "lines", "start_line": 313, "end_line": 339 }
       },
       {
         "rel_path": "internal/cli/app.go",
@@ -153,7 +153,7 @@ It's a Go project with a `go.mod` file. Would you like me to look deeper into an
 
 ```
 [Tool Call] dir2mcp.open_file
-  { "rel_path": "internal/mcp/server.go", "start_line": 308, "end_line": 334 }
+  { "rel_path": "internal/mcp/server.go", "start_line": 313, "end_line": 339 }
 
 [Tool Result]
   {
@@ -165,7 +165,7 @@ It's a Go project with a `go.mod` file. Would you like me to look deeper into an
 
 1. **Public mode requires auth.** In `internal/cli/app.go` (lines 231–248), the CLI rejects the combination of `--public` and `--auth none` — unless you explicitly pass `--force-insecure`. This prevents accidentally exposing the server without a token.
 
-2. **Bearer token validation** is in `internal/mcp/server.go` (lines 308–334). Every request must include an `Authorization: Bearer <token>` header. The server extracts the token, trims whitespace, and compares it using `subtle.ConstantTimeCompare` to prevent timing attacks.
+2. **Bearer token validation** is in `internal/mcp/server.go` (lines 313–339). Every request must include an `Authorization: Bearer <token>` header. The server extracts the token, trims whitespace, and compares it using `subtle.ConstantTimeCompare` to prevent timing attacks.
 
 3. **Token generation** happens automatically on first run — it generates a 64-character hex string (32 random bytes) and stores it in `.dir2mcp/secret.token` with owner-only permissions (0600).
 
