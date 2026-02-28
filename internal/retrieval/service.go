@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"math"
 	"os"
 	"path"
@@ -73,6 +74,8 @@ type Service struct {
 	codeIndex           model.Index
 	embedder            model.Embedder
 	gen                 model.Generator
+	logger              *log.Logger
+	indexingStateFn     func() bool
 	textModel           string
 	codeModel           string
 	overfetchMultiplier int
@@ -104,6 +107,7 @@ func NewService(store model.Store, index model.Index, embedder model.Embedder, g
 		codeIndex:           index,
 		embedder:            embedder,
 		gen:                 gen,
+		logger:              log.Default(),
 		textModel:           "mistral-embed",
 		codeModel:           "codestral-embed",
 		overfetchMultiplier: 5,
@@ -117,6 +121,51 @@ func NewService(store model.Store, index model.Index, embedder model.Embedder, g
 		pathExcludes:   append([]string(nil), defaultPathExcludes...),
 		secretPatterns: compiledPatterns,
 	}
+}
+
+func (s *Service) SetLogger(l *log.Logger) {
+	s.metaMu.Lock()
+	defer s.metaMu.Unlock()
+	if l == nil {
+		s.logger = log.Default()
+		return
+	}
+	s.logger = l
+}
+
+// SetIndexingCompleteProvider sets a callback used to populate AskResult.IndexingComplete.
+// The callback should return true when indexing is complete.
+func (s *Service) SetIndexingCompleteProvider(fn func() bool) {
+	s.metaMu.Lock()
+	defer s.metaMu.Unlock()
+	s.indexingStateFn = fn
+}
+
+func (s *Service) logf(format string, args ...interface{}) {
+	s.metaMu.RLock()
+	logger := s.logger
+	s.metaMu.RUnlock()
+	if logger == nil {
+		logger = log.Default()
+	}
+	logger.Printf(format, args...)
+}
+
+// truncateQuestion returns a shortened representation of the question
+// suitable for logging. If the original string is longer than 64
+// characters it is trimmed and an ellipsis appended.  Empty input yields
+// a placeholder so callers don't accidentally log an empty quoted string.
+func truncateQuestion(q string) string {
+	q = strings.TrimSpace(q)
+	if q == "" {
+		return "<empty>"
+	}
+	const max = 64
+	r := []rune(q)
+	if len(r) <= max {
+		return string(r)
+	}
+	return string(r[:max]) + "…"
 }
 
 func (s *Service) SetQueryEmbeddingModel(modelName string) {
@@ -287,10 +336,65 @@ func (s *Service) Search(ctx context.Context, query model.SearchQuery) ([]model.
 }
 
 func (s *Service) Ask(ctx context.Context, question string, query model.SearchQuery) (model.AskResult, error) {
-	_ = ctx
-	_ = question
-	_ = query
-	return model.AskResult{}, model.ErrNotImplemented
+	question = strings.TrimSpace(question)
+	if question == "" {
+		return model.AskResult{}, errors.New("question is required")
+	}
+
+	if strings.TrimSpace(query.Query) == "" {
+		query.Query = question
+	}
+	if query.K <= 0 {
+		query.K = 10
+	}
+
+	hits, err := s.Search(ctx, query)
+	if err != nil {
+		return model.AskResult{}, err
+	}
+
+	citations := make([]model.Citation, 0, len(hits))
+	for _, hit := range hits {
+		citations = append(citations, model.Citation{
+			ChunkID: hit.ChunkID,
+			RelPath: hit.RelPath,
+			Span:    hit.Span,
+		})
+	}
+
+	answer := buildFallbackAnswer(question, hits)
+	if s.gen != nil && len(hits) > 0 {
+		prompt := buildRAGPrompt(question, hits)
+		generated, genErr := s.gen.Generate(ctx, prompt)
+		if genErr != nil {
+			// log the error so callers have visibility; fall back to the
+			// precomputed answer when generation fails.  avoid recording the
+			// entire question in logs since it may contain sensitive data.
+			safeQuestion := truncateQuestion(question)
+			s.logf("generator error for question %q: %v", safeQuestion, genErr)
+		} else {
+			if trimmed := strings.TrimSpace(generated); trimmed != "" {
+				answer = trimmed
+			}
+		}
+	}
+	answer = ensureAnswerAttributions(answer, citations)
+
+	indexingComplete := true
+	s.metaMu.RLock()
+	indexingFn := s.indexingStateFn
+	s.metaMu.RUnlock()
+	if indexingFn != nil {
+		indexingComplete = indexingFn()
+	}
+
+	return model.AskResult{
+		Question:         question,
+		Answer:           answer,
+		Citations:        citations,
+		Hits:             hits,
+		IndexingComplete: indexingComplete,
+	}, nil
 }
 
 func (s *Service) OpenFile(ctx context.Context, relPath string, span model.Span, maxChars int) (string, error) {
@@ -665,6 +769,109 @@ func LooksLikeCodeQuery(query string) bool {
 		indicators++
 	}
 	return indicators >= 2
+}
+
+func buildFallbackAnswer(question string, hits []model.SearchHit) string {
+	if len(hits) == 0 {
+		return "No relevant context found in the indexed corpus."
+	}
+
+	lines := make([]string, 0, len(hits)+1)
+	lines = append(lines, fmt.Sprintf("Question: %s", question))
+	lines = append(lines, "Top context:")
+	limit := len(hits)
+	if limit > 5 {
+		limit = 5
+	}
+	for i := 0; i < limit; i++ {
+		h := hits[i]
+		snippet := truncateSnippet(strings.TrimSpace(h.Snippet), 300)
+		if snippet == "" {
+			snippet = "(no snippet)"
+		}
+		lines = append(lines, fmt.Sprintf("- %s: %s", h.RelPath, snippet))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func buildRAGPrompt(question string, hits []model.SearchHit) string {
+	var b strings.Builder
+	b.WriteString("Answer the question using only the provided context.\n")
+	b.WriteString("Include concise source attributions in the form [rel_path].\n\n")
+	b.WriteString("Question:\n")
+	b.WriteString(question)
+	b.WriteString("\n\nContext:\n")
+
+	limit := len(hits)
+	if limit > 8 {
+		limit = 8
+	}
+	for i := 0; i < limit; i++ {
+		h := hits[i]
+		b.WriteString("- [")
+		b.WriteString(h.RelPath)
+		b.WriteString("] ")
+		snippet := truncateSnippet(strings.TrimSpace(h.Snippet), 300)
+		if snippet == "" {
+			b.WriteString("(no snippet)\n")
+			continue
+		}
+		b.WriteString(snippet)
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+func truncateSnippet(s string, maxRunes int) string {
+	if maxRunes <= 0 {
+		return ""
+	}
+	r := []rune(strings.TrimSpace(s))
+	if len(r) <= maxRunes {
+		return string(r)
+	}
+	return strings.TrimSpace(string(r[:maxRunes])) + "..."
+}
+
+func ensureAnswerAttributions(answer string, citations []model.Citation) string {
+	answer = strings.TrimSpace(answer)
+	if answer == "" || len(citations) == 0 {
+		return answer
+	}
+
+	orderedSources := make([]string, 0, len(citations))
+	seen := make(map[string]struct{}, len(citations))
+	for _, c := range citations {
+		rel := strings.TrimSpace(c.RelPath)
+		if rel == "" {
+			continue
+		}
+		if _, ok := seen[rel]; ok {
+			continue
+		}
+		seen[rel] = struct{}{}
+		orderedSources = append(orderedSources, rel)
+	}
+	if len(orderedSources) == 0 {
+		return answer
+	}
+
+	missing := make([]string, 0, len(orderedSources))
+	for _, rel := range orderedSources {
+		tag := "[" + rel + "]"
+		if !strings.Contains(answer, tag) {
+			missing = append(missing, tag)
+		}
+	}
+	if len(missing) == 0 {
+		return answer
+	}
+
+	limit := len(missing)
+	if limit > 5 {
+		limit = 5
+	}
+	return answer + "\n\nSources: " + strings.Join(missing[:limit], ", ")
 }
 
 func matchFilters(hit model.SearchHit, query model.SearchQuery) bool {

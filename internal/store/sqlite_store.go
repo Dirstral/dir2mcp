@@ -433,6 +433,20 @@ func (s *SQLiteStore) SoftDeleteChunksFromOrdinal(ctx context.Context, repID int
 	return err
 }
 
+// ClearDocumentContentHashes resets documents.content_hash for all rows.
+// Reindex flows can use this to force "changed" semantics even when files are
+// unchanged on disk.
+func (s *SQLiteStore) ClearDocumentContentHashes(ctx context.Context) error {
+	db, err := s.ensureDB(ctx)
+	if err != nil {
+		return err
+	}
+	defer s.ReleaseDB()
+
+	_, err = db.ExecContext(ctx, `UPDATE documents SET content_hash = ''`)
+	return err
+}
+
 // WithTx begins a new database transaction and passes a transaction-bound
 // representation store to the supplied callback. If the callback returns an
 // error the transaction is rolled back; otherwise it is committed.  The
@@ -758,6 +772,44 @@ func (s *SQLiteStore) ListFiles(ctx context.Context, prefix, glob string, limit,
 	}
 
 	return docs, total, nil
+}
+
+// ActiveDocCounts returns active-document counts grouped by doc_type along
+// with the total active document count using aggregate SQL queries.
+func (s *SQLiteStore) ActiveDocCounts(ctx context.Context) (map[string]int64, int64, error) {
+	db, err := s.ensureDB(ctx)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer s.ReleaseDB()
+
+	rows, err := db.QueryContext(ctx, `SELECT doc_type, COUNT(*) FROM documents WHERE deleted = 0 GROUP BY doc_type`)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	counts := make(map[string]int64)
+	var total int64
+	for rows.Next() {
+		var (
+			docType string
+			count   int64
+		)
+		if err := rows.Scan(&docType, &count); err != nil {
+			return nil, 0, err
+		}
+		docType = strings.TrimSpace(docType)
+		if docType == "" {
+			docType = "unknown"
+		}
+		counts[docType] += count
+		total += count
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+	return counts, total, nil
 }
 
 func (s *SQLiteStore) NextPending(ctx context.Context, limit int, indexKind string) ([]model.ChunkTask, error) {

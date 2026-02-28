@@ -223,6 +223,45 @@ func TestSQLiteStore_UpsertChunkTask_TrimsRelPath(t *testing.T) {
 	}
 }
 
+func TestSQLiteStore_ClearDocumentContentHashes(t *testing.T) {
+	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	defer func() { _ = st.Close() }()
+	ctx := context.Background()
+	if err := st.Init(ctx); err != nil {
+		t.Fatalf("Init failed: %v", err)
+	}
+
+	doc := model.Document{
+		RelPath:     "docs/a.md",
+		DocType:     "md",
+		SizeBytes:   12,
+		MTimeUnix:   123,
+		ContentHash: "abc123",
+		Status:      "ready",
+	}
+	if err := st.UpsertDocument(ctx, doc); err != nil {
+		t.Fatalf("UpsertDocument failed: %v", err)
+	}
+	got, err := st.GetDocumentByPath(ctx, "docs/a.md")
+	if err != nil {
+		t.Fatalf("GetDocumentByPath failed: %v", err)
+	}
+	if got.ContentHash == "" {
+		t.Fatalf("expected non-empty content_hash before clear")
+	}
+
+	if err := st.ClearDocumentContentHashes(ctx); err != nil {
+		t.Fatalf("ClearDocumentContentHashes failed: %v", err)
+	}
+	got, err = st.GetDocumentByPath(ctx, "docs/a.md")
+	if err != nil {
+		t.Fatalf("GetDocumentByPath failed after clear: %v", err)
+	}
+	if got.ContentHash != "" {
+		t.Fatalf("expected content_hash cleared, got %q", got.ContentHash)
+	}
+}
+
 func TestSQLiteStore_EnsureDB_ConcurrentInitClose(t *testing.T) {
 	// this test exercises the window addressed by the recent race fix: calling
 	// ensureDB and Close simultaneously should not trigger a nil-pointer or

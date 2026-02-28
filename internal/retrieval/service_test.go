@@ -1,20 +1,19 @@
-package tests
+package retrieval
 
 import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"math"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 
 	"dir2mcp/internal/index"
 	"dir2mcp/internal/model"
-	"dir2mcp/internal/retrieval"
 )
 
 type fakeRetrievalEmbedder struct {
@@ -61,9 +60,7 @@ func (e *fakeRetrievalEmbedder) Embed(_ context.Context, model string, texts []s
 	}
 	res := make([][]float32, n)
 	for i := range res {
-		clone := make([]float32, len(vec))
-		copy(clone, vec)
-		res[i] = clone
+		res[i] = vec
 	}
 	return res, nil
 }
@@ -76,25 +73,24 @@ func TestAsk_GeneratorErrorLogged(t *testing.T) {
 		t.Fatalf("idx.Add failed: %v", err)
 	}
 
-	svc := retrieval.NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{"mistral-embed": {1, 0}}}, &fakeGenerator{out: "unused", err: errors.New("oh no")})
+	longQ := strings.Repeat("x", 100)
+	svc := NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{"mistral-embed": {1, 0}}}, &fakeGenerator{out: "unused", err: errors.New("oh no")})
 	svc.SetLogger(log.New(buf, "", 0))
 	svc.SetChunkMetadata(1, model.SearchHit{RelPath: "doc.txt", DocType: "md", Snippet: "hi"})
 
-	res, err := svc.Ask(context.Background(), "question", model.SearchQuery{Query: "", K: 1})
+	res, err := svc.Ask(context.Background(), longQ, model.SearchQuery{Query: "", K: 1})
 	if err != nil {
 		t.Fatalf("Ask returned error: %v", err)
 	}
-	// fallback behavior: generator failed, so the service should return
-	// something derived from the chunk metadata we previously stored. the
-	// previous check looked for the literal word "question", which is brittle
-	// and not guaranteed. instead we assert that the answer contains the
-	// snippet we seeded above ("hi"), while still guarding against an empty
-	// answer.
-	if res.Answer == "" || !strings.Contains(res.Answer, "hi") {
+	if res.Answer == "" || !strings.Contains(res.Answer, longQ[:10]) {
 		t.Fatalf("unexpected answer: %q", res.Answer)
 	}
-	if !strings.Contains(buf.String(), "generator error") {
-		t.Fatalf("expected log entry about generator error, got %q", buf.String())
+	logOutput := buf.String()
+	if !strings.Contains(logOutput, "generator error") {
+		t.Fatalf("expected log entry about generator error, got %q", logOutput)
+	}
+	if strings.Contains(logOutput, longQ) {
+		t.Fatalf("log output should not contain full question, got %q", logOutput)
 	}
 }
 
@@ -110,7 +106,7 @@ func TestSearch_ReturnsRankedHitsWithFilters(t *testing.T) {
 		t.Fatalf("idx.Add failed: %v", err)
 	}
 
-	svc := retrieval.NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
+	svc := NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
 		"mistral-embed":   {1, 0},
 		"codestral-embed": {0, 1},
 	}}, nil)
@@ -145,7 +141,7 @@ func TestSearch_FileGlobFilter(t *testing.T) {
 		t.Fatalf("idx.Add failed: %v", err)
 	}
 
-	svc := retrieval.NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
+	svc := NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
 		"mistral-embed":   {1, 0},
 		"codestral-embed": {0, 1},
 	}}, nil)
@@ -167,7 +163,7 @@ func TestSearch_FileGlobFilter(t *testing.T) {
 
 func TestSearch_OverfetchMultiplier_DefaultAndConfigurable(t *testing.T) {
 	fi := &fakeRetrievalIndex{}
-	svc := retrieval.NewService(nil, fi, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{}}, nil)
+	svc := NewService(nil, fi, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{}}, nil)
 	// first search should use default multiplier (5)
 	if _, err := svc.Search(context.Background(), model.SearchQuery{Query: "x", K: 3}); err != nil {
 		t.Fatalf("Search error: %v", err)
@@ -206,7 +202,7 @@ func TestSearch_OverfetchMultiplier_DefaultAndConfigurable(t *testing.T) {
 // anyway, so we expect the result to be clamped to math.MaxInt.
 func TestSearch_OverflowProtection(t *testing.T) {
 	fi := &fakeRetrievalIndex{}
-	svc := retrieval.NewService(nil, fi, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{}}, nil)
+	svc := NewService(nil, fi, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{}}, nil)
 	// set multiplier to max allowed by the setter; the service doesn't crash
 	svc.SetOverfetchMultiplier(100)
 	// choose a k that's guaranteed to overflow when multiplied by 100
@@ -235,7 +231,7 @@ func TestSearch_BothMode_DedupesAndNormalizes(t *testing.T) {
 		t.Fatalf("codeIdx.Add failed: %v", err)
 	}
 
-	svc := retrieval.NewService(nil, textIdx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
+	svc := NewService(nil, textIdx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
 		"mistral-embed":   {1, 0},
 		"codestral-embed": {1, 0},
 	}}, nil)
@@ -277,7 +273,7 @@ func TestOpenFile_LineSpan(t *testing.T) {
 		t.Fatalf("write file failed: %v", err)
 	}
 
-	svc := retrieval.NewService(nil, nil, nil, nil)
+	svc := NewService(nil, nil, nil, nil)
 	svc.SetRootDir(root)
 	out, err := svc.OpenFile(context.Background(), "docs/a.md", model.Span{Kind: "lines", StartLine: 2, EndLine: 3}, 200)
 	if err != nil {
@@ -298,7 +294,7 @@ func TestOpenFile_PathExcluded(t *testing.T) {
 		t.Fatalf("write file failed: %v", err)
 	}
 
-	svc := retrieval.NewService(nil, nil, nil, nil)
+	svc := NewService(nil, nil, nil, nil)
 	svc.SetRootDir(root)
 	svc.SetPathExcludes([]string{"**/private/**"})
 	_, err := svc.OpenFile(context.Background(), "private/secret.txt", model.Span{}, 200)
@@ -317,7 +313,7 @@ func TestOpenFile_ContentSecretBlocked(t *testing.T) {
 		t.Fatalf("write file failed: %v", err)
 	}
 
-	svc := retrieval.NewService(nil, nil, nil, nil)
+	svc := NewService(nil, nil, nil, nil)
 	svc.SetRootDir(root)
 	_, err := svc.OpenFile(context.Background(), "docs/token.txt", model.Span{}, 200)
 	if !errors.Is(err, model.ErrForbidden) {
@@ -327,7 +323,7 @@ func TestOpenFile_ContentSecretBlocked(t *testing.T) {
 
 func TestOpenFile_PathTraversalBlocked(t *testing.T) {
 	root := t.TempDir()
-	svc := retrieval.NewService(nil, nil, nil, nil)
+	svc := NewService(nil, nil, nil, nil)
 	svc.SetRootDir(root)
 	_, err := svc.OpenFile(context.Background(), "../outside.txt", model.Span{}, 200)
 	if !errors.Is(err, model.ErrPathOutsideRoot) {
@@ -345,7 +341,7 @@ func TestOpenFile_PageSpan(t *testing.T) {
 		t.Fatalf("write file failed: %v", err)
 	}
 
-	svc := retrieval.NewService(nil, nil, nil, nil)
+	svc := NewService(nil, nil, nil, nil)
 	svc.SetRootDir(root)
 	out, err := svc.OpenFile(context.Background(), "docs/ocr.txt", model.Span{Kind: "page", Page: 2}, 200)
 	if err != nil {
@@ -367,7 +363,7 @@ func TestOpenFile_TimeSpan(t *testing.T) {
 		t.Fatalf("write file failed: %v", err)
 	}
 
-	svc := retrieval.NewService(nil, nil, nil, nil)
+	svc := NewService(nil, nil, nil, nil)
 	svc.SetRootDir(root)
 	out, err := svc.OpenFile(context.Background(), "audio/transcript.txt", model.Span{Kind: "time", StartMS: 2000, EndMS: 6000}, 200)
 	if err != nil {
@@ -380,20 +376,19 @@ func TestOpenFile_TimeSpan(t *testing.T) {
 }
 
 func TestMatchExcludePattern_Concurrent(t *testing.T) {
-	svc := retrieval.NewService(nil, nil, nil, nil)
+	svc := NewService(nil, nil, nil, nil)
 	pattern := "**/foo/**"
-	var wg sync.WaitGroup
 	const goroutines = 20
-	wg.Add(goroutines)
+
 	for i := 0; i < goroutines; i++ {
-		go func() {
-			defer wg.Done()
-			if !svc.MatchExcludePattern(pattern, "a/foo/b") {
+		i := i // capture for closure
+		t.Run(fmt.Sprintf("%d", i), func(t *testing.T) {
+			t.Parallel()
+			if !svc.matchExcludePattern(pattern, "a/foo/b") {
 				t.Error("expected pattern to match")
 			}
-		}()
+		})
 	}
-	wg.Wait()
 }
 
 func TestOpenFile_PageSpan_FromMetadata(t *testing.T) {
@@ -404,7 +399,7 @@ func TestOpenFile_PageSpan_FromMetadata(t *testing.T) {
 		t.Fatalf("mkdir failed: %v", err)
 	}
 
-	svc := retrieval.NewService(nil, nil, nil, nil)
+	svc := NewService(nil, nil, nil, nil)
 	svc.SetRootDir(root)
 	svc.SetChunkMetadata(1, model.SearchHit{
 		RelPath: "docs/ocr.txt",
@@ -427,7 +422,7 @@ func TestOpenFile_TimeSpan_FromMetadata(t *testing.T) {
 		t.Fatalf("mkdir failed: %v", err)
 	}
 
-	svc := retrieval.NewService(nil, nil, nil, nil)
+	svc := NewService(nil, nil, nil, nil)
 	svc.SetRootDir(root)
 	svc.SetChunkMetadata(1, model.SearchHit{
 		RelPath: "audio/transcript.txt",
@@ -467,9 +462,9 @@ func TestLooksLikeCodeQuery(t *testing.T) {
 	}
 
 	for _, c := range cases {
-		got := retrieval.LooksLikeCodeQuery(c.query)
+		got := looksLikeCodeQuery(c.query)
 		if got != c.expect {
-			t.Errorf("retrieval.LooksLikeCodeQuery(%q) = %v; want %v", c.query, got, c.expect)
+			t.Errorf("looksLikeCodeQuery(%q) = %v; want %v", c.query, got, c.expect)
 		}
 	}
 }
@@ -479,7 +474,7 @@ func TestAsk_FallbackAndCitations(t *testing.T) {
 	if err := idx.Add(1, []float32{1, 0}); err != nil {
 		t.Fatalf("idx.Add failed: %v", err)
 	}
-	svc := retrieval.NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
+	svc := NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
 		"mistral-embed": {1, 0},
 	}}, nil)
 	svc.SetChunkMetadata(1, model.SearchHit{
@@ -514,7 +509,7 @@ func TestAsk_UsesGeneratorWhenAvailable(t *testing.T) {
 	if err := idx.Add(1, []float32{1, 0}); err != nil {
 		t.Fatalf("idx.Add failed: %v", err)
 	}
-	svc := retrieval.NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
+	svc := NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
 		"mistral-embed": {1, 0},
 	}}, &fakeGenerator{out: "Generated answer with [docs/a.md]"})
 	svc.SetChunkMetadata(1, model.SearchHit{
@@ -540,7 +535,7 @@ func TestAsk_AppendsMissingAttributions(t *testing.T) {
 	if err := idx.Add(2, []float32{0.9, 0.1}); err != nil {
 		t.Fatalf("idx.Add failed: %v", err)
 	}
-	svc := retrieval.NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
+	svc := NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
 		"mistral-embed": {1, 0},
 	}}, &fakeGenerator{out: "Generated summary without explicit source tags."})
 	svc.SetChunkMetadata(1, model.SearchHit{
@@ -574,7 +569,7 @@ func TestAsk_AppendsOnlyMissingAttributions(t *testing.T) {
 	if err := idx.Add(2, []float32{0.9, 0.1}); err != nil {
 		t.Fatalf("idx.Add failed: %v", err)
 	}
-	svc := retrieval.NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
+	svc := NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
 		"mistral-embed": {1, 0},
 	}}, &fakeGenerator{out: "Generated summary with [docs/a.md] already present."})
 	svc.SetChunkMetadata(1, model.SearchHit{

@@ -484,7 +484,7 @@ func (s *Server) handleSearchTool(ctx context.Context, args map[string]interface
 	}, nil
 }
 
-func (s *Server) handleAskTool(_ context.Context, args map[string]interface{}) (toolCallResult, *toolExecutionError) {
+func (s *Server) handleAskTool(ctx context.Context, args map[string]interface{}) (toolCallResult, *toolExecutionError) {
 	if err := assertNoUnknownArguments(args, map[string]struct{}{
 		"question":    {},
 		"k":           {},
@@ -505,18 +505,139 @@ func (s *Server) handleAskTool(_ context.Context, args map[string]interface{}) (
 		return toolCallResult{}, &toolExecutionError{Code: "MISSING_FIELD", Message: "question is required", Retryable: false}
 	}
 
-	structured := map[string]interface{}{
-		"question":          question,
-		"answer":            "",
-		"citations":         []interface{}{},
-		"hits":              []interface{}{},
-		"indexing_complete": false,
+	if s.retriever == nil {
+		return toolCallResult{}, &toolExecutionError{Code: "INDEX_NOT_READY", Message: "retriever not configured", Retryable: false}
 	}
 
+	// default k should stay in sync with the schema and other tools.  the
+	// shared constant lives in server.go (DefaultSearchK == 10) so use that
+	// instead of a hardcoded literal.
+	k := DefaultSearchK
+	if rawK, exists := args["k"]; exists {
+		parsedK, parseErr := parseInteger(rawK, "k")
+		if parseErr != nil {
+			return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: parseErr.Error(), Retryable: false}
+		}
+		// Mirror handleSearchTool behavior explicitly.
+		if parsedK <= 0 {
+			k = DefaultSearchK
+		} else {
+			k = parsedK
+		}
+	}
+	if k > 50 {
+		return toolCallResult{}, &toolExecutionError{Code: "INVALID_RANGE", Message: "k must be between 1 and 50", Retryable: false}
+	}
+
+	mode, err := parseOptionalString(args, "mode")
+	if err != nil {
+		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
+	}
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	if mode == "" {
+		mode = "answer"
+	}
+	switch mode {
+	case "answer", "search_only":
+	default:
+		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: "mode must be one of answer,search_only", Retryable: false}
+	}
+
+	indexName, err := parseOptionalString(args, "index")
+	if err != nil {
+		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
+	}
+	indexName = strings.ToLower(strings.TrimSpace(indexName))
+	if indexName == "" {
+		indexName = "auto"
+	}
+	switch indexName {
+	case "auto", "text", "code", "both":
+	default:
+		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: "index must be one of auto,text,code,both", Retryable: false}
+	}
+
+	pathPrefix, err := parseOptionalString(args, "path_prefix")
+	if err != nil {
+		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
+	}
+	fileGlob, err := parseOptionalString(args, "file_glob")
+	if err != nil {
+		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
+	}
+	docTypes, err := parseOptionalStringSlice(args, "doc_types")
+	if err != nil {
+		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
+	}
+
+	if s.retriever == nil {
+		return toolCallResult{}, &toolExecutionError{Code: "INDEX_NOT_READY", Message: "retriever not configured", Retryable: false}
+	}
+
+	// branch early on search_only so we avoid asking the generator and can
+	// take advantage of Search-specific behaviour (and avoid throwing away the
+	// generated answer).
+	if mode == "search_only" {
+		hits, searchErr := s.retriever.Search(ctx, model.SearchQuery{
+			Query:      question,
+			K:          k,
+			Index:      indexName,
+			PathPrefix: pathPrefix,
+			FileGlob:   fileGlob,
+			DocTypes:   docTypes,
+		})
+		if searchErr != nil {
+			code := "INTERNAL_ERROR"
+			message := "internal server error"
+			retryable := true
+			if errors.Is(searchErr, model.ErrIndexNotReady) || errors.Is(searchErr, model.ErrIndexNotConfigured) {
+				code = "INDEX_NOT_READY"
+				message = "index not ready"
+			}
+			return toolCallResult{}, &toolExecutionError{Code: code, Message: message, Retryable: retryable}
+		}
+
+		hitMaps := make([]map[string]interface{}, 0, len(hits))
+		for _, h := range hits {
+			hitMaps = append(hitMaps, serializeHit(h))
+		}
+		structured := map[string]interface{}{
+			"question":          question,
+			"answer":            "",
+			"citations":         []interface{}{},
+			"hits":              hitMaps,
+			"indexing_complete": false,
+		}
+		return toolCallResult{
+			Content:           []toolContentItem{{Type: "text", Text: fmt.Sprintf("found %d supporting result(s)", len(hits))}},
+			StructuredContent: structured,
+		}, nil
+	}
+
+	// non‑search mode falls through to the original Ask logic
+	askResult, askErr := s.retriever.Ask(ctx, question, model.SearchQuery{
+		Query:      question,
+		K:          k,
+		Index:      indexName,
+		PathPrefix: pathPrefix,
+		FileGlob:   fileGlob,
+		DocTypes:   docTypes,
+	})
+	if askErr != nil {
+		code := "INTERNAL_ERROR"
+		message := "internal server error"
+		retryable := true
+		if errors.Is(askErr, model.ErrIndexNotReady) || errors.Is(askErr, model.ErrIndexNotConfigured) {
+			code = "INDEX_NOT_READY"
+			message = "index not ready"
+		}
+		return toolCallResult{}, &toolExecutionError{Code: code, Message: message, Retryable: retryable}
+	}
+	structured := buildAskStructuredContent(askResult)
+	contentText := askResult.Answer
+
 	return toolCallResult{
-		Content: []toolContentItem{
-			{Type: "text", Text: "ask stub is registered; answer generation is not wired yet"},
-		},
+		Content:           []toolContentItem{{Type: "text", Text: contentText}},
 		StructuredContent: structured,
 	}, nil
 }

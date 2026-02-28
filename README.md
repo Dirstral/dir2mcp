@@ -181,6 +181,16 @@ make test
 make check
 ```
 
+Performance benchmark (large corpus retrieval path):
+
+```bash
+make benchmark
+```
+
+The `benchmark` target is preferred for consistency with other checks like
+`make fmt`/`make vet`/`make lint` and ensures the correct `go test`
+invocation (`-bench BenchmarkSearchBothLargeCorpus -run '^$' ./internal/retrieval`).
+
 Notes:
 - `make lint` requires `golangci-lint` installed locally.
 - CI runs lint + build + vet + test on pushes and PRs to `main`.

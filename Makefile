@@ -8,16 +8,22 @@ build:
 up: build
 	./dir2mcp up
 
-.PHONY: help fmt vet lint test check ci
+.PHONY: all clean clean-all help fmt vet lint test check ci benchmark
+
+all: check
 
 help:
 	@echo "Targets:"
-	@echo "  fmt    - format Go code"
+	@echo "  all       - default target (runs check)"
+	@echo "  clean     - remove build artifacts and local test caches only"
+	@echo "  clean-all - full clean including Go build cache (use sparingly)"
+	@echo "  fmt       - format Go code"
 	@echo "  vet    - run go vet"
 	@echo "  lint   - run golangci-lint"
 	@echo "  test   - run go test"
 	@echo "  check  - fmt + vet + lint + test"
 	@echo "  ci     - vet + test (CI-safe default)"
+	@echo "  benchmark - run the large-corpus retrieval benchmark"
 
 fmt:
 	gofmt -w $$(find cmd internal tests -name '*.go')
@@ -35,3 +41,16 @@ test:
 check: fmt vet lint test
 
 ci: vet test
+
+benchmark:
+	# run the large-corpus retrieval benchmark only
+	go test -bench BenchmarkSearchBothLargeCorpus -run ^$$ -benchmem ./internal/retrieval
+
+clean:
+	rm -f dir2mcp coverage.out
+	# only purge the test cache so we don't evict the global build cache
+	go clean -testcache >/dev/null 2>&1 || true
+
+clean-all: clean
+	# perform a full cache wipe, use only when you really need it
+	go clean -cache -testcache >/dev/null 2>&1 || true

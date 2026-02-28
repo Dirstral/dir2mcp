@@ -42,6 +42,13 @@ type Config struct {
 	// AllowedOrigins is always initialized with local defaults and then extended
 	// via env/CLI comma-separated origin lists.
 	AllowedOrigins []string
+
+	// EmbedModelText and EmbedModelCode specify the names of the Mistral
+	// embedding models used for text and code chunks respectively.  They are
+	// exposed via configuration so operators can override the hardcoded
+	// defaults if the upstream API changes or custom models are desired.
+	EmbedModelText string
+	EmbedModelCode string
 }
 
 func Default() Config {
@@ -86,6 +93,9 @@ func Default() Config {
 			"http://localhost",
 			"http://127.0.0.1",
 		},
+		// default embedding models
+		EmbedModelText: "mistral-embed",
+		EmbedModelCode: "codestral-embed",
 	}
 }
 
@@ -125,6 +135,12 @@ func applyEnvOverrides(cfg *Config, overrideEnv map[string]string) {
 	}
 	if baseURL, ok := envLookup("MISTRAL_BASE_URL", overrideEnv); ok && strings.TrimSpace(baseURL) != "" {
 		cfg.MistralBaseURL = baseURL
+	}
+	if m, ok := envLookup("DIR2MCP_EMBED_MODEL_TEXT", overrideEnv); ok && strings.TrimSpace(m) != "" {
+		cfg.EmbedModelText = strings.TrimSpace(m)
+	}
+	if m, ok := envLookup("DIR2MCP_EMBED_MODEL_CODE", overrideEnv); ok && strings.TrimSpace(m) != "" {
+		cfg.EmbedModelCode = strings.TrimSpace(m)
 	}
 	if apiKey, ok := envLookup("ELEVENLABS_API_KEY", overrideEnv); ok && strings.TrimSpace(apiKey) != "" {
 		cfg.ElevenLabsAPIKey = apiKey
