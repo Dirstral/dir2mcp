@@ -80,6 +80,7 @@ type upOptions struct {
 	auth                string
 	listen              string
 	mcpPath             string
+	allowedOrigins      string
 }
 
 type authMaterial struct {
@@ -220,6 +221,9 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	}
 	if opts.auth != "" {
 		cfg.AuthMode = opts.auth
+	}
+	if opts.allowedOrigins != "" {
+		cfg.AllowedOrigins = config.MergeAllowedOrigins(cfg.AllowedOrigins, opts.allowedOrigins)
 	}
 	if !strings.HasPrefix(cfg.MCPPath, "/") {
 		writeln(a.stderr, "CONFIG_INVALID: --mcp-path must start with '/'")
@@ -517,6 +521,7 @@ func parseUpOptions(global globalOptions, args []string) (upOptions, error) {
 	fs.StringVar(&opts.auth, "auth", "", "auth mode: auto|none|file:<path>")
 	fs.StringVar(&opts.listen, "listen", "", "listen address")
 	fs.StringVar(&opts.mcpPath, "mcp-path", "", "MCP route path")
+	fs.StringVar(&opts.allowedOrigins, "allowed-origins", "", "comma-separated origins to append to the allowlist")
 	if err := fs.Parse(args); err != nil {
 		return upOptions{}, err
 	}

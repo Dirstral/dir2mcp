@@ -13,25 +13,25 @@ import (
 	"dir2mcp/internal/model"
 )
 
-type fakeEmbedder struct {
+type fakeRetrievalEmbedder struct {
 	vectorsByModel map[string][]float32
 }
 
-// fakeIndex allows inspection of the 'k' value passed to Search.
-type fakeIndex struct {
+// fakeRetrievalIndex allows inspection of the 'k' value passed to Search.
+type fakeRetrievalIndex struct {
 	lastK int
 }
 
-func (f *fakeIndex) Add(label uint64, vector []float32) error { return nil }
-func (f *fakeIndex) Search(vector []float32, k int) ([]uint64, []float32, error) {
+func (f *fakeRetrievalIndex) Add(label uint64, vector []float32) error { return nil }
+func (f *fakeRetrievalIndex) Search(vector []float32, k int) ([]uint64, []float32, error) {
 	f.lastK = k
 	return []uint64{}, []float32{}, nil
 }
-func (f *fakeIndex) Save(path string) error { return nil }
-func (f *fakeIndex) Load(path string) error { return nil }
-func (f *fakeIndex) Close() error           { return nil }
+func (f *fakeRetrievalIndex) Save(path string) error { return nil }
+func (f *fakeRetrievalIndex) Load(path string) error { return nil }
+func (f *fakeRetrievalIndex) Close() error           { return nil }
 
-func (e *fakeEmbedder) Embed(_ context.Context, model string, texts []string) ([][]float32, error) {
+func (e *fakeRetrievalEmbedder) Embed(_ context.Context, model string, texts []string) ([][]float32, error) {
 	// return one embedding per input text, matching the real embedder behaviour
 	n := len(texts)
 	if n == 0 {
@@ -62,7 +62,7 @@ func TestSearch_ReturnsRankedHitsWithFilters(t *testing.T) {
 		t.Fatalf("idx.Add failed: %v", err)
 	}
 
-	svc := NewService(nil, idx, &fakeEmbedder{vectorsByModel: map[string][]float32{
+	svc := NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
 		"mistral-embed":   {1, 0},
 		"codestral-embed": {0, 1},
 	}}, nil)
@@ -97,7 +97,7 @@ func TestSearch_FileGlobFilter(t *testing.T) {
 		t.Fatalf("idx.Add failed: %v", err)
 	}
 
-	svc := NewService(nil, idx, &fakeEmbedder{vectorsByModel: map[string][]float32{
+	svc := NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
 		"mistral-embed":   {1, 0},
 		"codestral-embed": {0, 1},
 	}}, nil)
@@ -118,8 +118,8 @@ func TestSearch_FileGlobFilter(t *testing.T) {
 }
 
 func TestSearch_OverfetchMultiplier_DefaultAndConfigurable(t *testing.T) {
-	fi := &fakeIndex{}
-	svc := NewService(nil, fi, &fakeEmbedder{vectorsByModel: map[string][]float32{}}, nil)
+	fi := &fakeRetrievalIndex{}
+	svc := NewService(nil, fi, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{}}, nil)
 	// first search should use default multiplier (5)
 	if _, err := svc.Search(context.Background(), model.SearchQuery{Query: "x", K: 3}); err != nil {
 		t.Fatalf("Search error: %v", err)
@@ -157,8 +157,8 @@ func TestSearch_OverfetchMultiplier_DefaultAndConfigurable(t *testing.T) {
 // int.  The actual index implementation can't handle a number this large
 // anyway, so we expect the result to be clamped to math.MaxInt.
 func TestSearch_OverflowProtection(t *testing.T) {
-	fi := &fakeIndex{}
-	svc := NewService(nil, fi, &fakeEmbedder{vectorsByModel: map[string][]float32{}}, nil)
+	fi := &fakeRetrievalIndex{}
+	svc := NewService(nil, fi, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{}}, nil)
 	// set multiplier to max allowed by the setter; the service doesn't crash
 	svc.SetOverfetchMultiplier(100)
 	// choose a k that's guaranteed to overflow when multiplied by 100
@@ -187,7 +187,7 @@ func TestSearch_BothMode_DedupesAndNormalizes(t *testing.T) {
 		t.Fatalf("codeIdx.Add failed: %v", err)
 	}
 
-	svc := NewService(nil, textIdx, &fakeEmbedder{vectorsByModel: map[string][]float32{
+	svc := NewService(nil, textIdx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
 		"mistral-embed":   {1, 0},
 		"codestral-embed": {1, 0},
 	}}, nil)
