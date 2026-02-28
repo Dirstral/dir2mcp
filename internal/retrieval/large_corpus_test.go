@@ -81,15 +81,11 @@ func buildLargeCorpusService(tb testing.TB, total int) *Service {
 			vec = []float32{0.95, 0.05}
 		}
 		if err := textIdx.Add(label, vec); err != nil {
-			if tb != nil {
-				tb.Fatalf("textIdx.Add(%d) failed: %v", i, err)
-			}
+			tb.Fatalf("textIdx.Add(%d) failed: %v", i, err)
 		}
 		if i%3 == 0 {
 			if err := codeIdx.Add(label, []float32{1, 0}); err != nil {
-				if tb != nil {
-					tb.Fatalf("codeIdx.Add(%d) failed: %v", i, err)
-				}
+				tb.Fatalf("codeIdx.Add(%d) failed: %v", i, err)
 			}
 		}
 	}

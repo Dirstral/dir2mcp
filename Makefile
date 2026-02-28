@@ -8,7 +8,7 @@ build:
 up: build
 	./dir2mcp up
 
-.PHONY: help fmt vet lint test check ci
+.PHONY: help fmt vet lint test check ci benchmark
 
 help:
 	@echo "Targets:"
@@ -18,6 +18,7 @@ help:
 	@echo "  test   - run go test"
 	@echo "  check  - fmt + vet + lint + test"
 	@echo "  ci     - vet + test (CI-safe default)"
+	@echo "  benchmark - run the large-corpus retrieval benchmark"
 
 fmt:
 	gofmt -w $$(find cmd internal tests -name '*.go')
