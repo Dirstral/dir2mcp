@@ -186,6 +186,51 @@ func TestLoad_AllowedOriginsEnvSkipsMalformedOrigins(t *testing.T) {
 	})
 }
 
+func TestLoad_AllowedOriginsEnvSkipsPathLikeToken(t *testing.T) {
+	tmp := t.TempDir()
+
+	withWorkingDir(t, tmp, func() {
+		t.Setenv("DIR2MCP_ALLOWED_ORIGINS", "bad/path,https://elevenlabs.io")
+		cfg, err := config.Load("")
+		if err != nil {
+			t.Fatalf("Load failed: %v", err)
+		}
+
+		assertNotContains(t, cfg.AllowedOrigins, "bad/path")
+		assertContains(t, cfg.AllowedOrigins, "https://elevenlabs.io")
+	})
+}
+
+func TestLoad_AllowedOriginsEnvSkipsBackslashToken(t *testing.T) {
+	tmp := t.TempDir()
+
+	withWorkingDir(t, tmp, func() {
+		t.Setenv("DIR2MCP_ALLOWED_ORIGINS", "bad\\path,https://elevenlabs.io")
+		cfg, err := config.Load("")
+		if err != nil {
+			t.Fatalf("Load failed: %v", err)
+		}
+
+		assertNotContains(t, cfg.AllowedOrigins, "bad\\path")
+		assertContains(t, cfg.AllowedOrigins, "https://elevenlabs.io")
+	})
+}
+
+func TestLoad_AllowedOriginsEnvSkipsWhitespaceToken(t *testing.T) {
+	tmp := t.TempDir()
+
+	withWorkingDir(t, tmp, func() {
+		t.Setenv("DIR2MCP_ALLOWED_ORIGINS", "bad origin,https://elevenlabs.io")
+		cfg, err := config.Load("")
+		if err != nil {
+			t.Fatalf("Load failed: %v", err)
+		}
+
+		assertNotContains(t, cfg.AllowedOrigins, "bad origin")
+		assertContains(t, cfg.AllowedOrigins, "https://elevenlabs.io")
+	})
+}
+
 func assertContains(t *testing.T, values []string, want string) {
 	t.Helper()
 	for _, value := range values {

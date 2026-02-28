@@ -177,6 +177,9 @@ func normalizeOriginKey(origin string) string {
 	if host, port, err := net.SplitHostPort(origin); err == nil {
 		return strings.ToLower(host) + ":" + port
 	}
+	if strings.Contains(origin, "/") || strings.Contains(origin, "\\") || strings.ContainsAny(origin, " \t\r\n") {
+		return ""
+	}
 
 	return strings.ToLower(origin)
 }
