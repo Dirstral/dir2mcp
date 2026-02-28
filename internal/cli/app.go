@@ -437,11 +437,6 @@ func (a *App) runReindex(ctx context.Context) int {
 
 	// use the factory hook (same as runUp) to allow tests to intercept
 	ing := a.newIngestor(cfg, st)
-	if strings.TrimSpace(cfg.MistralAPIKey) != "" {
-		if ocrSetter, ok := ing.(interface{ SetOCR(model.OCR) }); ok {
-			ocrSetter.SetOCR(mistral.NewClient(cfg.MistralBaseURL, cfg.MistralAPIKey))
-		}
-	}
 
 	err = ing.Reindex(ctx)
 	if errors.Is(err, model.ErrNotImplemented) {
