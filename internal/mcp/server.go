@@ -113,6 +113,12 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	ct := r.Header.Get("Content-Type")
+	if !strings.HasPrefix(strings.ToLower(ct), "application/json") {
+		writeError(w, http.StatusUnsupportedMediaType, nil, -32600, "Content-Type must be application/json", "INVALID_CONTENT_TYPE", false)
+		return
+	}
+
 	if !s.authorize(w, r) {
 		return
 	}
@@ -381,9 +387,6 @@ func isOriginAllowed(origin string, allowlist []string) bool {
 		allowed = strings.TrimSpace(allowed)
 		if allowed == "" {
 			continue
-		}
-		if allowed == "*" {
-			return true
 		}
 
 		if strings.Contains(allowed, "://") {
