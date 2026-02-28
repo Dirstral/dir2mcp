@@ -10,6 +10,10 @@
 4. Serves a spec-compliant MCP server immediately (before indexing finishes), exposing tools: `search`, `ask`, `open_file`, `list_files`, `stats`, `transcribe`, `annotate`, `transcribe_and_ask`
 5. Optionally gates tool calls via **x402 HTTP 402 payment protocol** with facilitator-backed settlement
 
+**Pivot note (2026-02-28):**
+- We are shelving custom Web UI scope for now (previous issue tracks: `#11`, `#18`).
+- Demo path is now hosted ElevenLabs Agent + remote MCP integration into `dir2mcp`.
+
 **Key Mistral integrations:**
 - `mistral-embed` + `codestral-embed` — embeddings
 - `mistral-ocr-latest` — PDFs/images
@@ -25,7 +29,7 @@
 | **Ali** | Lead / Glue / MCP Protocol | Full-stack Go, can unblock anyone |
 | **Ark** | RAG Core | Embeddings, vector search, retrieval, answer generation |
 | **Tia** | Backend / Data Pipeline | File ingestion, SQLite, Mistral API integrations |
-| **Samet** | Frontend / CLI UX | Web dashboard, CLI output, demo polish |
+| **Samet** | Demo UX / CLI | Hosted voice demo flow, CLI output, docs/demo polish |
 
 ---
 
@@ -57,7 +61,7 @@
 │  Mistral API client            ← Ark + Tia           │
 │  (embed, OCR, STT, chat)                             │
 ├─────────────────────────────────────────────────────┤
-│  Web UI / Demo dashboard       ← Samet               │
+│  Hosted voice demo ops         ← Samet               │
 └─────────────────────────────────────────────────────┘
 ```
 
@@ -236,7 +240,7 @@ Write Go functions for: insert/upsert document, insert representation, insert ch
 
 ---
 
-## Samet — CLI UX + Config + State Files + Web UI
+## Samet — CLI UX + Config + State Files + Demo Integration
 
 ### Morning (9am–1pm)
 
@@ -272,13 +276,11 @@ Write Go functions for: insert/upsert document, insert representation, insert ch
 - `status`: read `corpus.json` from disk, print human-readable progress + model config
 - `ask "QUESTION"`: local convenience call into retrieval engine (bypasses MCP), prints answer + citations to stdout
 
-**Task 1.22 — Web UI scaffold** (~2h)
-- Create `ui/` directory with Next.js app
-- Implement a simple HTTP proxy in Go (`/api/mcp`) that forwards requests to the MCP server with the auth token attached — so the frontend never needs to handle bearer tokens directly
-- Pages:
-  - `/` — Dashboard: server status, corpus stats, indexing progress bar
-  - `/search` — Search interface: text input → calls `dir2mcp.search` → shows hits with file path, span, snippet
-  - `/ask` — Ask interface: question input → calls `dir2mcp.ask` → shows answer with inline citations
+**Task 1.22 — Voice demo integration scaffold (no custom frontend)** (~2h)
+- Keep demo surface frontend-free: use ElevenLabs hosted talk-to page
+- Confirm `dir2mcp up` exposes a remotely reachable MCP endpoint (`/mcp`) with stable auth mode for integration
+- Add operator docs for required headers/secret token configuration in ElevenLabs MCP integration setup
+- Add a minimal validation checklist: tools enumerate correctly and at least one read-only query tool executes end-to-end from hosted agent
 
 **Task 1.23 — Demo corpus preparation** (~1h)
 - Assemble a demo corpus: mix of PDF docs, audio files, code files, markdown notes
@@ -291,7 +293,7 @@ Write Go functions for: insert/upsert document, insert representation, insert ch
 
 # DAY 2 — Multimodal + RAG + x402 + Polish
 
-**Goal by end of Day 2:** Full multimodal RAG working (OCR confirmed, audio STT, annotations), `ask` generates real answers with citations, `transcribe`/`annotate`/`transcribe_and_ask` tools working, x402 payment gating live, web UI complete, demo ready.
+**Goal by end of Day 2:** Full multimodal RAG working (OCR confirmed, audio STT, annotations), `ask` generates real answers with citations, `transcribe`/`annotate`/`transcribe_and_ask` tools working, x402 payment gating live, hosted voice demo ready.
 
 ---
 
@@ -430,20 +432,21 @@ Write Go functions for: insert/upsert document, insert representation, insert ch
 
 ---
 
-## Samet — Web UI Completion + Demo + Documentation
+## Samet — Hosted Voice Demo + Documentation
 
 ### Morning (9am–1pm)
 
-**Task 2.17 — Web UI: search + citations display** (~2h)
-- Search page: text input, submit → call `/api/mcp` proxy → parse results
-- Display hits as cards: filename badge, doc_type color-coded, snippet text, citation reference (`path:L12-L25` or `path#p=3` or `path@t=1:23-1:53`)
-- Click citation → call `open_file` → show source content in a side panel or modal
-- Corpus stats page: doc_type breakdown chart, live indexing progress bar (poll `stats` every 2s)
+**Task 2.17 — ElevenLabs MCP integration + approval policy** (~2h)
+- Add custom MCP integration in ElevenLabs dashboard to the deployed `dir2mcp` endpoint
+- Configure secure headers/token in integration settings (no secrets in prompts)
+- Attach integration to demo agent and set fine-grained approvals for read-only tools
+- Verify the agent reliably calls MCP tools for project/domain questions
 
-**Task 2.18 — Web UI: ask interface** (~1.5h)
-- Ask page: question text area → call `dir2mcp.ask` → show answer with inline citations highlighted
-- Collapsible "Sources" section with all hit snippets
-- Show `indexing_complete: false` banner if indexing is still running
+**Task 2.18 — Hosted talk-to demo flow + prompt policy** (~1.5h)
+- Use ElevenLabs hosted talk-to link as demo entrypoint (no custom Next.js UI)
+- Add agent system prompt policy: call MCP knowledge tools first for repo/project questions
+- Require concise citations (`rel_path` + line/page/time span) in spoken responses where possible
+- Add fallback guidance when no matching source is found
 
 ### Afternoon (1pm–6pm)
 
@@ -483,9 +486,9 @@ Write Go functions for: insert/upsert document, insert representation, insert ch
 | | Ali | Ark | Tia | Samet |
 |---|---|---|---|---|
 | **Day 1 AM** | Go scaffold + shared interfaces + MCP server core (JSON-RPC, sessions, auth) | Mistral embed client + HNSW index wrapper | SQLite schema + file discovery + type classification (incl. content-based secret patterns) | Config loading (correct precedence: flags→env→yaml→defaults) + secrets/keychain block + interactive wizard |
-| **Day 1 PM** | `tools/list`, `stats` (with `mode` field), `list_files`, `ask` stub (search_only), `up` wiring (exit codes, new flags, extended connection.json) + NDJSON mode | Embedding pipeline + `search` tool + `open_file` tool (with exclusion engine enforcement) | `raw_text` rep + chunking + incremental hash logic + Mistral OCR | CLI progress output + `status`/`ask` commands + Web UI scaffold |
-| **Day 2 AM** | x402 v2 middleware (PAYMENT-REQUIRED/SIGNATURE/RESPONSE headers) + rate limiting | `transcribe` MCP tool + `annotate` tool + `transcribe_and_ask` tool | Mistral STT + ElevenLabs STT (both normalized) | Web UI: search + citations display |
-| **Day 2 PM** | ElevenLabs TTS + `ask_audio` + integration tests + binary build | Index fusion tuning + RAG quality + `reindex` + perf test | `ask` RAG generation (full LLM call) + archive ingestion + bug fixes | Web UI: ask interface + demo corpus + demo script + README |
+| **Day 1 PM** | `tools/list`, `stats` (with `mode` field), `list_files`, `ask` stub (search_only), `up` wiring (exit codes, new flags, extended connection.json) + NDJSON mode | Embedding pipeline + `search` tool + `open_file` tool (with exclusion engine enforcement) | `raw_text` rep + chunking + incremental hash logic + Mistral OCR | CLI progress output + `status`/`ask` commands + hosted demo integration scaffold |
+| **Day 2 AM** | x402 v2 middleware (PAYMENT-REQUIRED/SIGNATURE/RESPONSE headers) + rate limiting | `transcribe` MCP tool + `annotate` tool + `transcribe_and_ask` tool | Mistral STT + ElevenLabs STT (both normalized) | ElevenLabs MCP integration + read-only tool approval policy |
+| **Day 2 PM** | ElevenLabs TTS + `ask_audio` + integration tests + binary build | Index fusion tuning + RAG quality + `reindex` + perf test | `ask` RAG generation (full LLM call) + archive ingestion + bug fixes | Hosted talk-to flow + demo corpus + demo script + README |
 
 ---
 
@@ -516,5 +519,5 @@ Write Go functions for: insert/upsert document, insert representation, insert ch
 | Output styling | `charmbracelet/lipgloss` | Samet |
 | TTY detection | `golang.org/x/term` | Samet |
 | OS keychain | `github.com/zalando/go-keyring` | Samet |
-| Frontend stack | Next.js + Tailwind | Samet |
+| Demo surface | ElevenLabs hosted talk-to page (no custom frontend) | Samet |
 | Embedding batch size | 32 chunks per API call (tune later) | Ark |
