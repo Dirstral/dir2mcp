@@ -5,7 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/Dirstral/dir2mcp/internal/config"
+	"dir2mcp/internal/config"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 )

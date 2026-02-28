@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/Dirstral/dir2mcp/internal/config"
+	"dir2mcp/internal/config"
 )
 
 // EnsureStateDir creates .dir2mcp/ and subdirs, writes secret.token if missing,

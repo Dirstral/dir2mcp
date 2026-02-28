@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/Dirstral/dir2mcp/internal/cli"
+	"dir2mcp/internal/cli"
 )
 
 func main() {

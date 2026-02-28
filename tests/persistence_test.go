@@ -1,4 +1,4 @@
-package index
+package tests
 
 import (
 	"context"
@@ -7,6 +7,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"dir2mcp/internal/index"
 )
 
 type fakePersistIndex struct {
@@ -83,7 +85,7 @@ func (f *fakePersistIndex) Close() error { return nil }
 func TestPersistenceManager_LoadAndSaveAll(t *testing.T) {
 	i1 := &fakePersistIndex{}
 	i2 := &fakePersistIndex{}
-	pm := NewPersistenceManager([]IndexedFile{
+	pm := index.NewPersistenceManager([]index.IndexedFile{
 		{Path: "text.idx", Index: i1},
 		{Path: "code.idx", Index: i2},
 	}, time.Second, nil)
@@ -116,7 +118,7 @@ func TestPersistenceManager_AutoSaveAndStop(t *testing.T) {
 	// already received the notification
 	saveCh := make(chan struct{}, 2)
 	i1 := &fakePersistIndex{saveNotify: saveCh}
-	pm := NewPersistenceManager([]IndexedFile{
+	pm := index.NewPersistenceManager([]index.IndexedFile{
 		{Path: "text.idx", Index: i1},
 	}, 20*time.Millisecond, nil)
 
@@ -153,7 +155,7 @@ func TestPersistenceManager_AutoSaveAndStop(t *testing.T) {
 // without the fix; with the fix the loop completes cleanly.
 func TestPersistenceManager_StartStop_Race(t *testing.T) {
 	t.Skip("flaky test; skipping for now")
-	pm := NewPersistenceManager([]IndexedFile{{Path: "", Index: &fakePersistIndex{}}}, time.Hour, nil)
+	pm := index.NewPersistenceManager([]index.IndexedFile{{Path: "", Index: &fakePersistIndex{}}}, time.Hour, nil)
 	// run the sequence repeatedly to increase the chance of hitting the
 	// problematic ordering.
 	for i := 0; i < 1000; i++ {
@@ -178,7 +180,7 @@ func TestPersistenceManager_LoadAll_CancelBefore(t *testing.T) {
 	i := &fakePersistIndex{}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	pm := NewPersistenceManager([]IndexedFile{{Path: "text.idx", Index: i}}, time.Second, nil)
+	pm := index.NewPersistenceManager([]index.IndexedFile{{Path: "text.idx", Index: i}}, time.Second, nil)
 	if err := pm.LoadAll(ctx); err == nil {
 		t.Fatalf("expected error from cancelled context, got nil")
 	}
@@ -199,8 +201,8 @@ func TestPersistenceManager_LoadAll_CancelDuring(t *testing.T) {
 	}
 	second := &fakePersistIndex{}
 	ctx, cancel := context.WithCancel(context.Background())
-	pm := NewPersistenceManager(
-		[]IndexedFile{
+	pm := index.NewPersistenceManager(
+		[]index.IndexedFile{
 			{Path: "first.idx", Index: first},
 			{Path: "second.idx", Index: second},
 		},
@@ -279,7 +281,7 @@ func (c *concurrentIndex) Close() error { return nil }
 
 func TestPersistenceManager_SaveAll_Serializes(t *testing.T) {
 	ci := &concurrentIndex{errCh: make(chan error, 1)}
-	pm := NewPersistenceManager([]IndexedFile{{Path: "foo", Index: ci}}, time.Second, nil)
+	pm := index.NewPersistenceManager([]index.IndexedFile{{Path: "foo", Index: ci}}, time.Second, nil)
 
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -303,7 +305,7 @@ func TestPersistenceManager_SaveAll_Serializes(t *testing.T) {
 
 func TestPersistenceManager_LoadAllSaveAll_Serializes(t *testing.T) {
 	ci := &concurrentIndex{errCh: make(chan error, 1)}
-	pm := NewPersistenceManager([]IndexedFile{{Path: "foo", Index: ci}}, time.Second, nil)
+	pm := index.NewPersistenceManager([]index.IndexedFile{{Path: "foo", Index: ci}}, time.Second, nil)
 
 	var wg sync.WaitGroup
 	wg.Add(2)

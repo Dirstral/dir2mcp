@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/Dirstral/dir2mcp/internal/config"
+	"dir2mcp/internal/config"
 )
 
 func TestWriteCorpusJSON_InitialCorpus_RoundTrip(t *testing.T) {

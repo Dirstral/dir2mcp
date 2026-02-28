@@ -13,9 +13,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Dirstral/dir2mcp/internal/config"
-	"github.com/Dirstral/dir2mcp/internal/mcp"
-	"github.com/Dirstral/dir2mcp/internal/state"
+	"dir2mcp/internal/config"
+	"dir2mcp/internal/mcp"
+	"dir2mcp/internal/state"
 	"github.com/spf13/cobra"
 )
 

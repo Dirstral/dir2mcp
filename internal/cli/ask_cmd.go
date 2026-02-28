@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"path/filepath"
 
-	"github.com/Dirstral/dir2mcp/internal/config"
-	"github.com/Dirstral/dir2mcp/internal/retrieval"
+	"dir2mcp/internal/config"
+	"dir2mcp/internal/retrieval"
 	"github.com/spf13/cobra"
 )
 

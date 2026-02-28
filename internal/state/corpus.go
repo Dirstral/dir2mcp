@@ -5,7 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/Dirstral/dir2mcp/internal/config"
+	"dir2mcp/internal/config"
 )
 
 // CorpusJSON is the schema written to corpus.json (SPEC §4.4).

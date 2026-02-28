@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/Dirstral/dir2mcp/internal/config"
+	"dir2mcp/internal/config"
 )
 
 // ServerOptions for running the MCP server.
@@ -40,7 +40,8 @@ func (s *Server) MCPHandler() http.Handler {
 }
 
 // Serve blocks while handling HTTP. Stub: responds 501 on the MCP path.
-func (s *Server) Serve(listener net.Listener) error {
+// Cancel ctx to initiate graceful shutdown; in-flight requests are allowed to drain.
+func (s *Server) Serve(ctx context.Context, listener net.Listener) error {
 	mux := http.NewServeMux()
 	mux.Handle(s.opts.McpPath, s.MCPHandler())
 	srv := &http.Server{
@@ -50,5 +51,14 @@ func (s *Server) Serve(listener net.Listener) error {
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
-	return srv.Serve(listener)
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.Serve(listener) }()
+	select {
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		return srv.Shutdown(shutdownCtx)
+	case err := <-errCh:
+		return err
+	}
 }

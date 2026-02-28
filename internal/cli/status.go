@@ -6,7 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/Dirstral/dir2mcp/internal/state"
+	"dir2mcp/internal/state"
 	"github.com/spf13/cobra"
 )
 
