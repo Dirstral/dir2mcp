@@ -12,6 +12,7 @@ import (
 
 	"dir2mcp/internal/config"
 	"dir2mcp/internal/ingest"
+	"dir2mcp/internal/model"
 	"dir2mcp/internal/store"
 )
 
@@ -99,6 +100,21 @@ func docPaths(t *testing.T, st *store.SQLiteStore) map[string]bool {
 		m[d.RelPath] = true
 	}
 	return m
+}
+
+func documentByPath(t *testing.T, st *store.SQLiteStore, relPath string) model.Document {
+	t.Helper()
+	docs, _, err := st.ListFiles(context.Background(), "", "", 1000, 0)
+	if err != nil {
+		t.Fatalf("ListFiles: %v", err)
+	}
+	for _, doc := range docs {
+		if doc.RelPath == relPath {
+			return doc
+		}
+	}
+	t.Fatalf("document not found: %s", relPath)
+	return model.Document{}
 }
 
 // TestArchiveIngest_ZipMembersIndexed verifies that zip members are ingested
@@ -220,5 +236,9 @@ func TestArchiveIngest_NestedArchiveNotRecursed(t *testing.T) {
 	}
 	if paths["outer.zip/inner.zip/inner.txt"] {
 		t.Error("nested archive member must not be recursed into")
+	}
+	nested := documentByPath(t, st, "outer.zip/inner.zip")
+	if nested.SourceType != "archive_member" {
+		t.Fatalf("unexpected source_type for nested archive member: got=%q want=%q", nested.SourceType, "archive_member")
 	}
 }
