@@ -176,6 +176,10 @@ Notes:
 
 ### Optional integration test (Mistral API)
 
+Test organization:
+- `tests/` contains black-box/integration-style tests and uses `package tests`.
+- `internal/<pkg>/*_test.go` contains package-level white-box tests and may use unexported symbols.
+
 By default, integration tests are skipped. To run the live Mistral embedding integration test:
 
 ```bash
