@@ -117,7 +117,8 @@ func loadDotEnvFile(path string, overrideEnv map[string]string) error {
 		if key == "" {
 			continue
 		}
-		if _, exists := envLookup(key, overrideEnv); exists {
+		existingValue, exists := envLookup(key, overrideEnv)
+		if exists && strings.TrimSpace(existingValue) != "" {
 			continue
 		}
 		if setErr := envSet(key, unquoteEnvValue(value), overrideEnv); setErr != nil {

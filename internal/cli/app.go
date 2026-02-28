@@ -125,12 +125,8 @@ func (a *App) runConfig(args []string) int {
 	case "print":
 		cfg, err := config.Load(".dir2mcp.yaml")
 		if err != nil {
-			if os.IsNotExist(err) {
-				cfg = config.Default()
-			} else {
-				fmt.Fprintf(os.Stderr, "load config: %v\n", err)
-				return 2
-			}
+			fmt.Fprintf(os.Stderr, "load config: %v\n", err)
+			return 2
 		}
 		fmt.Printf(
 			"root=%s state_dir=%s listen=%s mcp_path=%s mistral_base_url=%s mistral_api_key_set=%t\n",
