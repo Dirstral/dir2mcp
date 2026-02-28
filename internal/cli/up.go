@@ -71,14 +71,25 @@ func runUp(cmd *cobra.Command, _ []string) error {
 	}
 
 	// Precedence: flags > env > file > defaults (issue #10)
-	listenOverride := upListen
-	if upPublic {
-		listenOverride = "0.0.0.0:0"
+	overrides := &config.Overrides{}
+
+	// Only override listen when the user explicitly set --listen or --public.
+	if cmd.Flags().Changed("listen") || cmd.Flags().Changed("public") {
+		listenOverride := upListen
+		if upPublic {
+			listenOverride = "0.0.0.0:0"
+		}
+		overrides.ServerListen = &listenOverride
 	}
-	overrides := &config.Overrides{
-		ServerListen:  &listenOverride,
-		ServerMCPPath: &upMcpPath,
-		ServerPublic:  &upPublic,
+
+	// Only override MCP path when the user explicitly set --mcp-path.
+	if cmd.Flags().Changed("mcp-path") {
+		overrides.ServerMCPPath = &upMcpPath
+	}
+
+	// Only override public mode when the user explicitly set --public.
+	if cmd.Flags().Changed("public") {
+		overrides.ServerPublic = &upPublic
 	}
 	cfg, err := config.Load(config.Options{
 		ConfigPath:      globalFlags.ConfigPath,
