@@ -3,15 +3,15 @@ package config
 // Config holds the full resolved configuration.
 // Precedence: CLI flags > env vars > .dir2mcp.yaml > defaults (SPEC §16.1).
 type Config struct {
-	Version  int     `yaml:"version"`
-	Mistral  Mistral `yaml:"mistral"`
-	RAG      RAG     `yaml:"rag"`
-	Ingest   Ingest  `yaml:"ingest"`
+	Version  int      `yaml:"version"`
+	Mistral  Mistral  `yaml:"mistral"`
+	RAG      RAG      `yaml:"rag"`
+	Ingest   Ingest   `yaml:"ingest"`
 	Chunking Chunking `yaml:"chunking"`
-	STT      STT     `yaml:"stt"`
-	X402     X402    `yaml:"x402"`
-	Server   Server  `yaml:"server"`
-	Secrets  Secrets `yaml:"secrets"`
+	STT      STT      `yaml:"stt"`
+	X402     X402     `yaml:"x402"`
+	Server   Server   `yaml:"server"`
+	Secrets  Secrets  `yaml:"secrets"`
 	Security Security `yaml:"security"`
 }
 
@@ -24,21 +24,21 @@ type Mistral struct {
 }
 
 type RAG struct {
-	GenerateAnswer  bool   `yaml:"generate_answer"`
-	KDefault        int    `yaml:"k_default"`
-	SystemPrompt    string `yaml:"system_prompt"`
-	MaxContextChars int    `yaml:"max_context_chars"`
-	OversampleFactor int   `yaml:"oversample_factor"`
+	GenerateAnswer   bool   `yaml:"generate_answer"`
+	KDefault         int    `yaml:"k_default"`
+	SystemPrompt     string `yaml:"system_prompt"`
+	MaxContextChars  int    `yaml:"max_context_chars"`
+	OversampleFactor int    `yaml:"oversample_factor"`
 }
 
 type Ingest struct {
-	Gitignore      bool        `yaml:"gitignore"`
-	PDF            IngestMode  `yaml:"pdf"`
-	Images         IngestMode  `yaml:"images"`
-	Audio          IngestMode  `yaml:"audio"`
-	Archives       IngestMode  `yaml:"archives"`
-	FollowSymlinks bool        `yaml:"follow_symlinks"`
-	MaxFileMB      int         `yaml:"max_file_mb"`
+	Gitignore      bool       `yaml:"gitignore"`
+	PDF            IngestMode `yaml:"pdf"`
+	Images         IngestMode `yaml:"images"`
+	Audio          IngestMode `yaml:"audio"`
+	Archives       IngestMode `yaml:"archives"`
+	FollowSymlinks bool       `yaml:"follow_symlinks"`
+	MaxFileMB      int        `yaml:"max_file_mb"`
 }
 
 type IngestMode struct {
@@ -46,10 +46,10 @@ type IngestMode struct {
 }
 
 type Chunking struct {
-	MaxChars     int           `yaml:"max_chars"`
-	OverlapChars int           `yaml:"overlap_chars"`
-	MinChars     int           `yaml:"min_chars"`
-	Code         ChunkingCode  `yaml:"code"`
+	MaxChars     int                `yaml:"max_chars"`
+	OverlapChars int                `yaml:"overlap_chars"`
+	MinChars     int                `yaml:"min_chars"`
+	Code         ChunkingCode       `yaml:"code"`
 	Transcript   ChunkingTranscript `yaml:"transcript"`
 }
 
@@ -64,8 +64,8 @@ type ChunkingTranscript struct {
 }
 
 type STT struct {
-	Provider   string      `yaml:"provider"` // mistral | elevenlabs
-	Mistral    STTMistral  `yaml:"mistral"`
+	Provider   string        `yaml:"provider"` // mistral | elevenlabs
+	Mistral    STTMistral    `yaml:"mistral"`
 	ElevenLabs STTElevenLabs `yaml:"elevenlabs"`
 }
 
@@ -82,12 +82,12 @@ type STTElevenLabs struct {
 }
 
 type X402 struct {
-	Enabled         bool           `yaml:"enabled"`
-	Mode            string         `yaml:"mode"` // off | on | required
-	FacilitatorURL  string         `yaml:"facilitator_url"`
-	ResourceBaseURL string         `yaml:"resource_base_url"`
+	Enabled         bool            `yaml:"enabled"`
+	Mode            string          `yaml:"mode"` // off | on | required
+	FacilitatorURL  string          `yaml:"facilitator_url"`
+	ResourceBaseURL string          `yaml:"resource_base_url"`
 	RoutePolicy     X402RoutePolicy `yaml:"route_policy"`
-	Bazaar          X402Bazaar     `yaml:"bazaar"`
+	Bazaar          X402Bazaar      `yaml:"bazaar"`
 }
 
 type X402RoutePolicy struct {
@@ -104,7 +104,7 @@ type X402ToolsCall struct {
 }
 
 type X402Bazaar struct {
-	Enabled  bool   `yaml:"enabled"`
+	Enabled  bool `yaml:"enabled"`
 	Metadata struct {
 		Description string `yaml:"description"`
 	} `yaml:"metadata"`
@@ -126,9 +126,9 @@ type ServerTLS struct {
 }
 
 type Secrets struct {
-	Provider  string        `yaml:"provider"` // auto | keychain | file | env | session
-	Keychain  SecretsKeychain `yaml:"keychain"`
-	File      SecretsFile   `yaml:"file"`
+	Provider string          `yaml:"provider"` // auto | keychain | file | env | session
+	Keychain SecretsKeychain `yaml:"keychain"`
+	File     SecretsFile     `yaml:"file"`
 }
 
 type SecretsKeychain struct {
@@ -142,14 +142,14 @@ type SecretsFile struct {
 }
 
 type Security struct {
-	Auth            SecurityAuth `yaml:"auth"`
-	AllowedOrigins  []string     `yaml:"allowed_origins"`
-	PathExcludes    []string    `yaml:"path_excludes"`
-	SecretPatterns  []string    `yaml:"secret_patterns"`
+	Auth           SecurityAuth `yaml:"auth"`
+	AllowedOrigins []string     `yaml:"allowed_origins"`
+	PathExcludes   []string     `yaml:"path_excludes"`
+	SecretPatterns []string     `yaml:"secret_patterns"`
 }
 
 type SecurityAuth struct {
-	Mode     string `yaml:"mode"`      // auto | none | file
+	Mode      string `yaml:"mode"` // auto | none | file
 	TokenFile string `yaml:"token_file"`
 	TokenEnv  string `yaml:"token_env"`
 }

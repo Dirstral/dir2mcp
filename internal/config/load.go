@@ -34,6 +34,12 @@ type Overrides struct {
 func Load(opts Options) (*Config, error) {
 	cfg := Default()
 
+	// Load optional local dotenv files for developer ergonomics.
+	// Precedence stays: explicit env > .env.local > .env.
+	if err := loadDotEnvFiles(".env.local", ".env"); err != nil {
+		return nil, fmt.Errorf("CONFIG_INVALID: failed loading dotenv files: %w", err)
+	}
+
 	configPath := opts.ConfigPath
 	if !filepath.IsAbs(configPath) && opts.RootDir != "" {
 		configPath = filepath.Join(opts.RootDir, configPath)

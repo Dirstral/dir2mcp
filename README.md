@@ -125,6 +125,23 @@ EOCFG
 ```bash
 export GITHUB_PERSONAL_ACCESS_TOKEN=your_pat_here
 export CONTEXT7_API_KEY=your_context7_api_key
+export MISTRAL_API_KEY=your_mistral_api_key
+export MISTRAL_BASE_URL=https://api.mistral.ai
+```
+
+## Local `.env` support
+
+For local development, `dir2mcp` automatically reads `.env` and `.env.local` from the working directory.
+
+Precedence:
+- Existing shell environment variables win
+- Then `.env.local`
+- Then `.env`
+
+Quick start:
+
+```bash
+cp .env.example .env
 ```
 
 ## Development checks
@@ -140,3 +157,15 @@ make check
 Notes:
 - `make lint` requires `golangci-lint` installed locally.
 - CI runs lint + build + vet + test on pushes and PRs to `main`.
+
+### Optional integration test (Mistral API)
+
+By default, integration tests are skipped. To run the live Mistral embedding integration test:
+
+```bash
+RUN_INTEGRATION_TESTS=1 go test -v ./internal/mistral -run Integration
+```
+
+Required env vars:
+- `MISTRAL_API_KEY`
+- optional `MISTRAL_BASE_URL` (defaults to `https://api.mistral.ai`)
