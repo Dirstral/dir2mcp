@@ -31,13 +31,18 @@ func NewServer(opts ServerOptions) (*Server, error) {
 // RunIndexer runs background indexing (stub: no-op until Tia/Ark implement).
 func (s *Server) RunIndexer(ctx context.Context) {}
 
-// Serve blocks while handling HTTP. Stub: responds 501 on the MCP path.
-func (s *Server) Serve(listener net.Listener) error {
-	mux := http.NewServeMux()
-	mux.HandleFunc(s.opts.McpPath, func(w http.ResponseWriter, r *http.Request) {
+// MCPHandler returns the HTTP handler for the MCP path (for mounting on a shared mux).
+func (s *Server) MCPHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotImplemented)
 		_, _ = w.Write([]byte("MCP server not implemented yet"))
 	})
+}
+
+// Serve blocks while handling HTTP. Stub: responds 501 on the MCP path.
+func (s *Server) Serve(listener net.Listener) error {
+	mux := http.NewServeMux()
+	mux.Handle(s.opts.McpPath, s.MCPHandler())
 	srv := &http.Server{
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,

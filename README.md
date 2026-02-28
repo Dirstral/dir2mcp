@@ -32,6 +32,21 @@ export MISTRAL_API_KEY=your_key_here
 ./dir2mcp up
 ```
 
+The server prints the MCP URL (e.g. `http://127.0.0.1:52143/mcp`). Use that base URL (without `/mcp`) for the Web UI.
+
+### Web UI (scaffold)
+
+A Next.js app in `ui/` provides a dashboard, search, and ask pages.
+
+```bash
+cd ui
+cp .env.example .env.local
+# Edit .env.local: set NEXT_PUBLIC_API_URL to the base URL printed by "dir2mcp up" (e.g. http://127.0.0.1:52143)
+npm run dev
+```
+
+Open http://localhost:3000. The dashboard fetches `/api/corpus` from the dir2mcp server; Search and Ask are scaffolded and will call MCP tools when implemented.
+
 ## Documentation
 
 - `VISION.md`: product vision, principles, use cases, and roadmap

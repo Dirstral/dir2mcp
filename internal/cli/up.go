@@ -1,12 +1,16 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/Dirstral/dir2mcp/internal/config"
@@ -123,6 +127,12 @@ func runUp(cmd *cobra.Command, _ []string) error {
 		exitWith(ExitIndexLoadFailure, "ERROR: failed to write connection.json: "+err.Error())
 	}
 
+	jobID := "job_" + time.Now().UTC().Format("20060102-150405")
+	corpus := state.InitialCorpus(rootDir, jobID, cfg)
+	if err := state.WriteCorpusJSON(stateDir, corpus); err != nil {
+		exitWith(ExitIndexLoadFailure, "ERROR: failed to write corpus.json: "+err.Error())
+	}
+
 	if !globalFlags.Quiet && !globalFlags.JSON {
 		fmt.Println("Index:", stateDir, " (meta.sqlite + vectors_text.hnsw + vectors_code.hnsw)")
 		fmt.Println("Mode: incremental  (server-first; indexing in background)")
@@ -134,6 +144,8 @@ func runUp(cmd *cobra.Command, _ []string) error {
 		fmt.Println("    MCP-Protocol-Version: 2025-11-25")
 		fmt.Println("    Authorization: Bearer <token>")
 		fmt.Println("    MCP-Session-Id: (assigned after initialize response)")
+		fmt.Println()
+		fmt.Println("Web UI: cd ui && NEXT_PUBLIC_API_URL=" + baseURL + " npm run dev")
 		fmt.Println()
 	}
 
@@ -161,7 +173,104 @@ func runUp(cmd *cobra.Command, _ []string) error {
 		})
 	}
 
-	return server.Serve(listener)
+	// Combined mux: MCP path + /api/mcp proxy (for web UI) + /api/corpus
+	mux := http.NewServeMux()
+	mux.Handle(upMcpPath, server.MCPHandler())
+	mux.HandleFunc("/api/mcp", func(w http.ResponseWriter, r *http.Request) {
+		proxyToMCP(w, r, mcpURL, token)
+	})
+	mux.HandleFunc("/api/corpus", func(w http.ResponseWriter, r *http.Request) {
+		serveCorpusJSON(w, r, stateDir)
+	})
+	allowedOrigins := cfg.Security.AllowedOrigins
+	if len(allowedOrigins) == 0 {
+		allowedOrigins = []string{"http://localhost:3000", "http://127.0.0.1:3000"}
+	}
+	handler := corsForAPI(mux, allowedOrigins)
+	srv := &http.Server{
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+	return srv.Serve(listener)
+}
+
+// corsForAPI adds CORS headers for /api/* when Origin is in allowed list.
+func corsForAPI(next http.Handler, allowedOrigins []string) http.Handler {
+	allowed := make(map[string]bool)
+	for _, o := range allowedOrigins {
+		allowed[o] = true
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			origin := r.Header.Get("Origin")
+			if allowed[origin] {
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+			}
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+			if r.Method == http.MethodOptions {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// proxyToMCP forwards the request to mcpURL with Authorization: Bearer token.
+func proxyToMCP(w http.ResponseWriter, r *http.Request, mcpURL, token string) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, mcpURL, io.NopCloser(bytes.NewReader(body)))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	req.Header.Set("Content-Type", r.Header.Get("Content-Type"))
+	req.Header.Set("MCP-Protocol-Version", "2025-11-25")
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+	for k, v := range resp.Header {
+		for _, vv := range v {
+			w.Header().Add(k, vv)
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+	_, _ = io.Copy(w, resp.Body)
+}
+
+// serveCorpusJSON serves GET /api/corpus with stateDir/corpus.json.
+func serveCorpusJSON(w http.ResponseWriter, r *http.Request, stateDir string) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	data, err := os.ReadFile(filepath.Join(stateDir, "corpus.json"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			http.Error(w, "corpus.json not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(data)
 }
 
 func emitNDJSON(event string, data map[string]interface{}) {

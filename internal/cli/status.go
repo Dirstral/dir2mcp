@@ -41,17 +41,30 @@ func runStatus(_ *cobra.Command, _ []string) error {
 
 	var corpus struct {
 		Root    string `json:"root"`
+		Profile struct {
+			DocCounts map[string]int `json:"doc_counts"`
+			CodeRatio float64       `json:"code_ratio"`
+		} `json:"profile"`
+		Models struct {
+			EmbedText   string `json:"embed_text"`
+			EmbedCode   string `json:"embed_code"`
+			OCR         string `json:"ocr"`
+			STTProvider string `json:"stt_provider"`
+			STTModel    string `json:"stt_model"`
+			Chat        string `json:"chat"`
+		} `json:"models"`
 		Indexing struct {
-			JobID         string `json:"job_id"`
-			Running       bool   `json:"running"`
-			Scanned       int    `json:"scanned"`
-			Indexed       int    `json:"indexed"`
-			Skipped       int    `json:"skipped"`
-			Deleted       int    `json:"deleted"`
-			Representations int  `json:"representations"`
-			ChunksTotal   int    `json:"chunks_total"`
-			EmbeddedOk    int    `json:"embedded_ok"`
-			Errors        int    `json:"errors"`
+			JobID           string `json:"job_id"`
+			Running         bool   `json:"running"`
+			Mode            string `json:"mode"`
+			Scanned         int    `json:"scanned"`
+			Indexed         int    `json:"indexed"`
+			Skipped         int    `json:"skipped"`
+			Deleted         int    `json:"deleted"`
+			Representations int    `json:"representations"`
+			ChunksTotal     int    `json:"chunks_total"`
+			EmbeddedOk      int    `json:"embedded_ok"`
+			Errors          int    `json:"errors"`
 		} `json:"indexing"`
 	}
 	if err := json.Unmarshal(data, &corpus); err != nil {
@@ -60,6 +73,14 @@ func runStatus(_ *cobra.Command, _ []string) error {
 
 	fmt.Println("Root:", corpus.Root)
 	fmt.Println("State:", stateDir)
+	if corpus.Models.Chat != "" || corpus.Models.EmbedText != "" {
+		fmt.Println("Models: embed_text="+corpus.Models.EmbedText, "embed_code="+corpus.Models.EmbedCode, "ocr="+corpus.Models.OCR, "stt="+corpus.Models.STTProvider+"/"+corpus.Models.STTModel, "chat="+corpus.Models.Chat)
+	}
+	mode := corpus.Indexing.Mode
+	if mode == "" {
+		mode = "incremental"
+	}
+	fmt.Println("Mode:", mode)
 	fmt.Println("Indexing:")
 	fmt.Println("  job_id:", corpus.Indexing.JobID)
 	fmt.Println("  running:", corpus.Indexing.Running)
