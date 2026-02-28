@@ -101,7 +101,7 @@ func runUp(cmd *cobra.Command, _ []string) error {
 		exitWith(ExitIndexLoadFailure, "ERROR: failed to init state: "+err.Error())
 	}
 	lockPath := filepath.Join(stateDir, "locks", "index.lock")
-	defer os.Remove(lockPath)
+	defer func() { _ = os.Remove(lockPath) }()
 
 	listenAddr := cfg.Server.Listen
 	if upPublic && listenAddr == "0.0.0.0:0" {
@@ -277,7 +277,10 @@ func proxyToMCP(w http.ResponseWriter, r *http.Request, mcpURL, token string) {
 		http.Error(w, "upstream request failed", http.StatusBadGateway)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}()
 	for k, v := range resp.Header {
 		for _, vv := range v {
 			w.Header().Add(k, vv)
