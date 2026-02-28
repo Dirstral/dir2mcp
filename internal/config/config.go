@@ -22,6 +22,7 @@ type Config struct {
 	AuthMode        string
 	MistralAPIKey   string
 	MistralBaseURL  string
+	AllowedOrigins  []string
 }
 
 func Default() Config {
@@ -35,6 +36,10 @@ func Default() Config {
 		AuthMode:        "auto",
 		MistralAPIKey:   "",
 		MistralBaseURL:  "",
+		AllowedOrigins: []string{
+			"http://localhost",
+			"http://127.0.0.1",
+		},
 	}
 }
 
@@ -43,7 +48,7 @@ func Load(path string) (Config, error) {
 }
 
 func load(path string, overrideEnv map[string]string) (Config, error) {
-	// Skeleton loader: return defaults until config parsing is implemented.
+	// Start from defaults, then layer dotenv/env overrides.
 	cfg := Default()
 	if err := loadDotEnvFiles([]string{".env.local", ".env"}, overrideEnv); err != nil {
 		return Config{}, fmt.Errorf("load dotenv files: %w", err)
