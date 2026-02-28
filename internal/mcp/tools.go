@@ -511,16 +511,20 @@ func (s *Server) handleAskTool(ctx context.Context, args map[string]interface{})
 
 	// default k should stay in sync with the schema and other tools.  the
 	// shared constant lives in server.go (DefaultSearchK == 10) so use that
-	// instead of a hardcoded literal.  parsing/validation logic is unchanged.
+	// instead of a hardcoded literal.
 	k := DefaultSearchK
 	if rawK, exists := args["k"]; exists {
 		parsedK, parseErr := parseInteger(rawK, "k")
 		if parseErr != nil {
 			return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: parseErr.Error(), Retryable: false}
 		}
-		k = parsedK
+		// Mirror handleSearchTool: only override when k is positive; otherwise,
+		// treat non-positive values as "use the default".
+		if parsedK > 0 {
+			k = parsedK
+		}
 	}
-	if k <= 0 || k > 50 {
+	if k > 50 {
 		return toolCallResult{}, &toolExecutionError{Code: "INVALID_RANGE", Message: "k must be between 1 and 50", Retryable: false}
 	}
 
