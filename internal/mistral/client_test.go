@@ -23,12 +23,12 @@ func TestEmbed_BatchesRequestsAndPreservesOrder(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("Authorization"); got != "Bearer test-key" {
 			t.Errorf("unexpected authorization header: %q", got)
-			http.Error(w, "bad request", http.StatusInternalServerError)
+			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
 		if r.URL.Path != "/v1/embeddings" {
 			t.Errorf("unexpected path: %s", r.URL.Path)
-			http.Error(w, "bad request", http.StatusInternalServerError)
+			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
 		atomic.AddInt32(&calls, 1)
@@ -36,7 +36,7 @@ func TestEmbed_BatchesRequestsAndPreservesOrder(t *testing.T) {
 		var req embedTestRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Errorf("decode request: %v", err)
-			http.Error(w, "bad request", http.StatusInternalServerError)
+			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
 

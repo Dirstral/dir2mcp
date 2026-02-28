@@ -45,7 +45,9 @@ func Load(path string) (Config, error) {
 func load(path string, overrideEnv map[string]string) (Config, error) {
 	// Skeleton loader: return defaults until config parsing is implemented.
 	cfg := Default()
-	_ = loadDotEnvFiles([]string{".env.local", ".env"}, overrideEnv)
+	if err := loadDotEnvFiles([]string{".env.local", ".env"}, overrideEnv); err != nil {
+		return Config{}, fmt.Errorf("load dotenv files: %w", err)
+	}
 	if path == "" {
 		applyEnvOverrides(&cfg, overrideEnv)
 		return cfg, nil
