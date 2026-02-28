@@ -123,7 +123,7 @@ func runUp(cmd *cobra.Command, _ []string) error {
 	if upTLSCert != "" && upTLSKey != "" {
 		baseURL = fmt.Sprintf("https://%s", addr.String())
 	}
-	mcpURL := baseURL + upMcpPath
+	mcpURL := baseURL + cfg.Server.MCPPath
 
 	token, tokenSource, err := state.ResolveAuthToken(stateDir, upAuth)
 	if err != nil {
@@ -152,7 +152,7 @@ func runUp(cmd *cobra.Command, _ []string) error {
 		RootDir:    rootDir,
 		StateDir:   stateDir,
 		Config:     cfg,
-		McpPath:    upMcpPath,
+		McpPath:    cfg.Server.MCPPath,
 		AuthToken:  token,
 	})
 	if err != nil {

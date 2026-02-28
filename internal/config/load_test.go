@@ -76,13 +76,13 @@ func TestSnapshot_NeverStoresPlaintextSecrets(t *testing.T) {
 	cfg.STT.ElevenLabs.APIKey = "sk-elevenlabs-secret"
 
 	snap := SnapshotConfig(&cfg)
-	if snap.Mistral.APIKey != "<from env MISTRAL_API_KEY>" {
+	if snap.Mistral.APIKey != "<redacted>" {
 		t.Errorf("Mistral.APIKey should be redacted, got %q", snap.Mistral.APIKey)
 	}
-	if snap.STT.Mistral.APIKey != "<from env MISTRAL_API_KEY>" {
+	if snap.STT.Mistral.APIKey != "<redacted>" {
 		t.Errorf("STT.Mistral.APIKey should be redacted, got %q", snap.STT.Mistral.APIKey)
 	}
-	if snap.STT.ElevenLabs.APIKey != "<from env ELEVENLABS_API_KEY>" {
+	if snap.STT.ElevenLabs.APIKey != "<redacted>" {
 		t.Errorf("STT.ElevenLabs.APIKey should be redacted, got %q", snap.STT.ElevenLabs.APIKey)
 	}
 	// Ensure no raw secret appears in marshalled output
