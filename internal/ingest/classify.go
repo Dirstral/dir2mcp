@@ -9,12 +9,13 @@ import (
 func ClassifyDocType(relPath string) string {
 	base := strings.ToLower(filepath.Base(relPath))
 
-	// treat any file whose basename starts with ".env" as data, e.g.
-	// ".env", ".env.local", ".env.production" etc. previously only
-	// exact ".env" matched and other variants fell through to the
-	// extension-based classifier (resulting in "binary_ignored").
-	if strings.HasPrefix(base, ".env") {
-		return "data"
+	// treat plain ".env" and dot-separated variants as sensitive and
+	// skip them during ingestion. these often contain secrets/credentials
+	// so we classify them as "ignore". previously they were marked as
+	// "data" which risked accidental indexing; other variants would fall
+	// through to extension-based logic yielding "binary_ignored".
+	if base == ".env" || strings.HasPrefix(base, ".env.") {
+		return "ignore"
 	}
 
 	switch base {

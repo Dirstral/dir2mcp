@@ -100,6 +100,9 @@ func TestSQLiteStore_MarkEmbeddingStatus_LabelOverflow(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected error for label > MaxInt64 in MarkFailed, got nil")
 	}
+	if !strings.Contains(err.Error(), "too large") {
+		t.Errorf("unexpected error message for MarkFailed: %v", err)
+	}
 }
 
 func TestSQLiteStore_UpsertChunkTask_RequiresRelPath(t *testing.T) {

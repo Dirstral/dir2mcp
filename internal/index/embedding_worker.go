@@ -92,9 +92,6 @@ func (w *EmbeddingWorker) RunOnce(ctx context.Context, indexKind string) (int, e
 		inputs = append(inputs, task.Text)
 		labels = append(labels, chunkID)
 	}
-	if len(validTasks) == 0 {
-		return 0, nil
-	}
 
 	vectors, err := w.Embedder.Embed(ctx, modelName, inputs)
 	if err != nil {

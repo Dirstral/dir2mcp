@@ -26,7 +26,7 @@ type fakeIncrementalStore struct {
 
 	lastInsertedChunk model.Chunk
 	insertedChunks    []model.Chunk
-	lastInsertedSpans [][]model.Span
+	insertedSpans     [][]model.Span
 }
 
 func (f *fakeIncrementalStore) Init(context.Context) error { return nil }
@@ -59,7 +59,7 @@ func (f *fakeIncrementalStore) InsertChunkWithSpans(_ context.Context, chunk mod
 	// record
 	f.lastInsertedChunk = chunk
 	f.insertedChunks = append(f.insertedChunks, chunk)
-	f.lastInsertedSpans = append(f.lastInsertedSpans, spans)
+	f.insertedSpans = append(f.insertedSpans, spans)
 	return int64(f.insertChunkCalls), nil
 }
 func (f *fakeIncrementalStore) SoftDeleteChunksFromOrdinal(context.Context, int64, int) error {

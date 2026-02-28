@@ -280,14 +280,20 @@ func TestReadOrComputeOCR_PrunesCacheByTTLThenSize(t *testing.T) {
 		t.Fatalf("chtimes new B: %v", err)
 	}
 
-	svc.ocr = &fakeOCR{text: "should not be used"}
+	// Trigger a cache miss write so pruning runs on write-based policy.
+	contentMiss := []byte("miss")
+	fake := &fakeOCR{text: "zz"}
+	svc.ocr = fake
 	doc := model.Document{RelPath: "docs/foo.pdf"}
-	got, err := svc.readOrComputeOCR(context.Background(), doc, contentNewB)
+	got, err := svc.readOrComputeOCR(context.Background(), doc, contentMiss)
 	if err != nil {
 		t.Fatalf("readOrComputeOCR failed: %v", err)
 	}
-	if got != "fghij" {
-		t.Fatalf("expected cache hit for newest entry, got %q", got)
+	if fake.calls != 1 {
+		t.Fatalf("expected OCR provider called once on cache miss, got %d", fake.calls)
+	}
+	if got != "zz" {
+		t.Fatalf("expected OCR result for cache miss, got %q", got)
 	}
 
 	if _, err := os.Stat(pathOldA); !os.IsNotExist(err) {
@@ -314,6 +320,73 @@ func TestReadOrComputeOCR_PrunesCacheByTTLThenSize(t *testing.T) {
 	}
 	if total > 10 {
 		t.Fatalf("expected cache total <= 10 after TTL+size prune, got %d", total)
+	}
+}
+
+func TestReadOrComputeOCR_PruneInterval(t *testing.T) {
+	// set up a cache with two entries that would exceed a tiny maxBytes limit
+	stateDir := t.TempDir()
+	svc := &Service{cfg: config.Config{StateDir: stateDir}}
+	svc.SetOCRCacheLimits(5, 0)  // total limit only 5 bytes
+	svc.SetOCRCachePruneEvery(2) // only enforce every two writes
+
+	cacheDir := filepath.Join(stateDir, "cache", "ocr")
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		t.Fatalf("mkdir cache dir: %v", err)
+	}
+
+	// create two files already in cache that together are 6 bytes (>5)
+	contentA := []byte("aaa")
+	contentB := []byte("bbb")
+	pathA := filepath.Join(cacheDir, computeContentHash(contentA)+".md")
+	pathB := filepath.Join(cacheDir, computeContentHash(contentB)+".md")
+	if err := os.WriteFile(pathA, contentA, 0o644); err != nil {
+		t.Fatalf("write file A: %v", err)
+	}
+	if err := os.WriteFile(pathB, contentB, 0o644); err != nil {
+		t.Fatalf("write file B: %v", err)
+	}
+
+	// first call should NOT prune because interval=2 and this is first write
+	fake := &fakeOCR{text: "foo"}
+	svc.ocr = fake
+	doc := model.Document{RelPath: "doc"}
+	if _, err := svc.readOrComputeOCR(context.Background(), doc, []byte("x")); err != nil {
+		t.Fatalf("readOrComputeOCR failed: %v", err)
+	}
+	if _, err := os.Stat(pathA); err != nil {
+		t.Fatalf("expected A still there after first write: %v", err)
+	}
+	if _, err := os.Stat(pathB); err != nil {
+		t.Fatalf("expected B still there after first write: %v", err)
+	}
+	// dump cache state after first write (debug)
+	entries, _ := os.ReadDir(cacheDir)
+	_ = entries // deliberately ignore; used during development
+
+	// second call should trigger pruning; one of the old files should be removed
+	if _, err := svc.readOrComputeOCR(context.Background(), doc, []byte("y")); err != nil {
+		t.Fatalf("second readOrComputeOCR failed: %v", err)
+	}
+	// cache state after second write (debug)
+	entries, err := os.ReadDir(cacheDir)
+	_ = entries
+	if err != nil {
+		t.Fatalf("readdir: %v", err)
+	}
+	// ensure that at least one of the original files was removed by pruning
+	existsA := false
+	existsB := false
+	for _, e := range entries {
+		if e.Name() == filepath.Base(pathA) {
+			existsA = true
+		}
+		if e.Name() == filepath.Base(pathB) {
+			existsB = true
+		}
+	}
+	if existsA && existsB {
+		t.Fatalf("expected one of the original cache files to be pruned, still have both")
 	}
 }
 

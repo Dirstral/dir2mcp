@@ -48,7 +48,12 @@ type RepresentationGenerator struct {
 // diagnose the issue.
 func NewRepresentationGenerator(store model.RepresentationStore) *RepresentationGenerator {
 	if store == nil {
-		panic("NewRepresentationGenerator: nil representationStore provided")
+		// Mention the concrete interface type so callers can more easily
+		// correlate the panic with the constructor signature.  The previous
+		// message simply said “nil representationStore” which is vague when
+		// reading from code; by spelling out model.RepresentationStore the
+		// panic makes the required parameter clearer.
+		panic("NewRepresentationGenerator: nil model.RepresentationStore provided")
 	}
 	return &RepresentationGenerator{store: store}
 }
@@ -75,13 +80,16 @@ func (rg *RepresentationGenerator) GenerateRawText(ctx context.Context, doc mode
 	if err != nil {
 		return fmt.Errorf("read file %s: %w", doc.RelPath, err)
 	}
-	return rg.GenerateRawTextFromContent(ctx, doc, absPath, content)
+	return rg.GenerateRawTextFromContent(ctx, doc, content)
 }
 
 // GenerateRawTextFromContent behaves like GenerateRawText but takes the
 // document bytes as an argument.  This is useful when the caller already
 // loaded the file (e.g. during a scan) and wants to avoid re-reading it.
-func (rg *RepresentationGenerator) GenerateRawTextFromContent(ctx context.Context, doc model.Document, absPath string, content []byte) error {
+// The absolute path is no longer required; callers that previously had it
+// simply read the file to supply the content.  Removing the parameter
+// simplifies the API and avoids unused variable warnings.
+func (rg *RepresentationGenerator) GenerateRawTextFromContent(ctx context.Context, doc model.Document, content []byte) error {
 	// Guard against huge files to avoid OOM.  We mirror the same limit used by
 	// discovery since raw-text ingestion should follow the same policy.
 	if int64(len(content)) > defaultMaxFileSizeBytes {

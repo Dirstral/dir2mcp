@@ -16,7 +16,7 @@ func TestNewRepresentationGeneratorNil(t *testing.T) {
 	defer func() {
 		if r := recover(); r == nil {
 			t.Fatalf("expected panic for nil store")
-		} else if !strings.Contains(fmt.Sprint(r), "nil representationStore") {
+		} else if !strings.Contains(fmt.Sprint(r), "nil model.RepresentationStore") {
 			t.Fatalf("unexpected panic message: %v", r)
 		}
 	}()
@@ -175,7 +175,7 @@ func TestGenerateRawTextFromContentPrefersGivenBytes(t *testing.T) {
 	}
 
 	provided := []byte("provided content")
-	if err := rg.GenerateRawTextFromContent(context.Background(), doc, tmp, provided); err != nil {
+	if err := rg.GenerateRawTextFromContent(context.Background(), doc, provided); err != nil {
 		t.Fatalf("GenerateRawTextFromContent failed: %v", err)
 	}
 	if st.upsertCount != 1 {
@@ -183,13 +183,19 @@ func TestGenerateRawTextFromContentPrefersGivenBytes(t *testing.T) {
 	}
 	// compute hash of provided content to ensure it was used
 	hash := computeRepHash(normalizeUTF8(provided))
-	if len(st.reps) > 0 && st.reps[0].RepHash != hash {
+	if len(st.reps) == 0 {
+		t.Fatalf("no representation recorded, expected at least one")
+	}
+	if st.reps[0].RepHash != hash {
 		t.Fatalf("representation hash %q does not match provided content hash %q", st.reps[0].RepHash, hash)
 	}
 }
 
 func TestGenerateRawTextTooLarge(t *testing.T) {
-	st := &fakeRepStore{}
+	// use failAfter=-1 to ensure the fake store does not inject failures for
+	// this test, which only verifies oversized-file rejection before any
+	// chunks are inserted.
+	st := &fakeRepStore{failAfter: -1}
 	rg := NewRepresentationGenerator(st)
 	doc := model.Document{DocID: 1, RelPath: "large.txt", DocType: "text"}
 
@@ -312,16 +318,25 @@ func (s *fakeRepStore) SoftDeleteChunksFromOrdinal(_ context.Context, repID int6
 
 // WithTx implements a very basic transaction emulation.  We snapshot mutable
 // fields and restore them if the callback returns an error, effectively
-// rolling back.
+// rolling back.  Initially we only needed to track chunks/spans/soft deletes,
+// but later tests can inspect representations as well so we must ensure
+// UpsertRepresentation mutations also roll back.
 func (s *fakeRepStore) WithTx(ctx context.Context, fn func(tx model.RepresentationStore) error) error {
 	origChunks := append([]model.Chunk(nil), s.chunks...)
 	origSpans := append([]model.Span(nil), s.spans...)
 	origSoft := s.softDeleteCall
+	origUpsert := s.upsertCount
+	origReps := append([]model.Representation(nil), s.reps...)
+	origNext := s.nextRepID
+
 	err := fn(s)
 	if err != nil {
 		s.chunks = origChunks
 		s.spans = origSpans
 		s.softDeleteCall = origSoft
+		s.upsertCount = origUpsert
+		s.reps = origReps
+		s.nextRepID = origNext
 	}
 	return err
 }

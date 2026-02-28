@@ -131,9 +131,9 @@ func TestClassifyDocType(t *testing.T) {
 		{"json", "package.json", "data"},
 		{"yaml", "config.yaml", "data"},
 		{"toml", "Cargo.toml", "data"},
-		{"env", ".env", "data"},
-		{"env local", ".env.local", "data"},
-		{"env prod", ".env.production", "data"},
+		{"env", ".env", "ignore"},
+		{"env local", ".env.local", "ignore"},
+		{"env prod", ".env.production", "ignore"},
 
 		// HTML
 		{"html", "index.html", "html"},

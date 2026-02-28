@@ -31,6 +31,65 @@ type SQLiteStore struct {
 	cond      *sync.Cond
 }
 
+// dbExecutor abstracts the methods needed to run SQL statements in either a
+// *sql.DB or *sql.Tx.  Upserts on representations share the same logic and the
+// two store types can both supply an executor implementing this interface.
+// The helper below uses it to avoid duplicating validation and SQL.
+type dbExecutor interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+func upsertRepresentationWith(ctx context.Context, exec dbExecutor, rep model.Representation) (int64, error) {
+	if rep.DocID <= 0 {
+		return 0, errors.New("doc_id must be > 0")
+	}
+	repType := strings.TrimSpace(rep.RepType)
+	if repType == "" {
+		repType = "raw_text"
+	}
+	repHash := strings.TrimSpace(rep.RepHash)
+	if repHash == "" {
+		return 0, errors.New("rep_hash must be non-empty")
+	}
+	createdUnix := rep.CreatedUnix
+	if createdUnix <= 0 {
+		createdUnix = time.Now().Unix()
+	}
+
+	_, err := exec.ExecContext(
+		ctx,
+		`INSERT INTO representations(doc_id, rep_type, rep_hash, created_unix, deleted)
+		 VALUES(?, ?, ?, ?, ?)
+		 ON CONFLICT(doc_id, rep_type) DO UPDATE SET
+		   rep_hash=excluded.rep_hash,
+		   created_unix=excluded.created_unix,
+		   deleted=excluded.deleted`,
+		rep.DocID,
+		repType,
+		repHash,
+		createdUnix,
+		boolToInt(rep.Deleted),
+	)
+	if err != nil {
+		return 0, err
+	}
+
+	var repID int64
+	if err := exec.QueryRowContext(
+		ctx,
+		`SELECT rep_id FROM representations WHERE doc_id = ? AND rep_type = ? LIMIT 1`,
+		rep.DocID,
+		repType,
+	).Scan(&repID); err != nil {
+		return 0, err
+	}
+	if repID <= 0 {
+		return 0, errors.New("representation upsert did not return a row")
+	}
+	return repID, nil
+}
+
 func NewSQLiteStore(path string) *SQLiteStore {
 	s := &SQLiteStore{path: path}
 	s.cond = sync.NewCond(&s.mu)
@@ -218,59 +277,13 @@ func (s *SQLiteStore) UpsertChunkTask(ctx context.Context, task model.ChunkTask)
 }
 
 func (s *SQLiteStore) UpsertRepresentation(ctx context.Context, rep model.Representation) (int64, error) {
-	if rep.DocID <= 0 {
-		return 0, errors.New("doc_id must be > 0")
-	}
-	repType := strings.TrimSpace(rep.RepType)
-	if repType == "" {
-		repType = "raw_text"
-	}
-	repHash := strings.TrimSpace(rep.RepHash)
-	if repHash == "" {
-		return 0, errors.New("rep_hash must be non-empty")
-	}
-	createdUnix := rep.CreatedUnix
-	if createdUnix <= 0 {
-		createdUnix = time.Now().Unix()
-	}
-
 	db, err := s.ensureDB(ctx)
 	if err != nil {
 		return 0, err
 	}
 	defer s.ReleaseDB()
 
-	_, err = db.ExecContext(
-		ctx,
-		`INSERT INTO representations(doc_id, rep_type, rep_hash, created_unix, deleted)
-		 VALUES(?, ?, ?, ?, ?)
-		 ON CONFLICT(doc_id, rep_type) DO UPDATE SET
-		   rep_hash=excluded.rep_hash,
-		   created_unix=excluded.created_unix,
-		   deleted=excluded.deleted`,
-		rep.DocID,
-		repType,
-		repHash,
-		createdUnix,
-		boolToInt(rep.Deleted),
-	)
-	if err != nil {
-		return 0, err
-	}
-
-	var repID int64
-	if err := db.QueryRowContext(
-		ctx,
-		`SELECT rep_id FROM representations WHERE doc_id = ? AND rep_type = ? LIMIT 1`,
-		rep.DocID,
-		repType,
-	).Scan(&repID); err != nil {
-		return 0, err
-	}
-	if repID <= 0 {
-		return 0, errors.New("representation upsert did not return a row")
-	}
-	return repID, nil
+	return upsertRepresentationWith(ctx, db, rep)
 }
 
 func (s *SQLiteStore) InsertChunkWithSpans(ctx context.Context, chunk model.Chunk, spans []model.Span) (int64, error) {
@@ -445,54 +458,7 @@ func (t *txSQLiteStore) WithTx(ctx context.Context, fn func(tx model.Representat
 }
 
 func (t *txSQLiteStore) UpsertRepresentation(ctx context.Context, rep model.Representation) (int64, error) {
-	// copy of SQLiteStore.UpsertRepresentation but using t.tx instead of db
-	if rep.DocID <= 0 {
-		return 0, errors.New("doc_id must be > 0")
-	}
-	repType := strings.TrimSpace(rep.RepType)
-	if repType == "" {
-		repType = "raw_text"
-	}
-	repHash := strings.TrimSpace(rep.RepHash)
-	if repHash == "" {
-		return 0, errors.New("rep_hash must be non-empty")
-	}
-	createdUnix := rep.CreatedUnix
-	if createdUnix <= 0 {
-		createdUnix = time.Now().Unix()
-	}
-
-	_, err := t.tx.ExecContext(
-		ctx,
-		`INSERT INTO representations(doc_id, rep_type, rep_hash, created_unix, deleted)
-		 VALUES(?, ?, ?, ?, ?)
-		 ON CONFLICT(doc_id, rep_type) DO UPDATE SET
-		   rep_hash=excluded.rep_hash,
-		   created_unix=excluded.created_unix,
-		   deleted=excluded.deleted`,
-		rep.DocID,
-		repType,
-		repHash,
-		createdUnix,
-		boolToInt(rep.Deleted),
-	)
-	if err != nil {
-		return 0, err
-	}
-
-	var repID int64
-	if err := t.tx.QueryRowContext(
-		ctx,
-		`SELECT rep_id FROM representations WHERE doc_id = ? AND rep_type = ? LIMIT 1`,
-		rep.DocID,
-		repType,
-	).Scan(&repID); err != nil {
-		return 0, err
-	}
-	if repID <= 0 {
-		return 0, errors.New("representation upsert did not return a row")
-	}
-	return repID, nil
+	return upsertRepresentationWith(ctx, t.tx, rep)
 }
 
 func (t *txSQLiteStore) InsertChunkWithSpans(ctx context.Context, chunk model.Chunk, spans []model.Span) (int64, error) {

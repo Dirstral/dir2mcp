@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -19,11 +20,19 @@ func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
 }
 
 func newJSONResponse(status int, body string) *http.Response {
-	return &http.Response{
+	r := &http.Response{
 		StatusCode: status,
 		Header:     make(http.Header),
 		Body:       io.NopCloser(strings.NewReader(body)),
+		// mimic real responses by including a minimal request
+		Request: &http.Request{
+			Method: http.MethodGet,
+			URL:    &url.URL{Scheme: "https", Host: "api.example.com", Path: "/"},
+		},
 	}
+	// typical JSON API responses set this header
+	r.Header.Set("Content-Type", "application/json")
+	return r
 }
 
 func TestExtract_OCRPagesJoinedByFormFeed(t *testing.T) {

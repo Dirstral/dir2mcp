@@ -143,6 +143,10 @@ func TestUpNonInteractiveMissingConfigReturnsExitCode2(t *testing.T) {
 // denied on a dotenv file), so we simulate that by creating an unreadable
 // ".env" file in the working directory.
 func TestReindexConfigLoadErrorReturnsExitCode2(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("file permission semantics differ on Windows")
+	}
+
 	tmp := t.TempDir()
 	// ensure there is something to upset loadDotEnvFiles
 	bad := filepath.Join(tmp, ".env")
@@ -186,7 +190,8 @@ func TestReindexPassesConfigToNewIngestor(t *testing.T) {
 	app := cli.NewAppWithIOAndHooks(&stdout, &stderr, cli.RuntimeHooks{
 		NewIngestor: func(cfg config.Config, st model.Store) model.Ingestor {
 			seenCfg = cfg
-			return failingIngestor{} // reuse from above
+			// return the failingIngestor defined later in this file
+			return failingIngestor{}
 		},
 	})
 

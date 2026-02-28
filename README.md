@@ -204,3 +204,5 @@ go test -v ./tests -run MistralOCR
   - OCR outputs are cached in `.dir2mcp/cache/ocr/<content-hash>.md`; this cache persists indefinitely (no automatic TTL/rotation)
   - repeat processing of unchanged OCR input reuses cache before provider calls
   - manual pruning may be necessary if the directory grows large, as no cleanup is performed
+  - to check cache size: `du -sh .dir2mcp/cache/ocr/`
+  - to clear the cache: `rm -rf .dir2mcp/cache/ocr/*` (cache will be rebuilt on next OCR operation)

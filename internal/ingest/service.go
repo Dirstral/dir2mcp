@@ -5,11 +5,13 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"dir2mcp/internal/appstate"
@@ -29,6 +31,19 @@ type Service struct {
 	// ttl, if non‑zero, causes files older than the duration to be removed.
 	ocrCacheMaxBytes int64
 	ocrCacheTTL      time.Duration
+
+	// mutex protecting the two fields above.  EnforceOCRCachePolicy may run in
+	// a goroutine concurrently with calls to SetOCRCacheLimits, so we need to
+	// guard reads and writes.
+	ocrCacheMu sync.RWMutex
+
+	// enforcement bookkeeping. Instead of scanning the cache on every write we
+	// maintain a simple counter of cache writes and only run
+	// enforceOCRCachePolicy() once every ocrCachePruneEvery writes. A value of
+	// zero is treated as "run every time" to preserve existing behaviour and is
+	// convenient for tests.
+	ocrCacheWrites     int
+	ocrCachePruneEvery int
 }
 
 type documentDeleteMarker interface {
@@ -60,8 +75,34 @@ func (s *Service) SetOCR(ocr model.OCR) {
 // applied simultaneously. These are primarily useful for tests or for
 // embedding the service in environments where disk usage must be bounded.
 func (s *Service) SetOCRCacheLimits(maxBytes int64, ttl time.Duration) {
+	s.ocrCacheMu.Lock()
+	defer s.ocrCacheMu.Unlock()
 	s.ocrCacheMaxBytes = maxBytes
 	s.ocrCacheTTL = ttl
+}
+
+// SetOCRCachePruneEvery configures how often the cache policy is enforced on
+// writes. The service counts writes and only runs the full scan when the
+// counter reaches this value. A value of zero (the default) means "run every
+// time", which preserves the original behaviour and makes tests simpler.
+func (s *Service) SetOCRCachePruneEvery(n int) {
+	s.ocrCacheMu.Lock()
+	defer s.ocrCacheMu.Unlock()
+	s.ocrCachePruneEvery = n
+}
+
+// markOCRCacheWrite increments the write counter and reports whether policy
+// enforcement should run for this write. When enforcement is due, the counter
+// is reset so the next N writes are free of scans.
+func (s *Service) markOCRCacheWrite() bool {
+	s.ocrCacheMu.Lock()
+	defer s.ocrCacheMu.Unlock()
+	s.ocrCacheWrites++
+	if s.ocrCachePruneEvery <= 0 || s.ocrCacheWrites >= s.ocrCachePruneEvery {
+		s.ocrCacheWrites = 0
+		return true
+	}
+	return false
 }
 
 // ClearOCRCache deletes any cached OCR data.  The caller may use this to
@@ -196,7 +237,7 @@ func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretP
 		return nil
 	}
 
-	if err := s.generateRepresentations(ctx, doc, f.AbsPath, content); err != nil {
+	if err := s.generateRepresentations(ctx, doc, content); err != nil {
 		return fmt.Errorf("generate representations: %w", err)
 	}
 	return nil
@@ -219,7 +260,12 @@ func (s *Service) buildDocumentWithContent(f DiscoveredFile, secretPatterns []*r
 	}
 	doc.ContentHash = computeContentHash(content)
 
-	if docType == "archive" || docType == "binary_ignored" {
+	// certain document types we don't want to ingest at all.
+	// "archive" and "binary_ignored" were already skipped.
+	// newly, the "ignore" category (used for sensitive files like
+	// .env variants) is also treated as skipped so that they never
+	// enter the pipeline.
+	if docType == "archive" || docType == "binary_ignored" || docType == "ignore" {
 		doc.Status = "skipped"
 		return doc, content, nil
 	}
@@ -330,7 +376,7 @@ func (s *Service) addRepresentations(delta int64) {
 	}
 }
 
-func (s *Service) generateRepresentations(ctx context.Context, doc model.Document, absPath string, content []byte) error {
+func (s *Service) generateRepresentations(ctx context.Context, doc model.Document, content []byte) error {
 	if s.repGen == nil {
 		return nil
 	}
@@ -338,7 +384,7 @@ func (s *Service) generateRepresentations(ctx context.Context, doc model.Documen
 	if ShouldGenerateRawText(doc.DocType) {
 		// we already loaded the file contents earlier in processDocument,
 		// avoid re-reading it by using the new helper method.
-		if err := s.repGen.GenerateRawTextFromContent(ctx, doc, absPath, content); err != nil {
+		if err := s.repGen.GenerateRawTextFromContent(ctx, doc, content); err != nil {
 			return err
 		}
 		s.addRepresentations(1)
@@ -416,7 +462,13 @@ func (s *Service) generateOCRMarkdownRepresentation(ctx context.Context, doc mod
 // the configured size or age limits.  It's safe to call even if neither
 // policy is enabled; in that case it is a no-op.
 func (s *Service) enforceOCRCachePolicy(cacheDir string) error {
-	if s.ocrCacheMaxBytes <= 0 && s.ocrCacheTTL <= 0 {
+	// read the limits under a read lock; we copy them to locals so the rest of
+	// the logic can run without holding the lock for the entire scan.
+	s.ocrCacheMu.RLock()
+	maxBytes := s.ocrCacheMaxBytes
+	ttl := s.ocrCacheTTL
+	s.ocrCacheMu.RUnlock()
+	if maxBytes <= 0 && ttl <= 0 {
 		return nil
 	}
 	entries, err := os.ReadDir(cacheDir)
@@ -441,6 +493,16 @@ func (s *Service) enforceOCRCachePolicy(cacheDir string) error {
 		p := filepath.Join(cacheDir, e.Name())
 		info, err := e.Info()
 		if err != nil {
+			// log failure so that operators can investigate; include the
+			// entry name since that is the only identifier available here.
+			log.Printf("enforceOCRCachePolicy: failed to stat %s: %v", e.Name(), err)
+			// do not silently drop the entry from size accounting.  add a
+			// conservative estimate (e.g. the configured max) so that a bad
+			// stat cannot be used to bypass the cache limit.  we could also
+			// increment a metric/counter here if one were available.
+			if maxBytes > 0 {
+				total += maxBytes
+			}
 			continue
 		}
 		files = append(files, fileInfo{path: p, info: info})
@@ -448,8 +510,8 @@ func (s *Service) enforceOCRCachePolicy(cacheDir string) error {
 	}
 
 	// age-based eviction first
-	if s.ocrCacheTTL > 0 {
-		cutoff := now.Add(-s.ocrCacheTTL)
+	if ttl > 0 {
+		cutoff := now.Add(-ttl)
 		kept := make([]fileInfo, 0, len(files))
 		for _, f := range files {
 			if f.info.ModTime().Before(cutoff) {
@@ -465,12 +527,12 @@ func (s *Service) enforceOCRCachePolicy(cacheDir string) error {
 	}
 
 	// size-based eviction
-	if s.ocrCacheMaxBytes > 0 && total > s.ocrCacheMaxBytes {
+	if maxBytes > 0 && total > maxBytes {
 		sort.Slice(files, func(i, j int) bool {
 			return files[i].info.ModTime().Before(files[j].info.ModTime())
 		})
 		for _, f := range files {
-			if total <= s.ocrCacheMaxBytes {
+			if total <= maxBytes {
 				break
 			}
 			if err := os.Remove(f.path); err != nil && !os.IsNotExist(err) {
@@ -489,17 +551,16 @@ func (s *Service) readOrComputeOCR(ctx context.Context, doc model.Document, cont
 		return "", fmt.Errorf("create ocr cache dir: %w", err)
 	}
 
-	// enforce any configured cache policy before we write a new entry. doing the
-	// pruning here (rather than lazily) keeps the directory bounded even if the
-	// service never restarts.
-	if err := s.enforceOCRCachePolicy(cacheDir); err != nil {
-		return "", err
-	}
-
 	cachePath := filepath.Join(cacheDir, computeContentHash(content)+".md")
 	if cached, err := os.ReadFile(cachePath); err == nil {
 		return string(cached), nil
 	}
+
+	// enforce any configured cache policy around writes. A full directory scan
+	// can be expensive, so we only run it on a configurable write interval.
+	// The counter increments only when we are about to perform a real write
+	// (cache miss), not for cache hits.
+	shouldEnforceAfterWrite := s.markOCRCacheWrite()
 
 	ocrText, err := s.ocr.Extract(ctx, doc.RelPath, content)
 	if err != nil {
@@ -509,6 +570,11 @@ func (s *Service) readOrComputeOCR(ctx context.Context, doc model.Document, cont
 	ocrBytes := []byte(strings.ReplaceAll(strings.ReplaceAll(ocrText, "\r\n", "\n"), "\r", "\n"))
 	if err := os.WriteFile(cachePath, ocrBytes, 0o644); err != nil {
 		return "", fmt.Errorf("write ocr cache: %w", err)
+	}
+	if shouldEnforceAfterWrite {
+		if err := s.enforceOCRCachePolicy(cacheDir); err != nil {
+			return "", err
+		}
 	}
 	return string(ocrBytes), nil
 }
