@@ -63,6 +63,7 @@ func TestServer_ToolsList(t *testing.T) {
 		t.Fatalf("expected tools array, got: %#v", result["tools"])
 	}
 	names := map[string]struct{}{}
+	var searchTool map[string]any
 	for idx, toolVal := range tools {
 		tool, ok := toolVal.(map[string]any)
 		if !ok {
@@ -72,13 +73,53 @@ func TestServer_ToolsList(t *testing.T) {
 		if !ok || name == "" {
 			t.Fatalf("expected tool.name string at index %d, got: %#v", idx, tool["name"])
 		}
+		if _, exists := names[name]; exists {
+			t.Fatalf("duplicate tool name in tools/list: %q", name)
+		}
 		names[name] = struct{}{}
+		if name == "dir2mcp.search" {
+			searchTool = tool
+		}
 	}
 	if len(tools) == 0 {
 		t.Fatal("expected at least one tool")
 	}
 	if _, ok := names["dir2mcp.search"]; !ok {
 		t.Fatalf("expected dir2mcp.search in tools/list")
+	}
+	if searchTool == nil {
+		t.Fatalf("expected to capture dir2mcp.search tool payload")
+	}
+
+	inputSchema, ok := searchTool["inputSchema"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected dir2mcp.search.inputSchema object, got %#v", searchTool["inputSchema"])
+	}
+	if schemaType, _ := inputSchema["type"].(string); schemaType != "object" {
+		t.Fatalf("expected dir2mcp.search.inputSchema.type=object, got %#v", inputSchema["type"])
+	}
+	required, ok := inputSchema["required"].([]any)
+	if !ok {
+		t.Fatalf("expected dir2mcp.search.inputSchema.required array, got %#v", inputSchema["required"])
+	}
+	foundQueryRequired := false
+	for _, item := range required {
+		if v, ok := item.(string); ok && v == "query" {
+			foundQueryRequired = true
+			break
+		}
+	}
+	if !foundQueryRequired {
+		t.Fatalf("expected dir2mcp.search.inputSchema.required to include query, got %#v", required)
+	}
+	properties, ok := inputSchema["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected dir2mcp.search.inputSchema.properties object, got %#v", inputSchema["properties"])
+	}
+	for _, key := range []string{"query", "k", "index", "path_prefix", "file_glob", "doc_types"} {
+		if _, ok := properties[key]; !ok {
+			t.Fatalf("expected dir2mcp.search.inputSchema.properties to include %q", key)
+		}
 	}
 }
 
