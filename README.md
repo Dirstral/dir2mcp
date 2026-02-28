@@ -44,6 +44,15 @@ export MISTRAL_API_KEY=your_key_here
 - Day 1: core MCP + indexing + retrieval + citations
 - Day 2 (optional): native x402 request gating via facilitator integration
 
+## Demo direction (current)
+
+For the hackathon demo we are not building a custom web frontend.
+
+- Voice UX is hosted by ElevenLabs Agents (talk-to page)
+- `dir2mcp` remains the MCP knowledge server and tool provider
+- Agent calls MCP tools over remote MCP (SSE/streamable HTTP)
+- Optional: keep `ask_audio` for direct tool-level TTS experiments
+
 ## MCP setup by client
 
 Recommended servers:
