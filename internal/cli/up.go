@@ -173,5 +173,5 @@ func emitNDJSON(event string, data map[string]interface{}) {
 		"data":  data,
 	}
 	enc := json.NewEncoder(os.Stdout)
-	enc.Encode(out)
+	_ = enc.Encode(out)
 }

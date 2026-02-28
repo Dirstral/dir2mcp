@@ -57,13 +57,6 @@ func Execute() error {
 	return rootCmd.Execute()
 }
 
-// setExitCode sets os.Exit code for the process (called from RunE when needed).
-func setExitCode(code int) {
-	// Cobra doesn't expose a way to set exit code; we use os.Exit from RunE.
-	// So RunE should call os.Exit(code) after printing error for config/root/bind failures.
-	_ = code
-}
-
 // exitWith prints message to stderr and exits with code.
 func exitWith(code int, msg string) {
 	fmt.Fprintln(os.Stderr, msg)

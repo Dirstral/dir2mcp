@@ -35,7 +35,7 @@ func (s *Server) Serve(listener net.Listener) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc(s.opts.McpPath, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotImplemented)
-		w.Write([]byte("MCP server not implemented yet"))
+		_, _ = w.Write([]byte("MCP server not implemented yet"))
 	})
 	return http.Serve(listener, mux)
 }
