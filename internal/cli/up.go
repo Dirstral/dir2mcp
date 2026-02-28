@@ -242,7 +242,7 @@ func proxyToMCP(w http.ResponseWriter, r *http.Request, mcpURL, token string) {
 	}
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, mcpURL, io.NopCloser(bytes.NewReader(body)))
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, "failed to build proxy request", http.StatusInternalServerError)
 		return
 	}
 	req.Header.Set("Content-Type", r.Header.Get("Content-Type"))
@@ -250,7 +250,7 @@ func proxyToMCP(w http.ResponseWriter, r *http.Request, mcpURL, token string) {
 	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
+		http.Error(w, "upstream request failed", http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
@@ -275,7 +275,7 @@ func serveCorpusJSON(w http.ResponseWriter, r *http.Request, stateDir string) {
 			http.Error(w, "corpus.json not found", http.StatusNotFound)
 			return
 		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, "failed to read corpus", http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -294,12 +294,12 @@ func serveConnectionJSON(w http.ResponseWriter, r *http.Request, stateDir string
 			http.Error(w, "connection.json not found", http.StatusNotFound)
 			return
 		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, "failed to read connection", http.StatusInternalServerError)
 		return
 	}
 	var conn map[string]interface{}
 	if err := json.Unmarshal(data, &conn); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, "invalid connection.json", http.StatusInternalServerError)
 		return
 	}
 	if headers, ok := conn["headers"].(map[string]interface{}); ok && headers["Authorization"] != nil {
@@ -307,7 +307,7 @@ func serveConnectionJSON(w http.ResponseWriter, r *http.Request, stateDir string
 	}
 	out, err := json.MarshalIndent(conn, "", "  ")
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, "failed to encode response", http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
