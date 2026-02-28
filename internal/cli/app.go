@@ -2,10 +2,20 @@ package cli
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
+	"io"
+	"net"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"strings"
+	"syscall"
+	"time"
 
 	"github.com/Dirstral/dir2mcp/internal/config"
 	"github.com/Dirstral/dir2mcp/internal/index"
@@ -17,118 +27,407 @@ import (
 	"github.com/Dirstral/dir2mcp/internal/store"
 )
 
-type App struct{}
+const (
+	exitSuccess = iota
+	exitGeneric
+	exitConfigInvalid
+	exitRootInaccessible
+	exitServerBindFailure
+	exitIndexLoadFailure
+	exitIngestionFatal
+)
+
+const (
+	authTokenEnvVar    = "DIR2MCP_AUTH_TOKEN"
+	connectionFileName = "connection.json"
+	secretTokenName    = "secret.token"
+)
+
+var commands = map[string]struct{}{
+	"up":      {},
+	"status":  {},
+	"ask":     {},
+	"reindex": {},
+	"config":  {},
+	"version": {},
+}
+
+type App struct {
+	stdout io.Writer
+	stderr io.Writer
+
+	newIngestor func(config.Config, model.Store) model.Ingestor
+}
+
+type RuntimeHooks struct {
+	NewIngestor func(config.Config, model.Store) model.Ingestor
+}
+
+type globalOptions struct {
+	jsonOutput     bool
+	nonInteractive bool
+}
+
+type upOptions struct {
+	globalOptions
+	readOnly            bool
+	x402ResourceBaseURL string
+	auth                string
+	listen              string
+	mcpPath             string
+}
+
+type authMaterial struct {
+	mode              string
+	token             string
+	tokenSource       string
+	tokenFile         string
+	authorizationHint string
+}
+
+type connectionSession struct {
+	UsesMCPSessionID     bool   `json:"uses_mcp_session_id"`
+	HeaderName           string `json:"header_name"`
+	AssignedOnInitialize bool   `json:"assigned_on_initialize"`
+}
+
+type connectionPayload struct {
+	Transport   string            `json:"transport"`
+	URL         string            `json:"url"`
+	Headers     map[string]string `json:"headers"`
+	Session     connectionSession `json:"session"`
+	TokenSource string            `json:"token_source"`
+	TokenFile   string            `json:"token_file,omitempty"`
+}
+
+type ndjsonEvent struct {
+	Timestamp string      `json:"ts"`
+	Level     string      `json:"level"`
+	Event     string      `json:"event"`
+	Data      interface{} `json:"data"`
+}
+
+type ndjsonEmitter struct {
+	enabled bool
+	out     io.Writer
+}
 
 func NewApp() *App {
-	return &App{}
+	return NewAppWithIO(os.Stdout, os.Stderr)
+}
+
+func NewAppWithIO(stdout, stderr io.Writer) *App {
+	return &App{
+		stdout: stdout,
+		stderr: stderr,
+		newIngestor: func(cfg config.Config, st model.Store) model.Ingestor {
+			return ingest.NewService(cfg, st)
+		},
+	}
+}
+
+func NewAppWithIOAndHooks(stdout, stderr io.Writer, hooks RuntimeHooks) *App {
+	app := NewAppWithIO(stdout, stderr)
+	if hooks.NewIngestor != nil {
+		app.newIngestor = hooks.NewIngestor
+	}
+	return app
+}
+
+func writef(out io.Writer, format string, args ...interface{}) {
+	_, _ = fmt.Fprintf(out, format, args...)
+}
+
+func writeln(out io.Writer, args ...interface{}) {
+	_, _ = fmt.Fprintln(out, args...)
 }
 
 func (a *App) Run(args []string) int {
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	return a.RunWithContext(ctx, args)
+}
+
+func (a *App) RunWithContext(ctx context.Context, args []string) int {
 	if len(args) == 0 {
 		a.printUsage()
-		return 0
+		return exitSuccess
 	}
 
-	switch args[0] {
+	globalOpts, remaining, err := parseGlobalOptions(args)
+	if err != nil {
+		writef(a.stderr, "%v\n", err)
+		return exitGeneric
+	}
+	if len(remaining) == 0 {
+		a.printUsage()
+		return exitSuccess
+	}
+
+	switch remaining[0] {
 	case "up":
-		return a.runUp()
+		upOpts, parseErr := parseUpOptions(globalOpts, remaining[1:])
+		if parseErr != nil {
+			writef(a.stderr, "invalid up flags: %v\n", parseErr)
+			return exitConfigInvalid
+		}
+		return a.runUp(ctx, upOpts)
 	case "status":
 		return a.runStatus()
 	case "ask":
-		return a.runAsk(args[1:])
+		return a.runAsk(remaining[1:])
 	case "reindex":
-		return a.runReindex()
+		return a.runReindex(ctx)
 	case "config":
-		return a.runConfig(args[1:])
+		return a.runConfig(remaining[1:])
 	case "version":
-		fmt.Println("dir2mcp skeleton v0.0.0-dev")
-		return 0
+		writeln(a.stdout, "dir2mcp skeleton v0.0.0-dev")
+		return exitSuccess
 	default:
-		fmt.Fprintf(os.Stderr, "unknown command: %s\n", args[0])
+		writef(a.stderr, "unknown command: %s\n", remaining[0])
 		a.printUsage()
-		return 1
+		return exitGeneric
 	}
 }
 
 func (a *App) printUsage() {
-	fmt.Println("dir2mcp skeleton")
-	fmt.Println("usage: dir2mcp <command>")
-	fmt.Println("commands: up, status, ask, reindex, config, version")
+	writeln(a.stdout, "dir2mcp skeleton")
+	writeln(a.stdout, "usage: dir2mcp [--json] [--non-interactive] <command>")
+	writeln(a.stdout, "commands: up, status, ask, reindex, config, version")
 }
 
-func (a *App) runUp() int {
+func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	cfg, err := config.Load(".dir2mcp.yaml")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "load config: %v\n", err)
-		return 2
+		writef(a.stderr, "load config: %v\n", err)
+		return exitConfigInvalid
+	}
+
+	if opts.listen != "" {
+		cfg.ListenAddr = opts.listen
+	}
+	if opts.mcpPath != "" {
+		cfg.MCPPath = opts.mcpPath
+	}
+	if opts.auth != "" {
+		cfg.AuthMode = opts.auth
+	}
+	if !strings.HasPrefix(cfg.MCPPath, "/") {
+		writeln(a.stderr, "CONFIG_INVALID: --mcp-path must start with '/'")
+		return exitConfigInvalid
+	}
+	_ = opts.x402ResourceBaseURL
+
+	if err := ensureRootAccessible(cfg.RootDir); err != nil {
+		writef(a.stderr, "root inaccessible: %v\n", err)
+		return exitRootInaccessible
 	}
 
 	if err := os.MkdirAll(cfg.StateDir, 0o755); err != nil {
-		fmt.Fprintf(os.Stderr, "create state dir: %v\n", err)
-		return 1
+		writef(a.stderr, "create state dir: %v\n", err)
+		return exitRootInaccessible
 	}
+
+	nonInteractiveMode := opts.nonInteractive || !isTerminal(os.Stdin) || !isTerminal(os.Stdout)
+	if strings.TrimSpace(cfg.MistralAPIKey) == "" {
+		if nonInteractiveMode {
+			writeln(a.stderr, "ERROR: CONFIG_INVALID: Missing MISTRAL_API_KEY")
+			writeln(a.stderr, "Set env: MISTRAL_API_KEY=...")
+			writeln(a.stderr, "Or run: dir2mcp config init")
+		} else {
+			writeln(a.stderr, "CONFIG_INVALID: Missing MISTRAL_API_KEY")
+			writeln(a.stderr, "Run: dir2mcp config init")
+		}
+		return exitConfigInvalid
+	}
+
+	auth, err := prepareAuthMaterial(cfg)
+	if err != nil {
+		writef(a.stderr, "auth setup: %v\n", err)
+		return exitConfigInvalid
+	}
+	cfg.AuthMode = auth.mode
+	cfg.ResolvedAuthToken = auth.token
 
 	stateDB := filepath.Join(cfg.StateDir, "meta.sqlite")
 	st := store.NewSQLiteStore(stateDB)
+	defer func() {
+		_ = st.Close()
+	}()
+	if err := st.Init(ctx); err != nil && !errors.Is(err, model.ErrNotImplemented) {
+		writef(a.stderr, "initialize metadata store: %v\n", err)
+		return exitIndexLoadFailure
+	}
+
 	ix := index.NewHNSWIndex(filepath.Join(cfg.StateDir, "vectors_text.hnsw"))
+	defer func() {
+		_ = ix.Close()
+	}()
+	if err := ix.Load(filepath.Join(cfg.StateDir, "vectors_text.hnsw")); err != nil &&
+		!errors.Is(err, model.ErrNotImplemented) &&
+		!errors.Is(err, os.ErrNotExist) {
+		writef(a.stderr, "load index: %v\n", err)
+		return exitIndexLoadFailure
+	}
+
 	client := mistral.NewClient(cfg.MistralBaseURL, cfg.MistralAPIKey)
 	ret := retrieval.NewService(st, ix, client)
 	mcpServer := mcp.NewServer(cfg, ret)
-	ing := ingest.NewService(cfg, st)
+	ing := a.newIngestor(cfg, st)
 
-	fmt.Printf("State dir: %s\n", cfg.StateDir)
-	fmt.Printf("MCP endpoint (planned): http://%s%s\n", cfg.ListenAddr, cfg.MCPPath)
-	fmt.Println("Skeleton wiring complete; server/indexing logic is not implemented yet.")
+	emitter := newNDJSONEmitter(a.stdout, opts.jsonOutput)
+	emitter.Emit("info", "index_loaded", map[string]interface{}{
+		"state_dir": cfg.StateDir,
+	})
 
-	_ = mcpServer
-	_ = ing
-	return 0
+	ln, err := net.Listen("tcp", cfg.ListenAddr)
+	if err != nil {
+		writef(a.stderr, "bind server: %v\n", err)
+		return exitServerBindFailure
+	}
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	defer func() {
+		_ = ln.Close()
+	}()
+	mcpURL := buildMCPURL(ln.Addr().String(), cfg.MCPPath)
+
+	serverErrCh := make(chan error, 1)
+	go func() {
+		serverErrCh <- mcpServer.RunOnListener(runCtx, ln)
+	}()
+
+	emitter.Emit("info", "server_started", map[string]interface{}{
+		"url":         mcpURL,
+		"listen_addr": ln.Addr().String(),
+	})
+
+	connection := buildConnectionPayload(cfg, mcpURL, auth)
+	if err := writeConnectionFile(filepath.Join(cfg.StateDir, connectionFileName), connection); err != nil {
+		writef(a.stderr, "write %s: %v\n", connectionFileName, err)
+		return exitGeneric
+	}
+
+	emitter.Emit("info", "connection", connection)
+	emitter.Emit("info", "scan_progress", map[string]interface{}{
+		"scanned": 0,
+		"indexed": 0,
+		"skipped": 0,
+		"deleted": 0,
+		"reps":    0,
+		"chunks":  0,
+		"errors":  0,
+	})
+	emitter.Emit("info", "embed_progress", map[string]interface{}{
+		"embedded": 0,
+		"chunks":   0,
+		"errors":   0,
+	})
+
+	if !opts.jsonOutput {
+		a.printHumanConnection(cfg, connection, auth, opts.readOnly)
+	}
+
+	ingestErrCh := make(chan error, 1)
+	if opts.readOnly {
+		close(ingestErrCh)
+	} else {
+		go func() {
+			defer close(ingestErrCh)
+			runErr := ing.Run(runCtx)
+			if errors.Is(runErr, model.ErrNotImplemented) {
+				ingestErrCh <- nil
+				return
+			}
+			ingestErrCh <- runErr
+		}()
+	}
+
+	for {
+		select {
+		case <-runCtx.Done():
+			return exitSuccess
+		case serverErr := <-serverErrCh:
+			if serverErr != nil {
+				writef(a.stderr, "server failed: %v\n", serverErr)
+				emitter.Emit("error", "fatal", map[string]interface{}{
+					"code":    "SERVER_FAILURE",
+					"message": serverErr.Error(),
+				})
+				return exitGeneric
+			}
+			return exitSuccess
+		case ingestErr, ok := <-ingestErrCh:
+			if !ok {
+				ingestErrCh = nil
+				continue
+			}
+			if ingestErr == nil {
+				continue
+			}
+			writef(a.stderr, "ingestion failed: %v\n", ingestErr)
+			emitter.Emit("error", "file_error", map[string]interface{}{
+				"message": ingestErr.Error(),
+			})
+			emitter.Emit("error", "fatal", map[string]interface{}{
+				"code":    "INGESTION_FATAL",
+				"message": ingestErr.Error(),
+			})
+			return exitIngestionFatal
+		}
+	}
 }
 
 func (a *App) runStatus() int {
-	fmt.Println("status command skeleton: not implemented")
-	return 0
+	writeln(a.stdout, "status command skeleton: not implemented")
+	return exitSuccess
 }
 
 func (a *App) runAsk(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "ask command requires a question argument")
-		return 1
+		writeln(a.stderr, "ask command requires a question argument")
+		return exitGeneric
 	}
-	fmt.Printf("ask command skeleton: %q\n", args[0])
-	return 0
+	writef(a.stdout, "ask command skeleton: %q\n", args[0])
+	return exitSuccess
 }
 
-func (a *App) runReindex() int {
+func (a *App) runReindex(ctx context.Context) int {
 	st := store.NewSQLiteStore(filepath.Join(".dir2mcp", "meta.sqlite"))
+	defer func() {
+		if closeErr := st.Close(); closeErr != nil {
+			writef(a.stderr, "close store: %v\n", closeErr)
+		}
+	}()
 	ing := ingest.NewService(config.Default(), st)
-	err := ing.Reindex(context.Background())
+	err := ing.Reindex(ctx)
 	if errors.Is(err, model.ErrNotImplemented) {
-		fmt.Println("reindex skeleton: ingestion pipeline not implemented yet")
-		return 0
+		writeln(a.stdout, "reindex skeleton: ingestion pipeline not implemented yet")
+		return exitSuccess
 	}
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "reindex failed: %v\n", err)
-		return 1
+		writef(a.stderr, "reindex failed: %v\n", err)
+		return exitGeneric
 	}
-	return 0
+	return exitSuccess
 }
 
 func (a *App) runConfig(args []string) int {
 	if len(args) == 0 {
-		fmt.Println("config command skeleton: supported subcommands are init and print")
-		return 0
+		writeln(a.stdout, "config command skeleton: supported subcommands are init and print")
+		return exitSuccess
 	}
 	switch args[0] {
 	case "init":
-		fmt.Println("config init skeleton: not implemented")
+		writeln(a.stdout, "config init skeleton: not implemented")
 	case "print":
 		cfg, err := config.Load(".dir2mcp.yaml")
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "load config: %v\n", err)
-			return 2
+			writef(a.stderr, "load config: %v\n", err)
+			return exitConfigInvalid
 		}
-		fmt.Printf(
+		writef(
+			a.stdout,
 			"root=%s state_dir=%s listen=%s mcp_path=%s mistral_base_url=%s mistral_api_key_set=%t\n",
 			cfg.RootDir,
 			cfg.StateDir,
@@ -138,8 +437,277 @@ func (a *App) runConfig(args []string) int {
 			cfg.MistralAPIKey != "",
 		)
 	default:
-		fmt.Fprintf(os.Stderr, "unknown config subcommand: %s\n", args[0])
-		return 1
+		writef(a.stderr, "unknown config subcommand: %s\n", args[0])
+		return exitGeneric
 	}
-	return 0
+	return exitSuccess
+}
+
+func parseGlobalOptions(args []string) (globalOptions, []string, error) {
+	opts := globalOptions{}
+	remaining := args
+
+	for len(remaining) > 0 {
+		arg := remaining[0]
+		if _, ok := commands[arg]; ok {
+			break
+		}
+
+		switch arg {
+		case "--json":
+			opts.jsonOutput = true
+			remaining = remaining[1:]
+		case "--non-interactive":
+			opts.nonInteractive = true
+			remaining = remaining[1:]
+		default:
+			if strings.HasPrefix(arg, "-") {
+				return globalOptions{}, nil, fmt.Errorf("unknown global flag: %s", arg)
+			}
+			return opts, remaining, nil
+		}
+	}
+
+	return opts, remaining, nil
+}
+
+func parseUpOptions(global globalOptions, args []string) (upOptions, error) {
+	opts := upOptions{globalOptions: global}
+	fs := flag.NewFlagSet("up", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.BoolVar(&opts.jsonOutput, "json", opts.jsonOutput, "emit NDJSON events")
+	fs.BoolVar(&opts.nonInteractive, "non-interactive", opts.nonInteractive, "disable prompts")
+	fs.BoolVar(&opts.readOnly, "read-only", false, "run in read-only mode")
+	fs.StringVar(&opts.x402ResourceBaseURL, "x402-resource-base-url", "", "x402 resource base URL")
+	fs.StringVar(&opts.auth, "auth", "", "auth mode: auto|none|file:<path>")
+	fs.StringVar(&opts.listen, "listen", "", "listen address")
+	fs.StringVar(&opts.mcpPath, "mcp-path", "", "MCP route path")
+	if err := fs.Parse(args); err != nil {
+		return upOptions{}, err
+	}
+	if fs.NArg() > 0 {
+		return upOptions{}, fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))
+	}
+	return opts, nil
+}
+
+func ensureRootAccessible(root string) error {
+	info, err := os.Stat(root)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("path is not a directory: %s", root)
+	}
+	return nil
+}
+
+func prepareAuthMaterial(cfg config.Config) (authMaterial, error) {
+	mode := strings.TrimSpace(cfg.AuthMode)
+	if mode == "" {
+		mode = "auto"
+	}
+
+	if strings.EqualFold(mode, "none") {
+		return authMaterial{
+			mode:        "none",
+			tokenSource: "none",
+		}, nil
+	}
+
+	if strings.EqualFold(mode, "auto") {
+		if token := strings.TrimSpace(os.Getenv(authTokenEnvVar)); token != "" {
+			return authMaterial{
+				mode:              "auto",
+				token:             token,
+				tokenSource:       "env",
+				authorizationHint: "Bearer <token-from-env>",
+			}, nil
+		}
+
+		tokenPath := filepath.Join(cfg.StateDir, secretTokenName)
+		token, err := readToken(tokenPath, true)
+		if err != nil {
+			return authMaterial{}, err
+		}
+		if token == "" {
+			token, err = generateTokenHex()
+			if err != nil {
+				return authMaterial{}, err
+			}
+			if err := writeSecretToken(tokenPath, token); err != nil {
+				return authMaterial{}, err
+			}
+		}
+
+		absPath := tokenPath
+		if abs, err := filepath.Abs(tokenPath); err == nil {
+			absPath = abs
+		}
+		return authMaterial{
+			mode:              "auto",
+			token:             token,
+			tokenSource:       "secret.token",
+			tokenFile:         absPath,
+			authorizationHint: "Bearer <token-from-secret.token>",
+		}, nil
+	}
+
+	if len(mode) >= len("file:") && strings.EqualFold(mode[:len("file:")], "file:") {
+		tokenPath := strings.TrimSpace(mode[len("file:"):])
+		if tokenPath == "" {
+			return authMaterial{}, errors.New("auth mode file: requires a token path")
+		}
+
+		token, err := readToken(tokenPath, false)
+		if err != nil {
+			return authMaterial{}, err
+		}
+		if token == "" {
+			return authMaterial{}, errors.New("auth file token is empty")
+		}
+
+		absPath := tokenPath
+		if abs, err := filepath.Abs(tokenPath); err == nil {
+			absPath = abs
+		}
+		return authMaterial{
+			mode:              "file",
+			token:             token,
+			tokenSource:       "file",
+			tokenFile:         absPath,
+			authorizationHint: "Bearer <token-from-file>",
+		}, nil
+	}
+
+	return authMaterial{}, fmt.Errorf("unsupported auth mode: %s", mode)
+}
+
+func readToken(path string, allowMissing bool) (string, error) {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		if allowMissing && errors.Is(err, os.ErrNotExist) {
+			return "", nil
+		}
+		return "", err
+	}
+	return strings.TrimSpace(string(content)), nil
+}
+
+func generateTokenHex() (string, error) {
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(buf), nil
+}
+
+func writeSecretToken(path, token string) error {
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = file.Close()
+	}()
+
+	if _, err := file.WriteString(token + "\n"); err != nil {
+		return err
+	}
+	return nil
+}
+
+func buildMCPURL(addr, path string) string {
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	return "http://" + addr + path
+}
+
+func buildConnectionPayload(cfg config.Config, url string, auth authMaterial) connectionPayload {
+	headers := map[string]string{
+		"MCP-Protocol-Version": cfg.ProtocolVersion,
+	}
+	if auth.mode != "none" {
+		headers["Authorization"] = auth.authorizationHint
+	}
+
+	return connectionPayload{
+		Transport: "mcp_streamable_http",
+		URL:       url,
+		Headers:   headers,
+		Session: connectionSession{
+			UsesMCPSessionID:     true,
+			HeaderName:           "MCP-Session-Id",
+			AssignedOnInitialize: true,
+		},
+		TokenSource: auth.tokenSource,
+		TokenFile:   auth.tokenFile,
+	}
+}
+
+func writeConnectionFile(path string, payload connectionPayload) error {
+	content, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return err
+	}
+	content = append(content, '\n')
+	return os.WriteFile(path, content, 0o644)
+}
+
+func newNDJSONEmitter(out io.Writer, enabled bool) *ndjsonEmitter {
+	return &ndjsonEmitter{enabled: enabled, out: out}
+}
+
+func (e *ndjsonEmitter) Emit(level, event string, data interface{}) {
+	if !e.enabled {
+		return
+	}
+	entry := ndjsonEvent{
+		Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
+		Level:     level,
+		Event:     event,
+		Data:      data,
+	}
+	encoded, err := json.Marshal(entry)
+	if err != nil {
+		return
+	}
+	_, _ = fmt.Fprintln(e.out, string(encoded))
+}
+
+func (a *App) printHumanConnection(cfg config.Config, connection connectionPayload, auth authMaterial, readOnly bool) {
+	writef(a.stdout, "Index: %s\n", cfg.StateDir)
+	mode := "incremental (server-first; indexing in background)"
+	if readOnly {
+		mode += ", read-only=true"
+	}
+	writef(a.stdout, "Mode: %s\n\n", mode)
+	writeln(a.stdout, "MCP endpoint:")
+	writef(a.stdout, "  URL:    %s\n", connection.URL)
+	if auth.mode == "none" {
+		writeln(a.stdout, "  Auth:   none")
+	} else {
+		writef(a.stdout, "  Auth:   Bearer (source=%s)\n", auth.tokenSource)
+	}
+	if auth.tokenFile != "" {
+		writef(a.stdout, "  Token file: %s\n", auth.tokenFile)
+	}
+	writeln(a.stdout, "  Headers:")
+	writef(a.stdout, "    MCP-Protocol-Version: %s\n", cfg.ProtocolVersion)
+	if auth.mode != "none" {
+		writeln(a.stdout, "    Authorization: Bearer <token>")
+	}
+	writeln(a.stdout, "    MCP-Session-Id: (assigned after initialize response)")
+}
+
+func isTerminal(file *os.File) bool {
+	if file == nil {
+		return false
+	}
+	info, err := file.Stat()
+	if err != nil {
+		return false
+	}
+	return (info.Mode() & os.ModeCharDevice) != 0
 }

@@ -20,9 +20,12 @@ type Config struct {
 	ProtocolVersion string
 	Public          bool
 	AuthMode        string
-	MistralAPIKey   string
-	MistralBaseURL  string
-	AllowedOrigins  []string
+	// ResolvedAuthToken is a runtime-only token value injected by CLI wiring.
+	// It is not loaded from disk and should not be persisted.
+	ResolvedAuthToken string
+	MistralAPIKey     string
+	MistralBaseURL    string
+	AllowedOrigins    []string
 }
 
 func Default() Config {

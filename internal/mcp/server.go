@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -87,13 +88,24 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) Run(ctx context.Context) error {
+	ln, err := net.Listen("tcp", s.cfg.ListenAddr)
+	if err != nil {
+		return err
+	}
+	return s.RunOnListener(ctx, ln)
+}
+
+func (s *Server) RunOnListener(ctx context.Context, ln net.Listener) error {
+	if ln == nil {
+		return errors.New("nil listener passed to RunOnListener")
+	}
+
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	go s.runSessionCleanup(runCtx)
 
 	server := &http.Server{
-		Addr:              s.cfg.ListenAddr,
 		Handler:           s.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
@@ -103,7 +115,7 @@ func (s *Server) Run(ctx context.Context) error {
 
 	errCh := make(chan error, 1)
 	go func() {
-		err := server.ListenAndServe()
+		err := server.Serve(ln)
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 			return
@@ -115,8 +127,7 @@ func (s *Server) Run(ctx context.Context) error {
 	case <-runCtx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_ = server.Shutdown(shutdownCtx)
-		return nil
+		return server.Shutdown(shutdownCtx)
 	case err := <-errCh:
 		return err
 	}
@@ -406,6 +417,10 @@ func generateSessionID() (string, error) {
 }
 
 func loadAuthToken(cfg config.Config) string {
+	if token := strings.TrimSpace(cfg.ResolvedAuthToken); token != "" {
+		return token
+	}
+
 	if token := strings.TrimSpace(os.Getenv(authTokenEnvVar)); token != "" {
 		return token
 	}
