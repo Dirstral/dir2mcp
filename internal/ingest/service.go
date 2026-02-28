@@ -28,8 +28,10 @@ type Service struct {
 
 	// optional logger for diagnostics; defaults to log.Default() when nil.
 	// Tests can provide their own logger to avoid mutating global state.
-	Logger *log.Logger
-	// protects reads/writes of Logger when set during runtime.
+	// Access must go through the logger() helper or SetLogger; the field
+	// itself is private and guarded by loggerMu.
+	logger *log.Logger
+	// protects reads/writes of logger when set during runtime.
 	loggerMu sync.RWMutex
 
 	// optional cache policy for OCR results. maxBytes bounds the total
@@ -75,7 +77,7 @@ func NewService(cfg config.Config, store model.Store) *Service {
 	svc := &Service{
 		cfg:    cfg,
 		store:  store,
-		Logger: log.Default(),
+		logger: log.Default(),
 	}
 	if rs, ok := store.(model.RepresentationStore); ok {
 		svc.repGen = NewRepresentationGenerator(rs)
@@ -88,21 +90,21 @@ func NewService(cfg config.Config, store model.Store) *Service {
 func (s *Service) SetLogger(l *log.Logger) {
 	s.loggerMu.Lock()
 	defer s.loggerMu.Unlock()
-	s.Logger = l
+	s.logger = l
 }
 
-// logger returns the active logger, defaulting to the package global if
-// none has been set.
-func (s *Service) logger() *log.Logger {
+// getLogger returns the active logger, defaulting to the package global if
+// none has been set. The name avoids colliding with the private field.
+func (s *Service) getLogger() *log.Logger {
 	if s == nil {
 		return log.Default()
 	}
 	s.loggerMu.RLock()
 	defer s.loggerMu.RUnlock()
-	if s.Logger == nil {
+	if s.logger == nil {
 		return log.Default()
 	}
-	return s.Logger
+	return s.logger
 }
 
 func (s *Service) SetIndexingState(state *appstate.IndexingState) {
@@ -548,7 +550,7 @@ func (s *Service) enforceOCRCachePolicy(cacheDir string) error {
 		if err != nil {
 			// log failure so that operators can investigate; include the
 			// entry name since that is the only identifier available here.
-			s.logger().Printf("enforceOCRCachePolicy: failed to stat %s: %v", e.Name(), err)
+			s.getLogger().Printf("enforceOCRCachePolicy: failed to stat %s: %v", e.Name(), err)
 			// a stat error typically means the entry is corrupt or otherwise
 			// unreadable. retaining such files in the cache is unhelpful and
 			// may prevent enforcement from making progress (e.g. if the file is
@@ -559,7 +561,7 @@ func (s *Service) enforceOCRCachePolicy(cacheDir string) error {
 			// expectations of our regression tests.
 			if rmErr := os.Remove(p); rmErr != nil && !os.IsNotExist(rmErr) {
 				// removal failure is unfortunate but not fatal; log and continue.
-				s.logger().Printf("enforceOCRCachePolicy: failed to remove stat-error file %s: %v", p, rmErr)
+				s.getLogger().Printf("enforceOCRCachePolicy: failed to remove stat-error file %s: %v", p, rmErr)
 			}
 			continue
 		}
@@ -644,7 +646,7 @@ func (s *Service) readOrComputeOCR(ctx context.Context, doc model.Document, cont
 			// enforcement failure should not prevent the caller from
 			// receiving the OCR result. log and continue instead of
 			// returning an error; the cache write has already succeeded.
-			s.logger().Printf("enforceOCRCachePolicy(%s) failed: %v", cacheDir, err)
+			s.getLogger().Printf("enforceOCRCachePolicy(%s) failed: %v", cacheDir, err)
 		}
 	}
 	return string(ocrBytes), nil
