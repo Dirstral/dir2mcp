@@ -23,6 +23,11 @@ const (
 	defaultMaxRetries     = 3
 	defaultInitialBackoff = 250 * time.Millisecond
 	defaultMaxBackoff     = 2 * time.Second
+
+	// DefaultOCRModel is the default Mistral model used for OCR requests when
+	// no other model is specified.  Consumers may override the value on the
+	// Client struct if they need to target a different version in the future.
+	DefaultOCRModel = "mistral-ocr-latest"
 )
 
 // Client provides Mistral API integrations.
@@ -46,6 +51,11 @@ type Client struct {
 	MaxRetries     int
 	InitialBackoff time.Duration
 	MaxBackoff     time.Duration
+
+	// DefaultOCRModel will be sent to the OCR endpoint if the caller does not
+	// specify an explicit model.  It is initialized to DefaultOCRModel by
+	// NewClient and can be mutated by callers to customize behaviour.
+	DefaultOCRModel string
 }
 
 // NewClient constructs a client with safe default retry/timeout settings.
@@ -64,6 +74,9 @@ func NewClient(baseURL, apiKey string) *Client {
 		MaxRetries:     defaultMaxRetries,
 		InitialBackoff: defaultInitialBackoff,
 		MaxBackoff:     defaultMaxBackoff,
+		// ensure we always have a sensible default even if callers forget to
+		// set a model explicitly later on.
+		DefaultOCRModel: DefaultOCRModel,
 	}
 }
 
@@ -353,6 +366,49 @@ func (c *Client) wait(ctx context.Context, d time.Duration) error {
 }
 
 func (c *Client) Extract(ctx context.Context, relPath string, data []byte) (string, error) {
+	// the public entrypoint simply delegates to a retry-capable helper. the
+	// retry logic mirrors embedBatchWithRetry so that network/rate-limit/5xx
+	// conditions are automatically retried up to configured limits.
+	return c.extractWithRetry(ctx, relPath, data)
+}
+
+// extractWithRetry wraps extractOnce with retry logic similar to
+// embedBatchWithRetry.  Only provider errors marked Retryable will be
+// retried, up to Client.MaxRetries attempts with exponential backoff.
+// The helper intentionally mirrors the structure of embedBatchWithRetry so
+// behaviour is consistent between embedding and OCR operations.
+func (c *Client) extractWithRetry(ctx context.Context, relPath string, data []byte) (string, error) {
+	maxRetries := c.MaxRetries
+	if maxRetries < 0 {
+		maxRetries = 0
+	}
+
+	var lastErr error
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		out, err := c.extractOnce(ctx, relPath, data)
+		if err == nil {
+			return out, nil
+		}
+		lastErr = err
+
+		var providerErr *model.ProviderError
+		if !errors.As(err, &providerErr) || !providerErr.Retryable || attempt == maxRetries {
+			return "", err
+		}
+
+		backoff := c.backoffForAttempt(attempt)
+		if waitErr := c.wait(ctx, backoff); waitErr != nil {
+			return "", waitErr
+		}
+	}
+
+	return "", lastErr
+}
+
+// extractOnce contains the previous implementation of Extract and performs a
+// single attempt without any retry behaviour.  The logic is kept separate so
+// that extractWithRetry can invoke it repeatedly.
+func (c *Client) extractOnce(ctx context.Context, relPath string, data []byte) (string, error) {
 	if strings.TrimSpace(c.APIKey) == "" {
 		return "", &model.ProviderError{
 			Code:      "MISTRAL_AUTH",
@@ -369,7 +425,7 @@ func (c *Client) Extract(ctx context.Context, relPath string, data []byte) (stri
 	}
 
 	ext := strings.ToLower(filepath.Ext(strings.TrimSpace(relPath)))
-	mimeType := "application/octet-stream"
+	var mimeType string
 	switch ext {
 	case ".pdf":
 		mimeType = "application/pdf"
@@ -379,10 +435,23 @@ func (c *Client) Extract(ctx context.Context, relPath string, data []byte) (stri
 		mimeType = "image/jpeg"
 	case ".webp":
 		mimeType = "image/webp"
+	default:
+		// report supported file types explicitly; falling back to a generic MIME
+		// value risks the upstream API rejecting the request and makes debugging
+		// harder.
+		return "", &model.ProviderError{
+			Code:      "MISTRAL_FAILED",
+			Message:   fmt.Sprintf("unsupported file extension for OCR: %s", ext),
+			Retryable: false,
+		}
 	}
 
+	ocrModel := c.DefaultOCRModel
+	if strings.TrimSpace(ocrModel) == "" {
+		ocrModel = DefaultOCRModel
+	}
 	payload := ocrRequest{
-		Model: "mistral-ocr-latest",
+		Model: ocrModel,
 		Document: ocrDocument{
 			Type:        "document_url",
 			DocumentURL: "data:" + mimeType + ";base64," + base64.StdEncoding.EncodeToString(data),

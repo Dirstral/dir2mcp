@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -27,14 +28,17 @@ const (
 
 // RepresentationGenerator handles creation of representations from documents
 type RepresentationGenerator struct {
-	store representationStore
+	store model.RepresentationStore
 }
 
-type representationStore interface {
-	UpsertRepresentation(ctx context.Context, rep model.Representation) (int64, error)
-	InsertChunkWithSpans(ctx context.Context, chunk model.Chunk, spans []model.Span) (int64, error)
-	SoftDeleteChunksFromOrdinal(ctx context.Context, repID int64, fromOrdinal int) error
-}
+// RepresentationGenerator handles creation of representations from documents.
+// The backing store must satisfy model.RepresentationStore which is defined
+// in the model package so that both ingest and store can depend on the same
+// interface without forming a cyclic dependency.
+
+// (no local interface required – model.RepresentationStore already declares
+// UpsertRepresentation, InsertChunkWithSpans, SoftDeleteChunksFromOrdinal and
+// WithTx.)
 
 // NewRepresentationGenerator creates a new representation generator
 //
@@ -42,13 +46,11 @@ type representationStore interface {
 // nil-pointer panic later when methods like GenerateRawText are invoked.  By
 // validating up-front we fail fast with a clear message helping callers
 // diagnose the issue.
-func NewRepresentationGenerator(store representationStore) *RepresentationGenerator {
+func NewRepresentationGenerator(store model.RepresentationStore) *RepresentationGenerator {
 	if store == nil {
-		panic("NewRepresentationGenerator: nil model.Store provided")
+		panic("NewRepresentationGenerator: nil representationStore provided")
 	}
-	return &RepresentationGenerator{
-		store: store,
-	}
+	return &RepresentationGenerator{store: store}
 }
 
 // GenerateRawText creates a raw_text representation for text-based documents.
@@ -58,19 +60,32 @@ func NewRepresentationGenerator(store representationStore) *RepresentationGenera
 // - For code/text/md/data/html doc types
 // - Normalize to UTF-8 with \n line endings
 // - Route code → index_kind=code, others → index_kind=text
+// GenerateRawText creates a raw_text representation for text-based documents.
+// It reads the file content, normalizes to UTF-8, and stores it as a representation.
+//
+// According to SPEC §7.4:
+// - For code/text/md/data/html doc types
+// - Normalize to UTF-8 with \n line endings
+// - Route code → index_kind=code, others → index_kind=text
 func (rg *RepresentationGenerator) GenerateRawText(ctx context.Context, doc model.Document, absPath string) error {
-	// Guard against huge files to avoid OOM.  We mirror the same limit used by
-	// discovery since raw-text ingestion should follow the same policy.
-	if fi, err := os.Stat(absPath); err != nil {
-		return fmt.Errorf("stat file %s: %w", doc.RelPath, err)
-	} else if fi.Size() > defaultMaxFileSizeBytes {
-		return fmt.Errorf("file %s too large (%d bytes); limit %d", doc.RelPath, fi.Size(), defaultMaxFileSizeBytes)
-	}
-
-	// Read file content
+	// Read file content first so we can delegate to the new helper which
+	// accepts pre-loaded bytes.  This keeps the original behaviour intact
+	// while allowing callers that already have the content to avoid the I/O.
 	content, err := os.ReadFile(absPath)
 	if err != nil {
 		return fmt.Errorf("read file %s: %w", doc.RelPath, err)
+	}
+	return rg.GenerateRawTextFromContent(ctx, doc, absPath, content)
+}
+
+// GenerateRawTextFromContent behaves like GenerateRawText but takes the
+// document bytes as an argument.  This is useful when the caller already
+// loaded the file (e.g. during a scan) and wants to avoid re-reading it.
+func (rg *RepresentationGenerator) GenerateRawTextFromContent(ctx context.Context, doc model.Document, absPath string, content []byte) error {
+	// Guard against huge files to avoid OOM.  We mirror the same limit used by
+	// discovery since raw-text ingestion should follow the same policy.
+	if int64(len(content)) > defaultMaxFileSizeBytes {
+		return fmt.Errorf("file %s too large (%d bytes); limit %d", doc.RelPath, len(content), defaultMaxFileSizeBytes)
 	}
 
 	// Validate and normalize UTF-8
@@ -101,25 +116,29 @@ func (rg *RepresentationGenerator) GenerateRawText(ctx context.Context, doc mode
 
 	return nil
 }
-
 func (rg *RepresentationGenerator) upsertChunksForRepresentation(ctx context.Context, repID int64, indexKind string, segments []chunkSegment) error {
-	for i, seg := range segments {
-		chunk := model.Chunk{
-			RepID:           repID,
-			Ordinal:         i,
-			Text:            seg.Text,
-			TextHash:        computeRepHash([]byte(seg.Text)),
-			IndexKind:       indexKind,
-			EmbeddingStatus: "pending",
+	// wrap the entire operation in a transaction so we don't end up with a
+	// partial set of chunks if an insertion fails halfway through.  The store
+	// implementation handles beginning/committing/rolling back the tx.
+	return rg.store.WithTx(ctx, func(tx model.RepresentationStore) error {
+		for i, seg := range segments {
+			chunk := model.Chunk{
+				RepID:           repID,
+				Ordinal:         i,
+				Text:            seg.Text,
+				TextHash:        computeRepHash([]byte(seg.Text)),
+				IndexKind:       indexKind,
+				EmbeddingStatus: "pending",
+			}
+			if _, err := tx.InsertChunkWithSpans(ctx, chunk, []model.Span{seg.Span}); err != nil {
+				return fmt.Errorf("insert chunk %d: %w", i, err)
+			}
 		}
-		if _, err := rg.store.InsertChunkWithSpans(ctx, chunk, []model.Span{seg.Span}); err != nil {
-			return fmt.Errorf("insert chunk %d: %w", i, err)
+		if err := tx.SoftDeleteChunksFromOrdinal(ctx, repID, len(segments)); err != nil {
+			return fmt.Errorf("soft delete stale chunks: %w", err)
 		}
-	}
-	if err := rg.store.SoftDeleteChunksFromOrdinal(ctx, repID, len(segments)); err != nil {
-		return fmt.Errorf("soft delete stale chunks: %w", err)
-	}
-	return nil
+		return nil
+	})
 }
 
 // normalizeUTF8 ensures content is valid UTF-8 and normalizes line endings to \n
@@ -314,15 +333,20 @@ func chunkTextByChars(content string, maxChars, overlapChars, minChars int) []ch
 }
 
 func lineNumberForOffset(lineStarts []int, offset int) int {
+	// Keep original edge-case behavior
 	if offset <= 0 {
 		return 1
 	}
-	line := 1
-	for i := 1; i < len(lineStarts); i++ {
-		if offset < lineStarts[i] {
-			break
-		}
-		line = i + 1
+	// Locate first index where lineStarts[i] > offset using binary search.
+	// The desired line number is the index of the greatest entry <= offset,
+	// which corresponds to the returned index from Search (first > offset).
+	idx := sort.Search(len(lineStarts), func(i int) bool {
+		return lineStarts[i] > offset
+	})
+	if idx == 0 {
+		// offset is less than or equal to the first entry; return first line
+		return 1
 	}
-	return line
+	// idx is the first index with a start greater than offset; the line is idx
+	return idx
 }

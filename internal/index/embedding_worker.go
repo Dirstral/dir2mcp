@@ -78,7 +78,6 @@ func (w *EmbeddingWorker) RunOnce(ctx context.Context, indexKind string) (int, e
 	validTasks := make([]model.ChunkTask, 0, len(tasks))
 	inputs := make([]string, 0, len(tasks))
 	labels := make([]uint64, 0, len(tasks))
-	invalidFound := false
 	for _, task := range tasks {
 		// always prefer the metadata value; Label exists only for API
 		// compatibility and must mirror Metadata.ChunkID.  The prior
@@ -86,19 +85,12 @@ func (w *EmbeddingWorker) RunOnce(ctx context.Context, indexKind string) (int, e
 		// metadata field directly removes the need to reference Label at
 		// every call site.
 		chunkID := task.Metadata.ChunkID
-		// chunkID is unsigned; zero is invalid and is treated as corrupt.
 		if chunkID == 0 {
-			reason := "zero label not supported"
-			w.logf("corrupt chunk skipped: %s label=%d", reason, chunkID)
-			invalidFound = true
-			continue
+			return 0, fmt.Errorf("%w: zero label not supported", ErrFatal)
 		}
 		validTasks = append(validTasks, task)
 		inputs = append(inputs, task.Text)
 		labels = append(labels, chunkID)
-	}
-	if invalidFound {
-		return 0, fmt.Errorf("%w: zero label not supported", ErrFatal)
 	}
 	if len(validTasks) == 0 {
 		return 0, nil

@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"math"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -74,6 +75,33 @@ func TestSQLiteStore_PendingChunkLifecycle(t *testing.T) {
 	}
 }
 
+func TestSQLiteStore_MarkEmbeddingStatus_LabelOverflow(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "meta.sqlite")
+	st := NewSQLiteStore(dbPath)
+	defer func() { _ = st.Close() }()
+
+	if err := st.Init(ctx); err != nil {
+		t.Fatalf("Init failed: %v", err)
+	}
+
+	// a label that cannot be represented as a signed 64-bit integer
+	tooBig := uint64(math.MaxInt64) + 1
+
+	err := st.MarkEmbedded(ctx, []uint64{tooBig})
+	if err == nil {
+		t.Fatalf("expected error for label > MaxInt64, got nil")
+	}
+	if !strings.Contains(err.Error(), "too large") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+
+	err = st.MarkFailed(ctx, []uint64{tooBig}, "reason")
+	if err == nil {
+		t.Fatalf("expected error for label > MaxInt64 in MarkFailed, got nil")
+	}
+}
+
 func TestSQLiteStore_UpsertChunkTask_RequiresRelPath(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "meta.sqlite")
@@ -101,7 +129,7 @@ func TestSQLiteStore_UpsertChunkTask_RequiresRelPath(t *testing.T) {
 	}
 }
 
-func TestSQLiteStore_UpsertChunkTask_RequiresPositiveLabel(t *testing.T) {
+func TestSQLiteStore_UpsertChunkTask_RequiresNonZeroLabel(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "meta.sqlite")
 	st := NewSQLiteStore(dbPath)
@@ -111,7 +139,7 @@ func TestSQLiteStore_UpsertChunkTask_RequiresPositiveLabel(t *testing.T) {
 		t.Fatalf("Init failed: %v", err)
 	}
 
-	// zero label should be rejected
+	// zero label should be rejected (requires non-zero)
 	err := st.UpsertChunkTask(ctx, model.NewChunkTask(0, "text", "text", model.ChunkMetadata{
 		ChunkID: 0,
 		RelPath: "foo",
@@ -119,11 +147,11 @@ func TestSQLiteStore_UpsertChunkTask_RequiresPositiveLabel(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for label 0, got nil")
 	}
-	if err != nil && !strings.Contains(err.Error(), "non-zero") {
+	if !strings.Contains(err.Error(), "non-zero") {
 		t.Fatalf("unexpected error message for zero label: %v", err)
 	}
 
-	// positive label should succeed
+	// non-zero (positive) label should succeed
 	if err := st.UpsertChunkTask(ctx, model.NewChunkTask(1, "text", "text", model.ChunkMetadata{
 		ChunkID: 1,
 		RelPath: "foo",
@@ -262,4 +290,41 @@ func verifyChunkIndexes(ctx context.Context, st *SQLiteStore) error {
 		}
 	}
 	return nil
+}
+func TestSQLiteStore_WithTx_Rollback(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "meta.sqlite")
+	st := NewSQLiteStore(dbPath)
+	defer func() { _ = st.Close() }()
+
+	if err := st.Init(ctx); err != nil {
+		t.Fatalf("Init failed: %v", err)
+	}
+
+	// perform an operation that will be rolled back
+	err := st.WithTx(ctx, func(tx model.RepresentationStore) error {
+		_, err := tx.UpsertRepresentation(ctx, model.Representation{DocID: 1, RepType: "raw_text", RepHash: "abc"})
+		if err != nil {
+			return err
+		}
+		return fmt.Errorf("force rollback")
+	})
+	if err == nil {
+		t.Fatal("expected error from transactional callback")
+	}
+
+	// verify the representation was not persisted
+	db, err := st.ensureDB(ctx)
+	if err != nil {
+		t.Fatalf("ensureDB: %v", err)
+	}
+	// release when we're done to ensure activeOps drops to zero
+	defer st.ReleaseDB()
+	var count int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM representations").Scan(&count); err != nil {
+		t.Fatalf("query failed: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected 0 representations after rollback, got %d", count)
+	}
 }

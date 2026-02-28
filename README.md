@@ -201,5 +201,6 @@ go test -v ./tests -run MistralOCR
   - raw text chunks persist `lines` spans
   - OCR chunks persist `page` spans
 - OCR cache:
-  - OCR outputs are cached in `.dir2mcp/cache/ocr/<content-hash>.md`
+  - OCR outputs are cached in `.dir2mcp/cache/ocr/<content-hash>.md`; this cache persists indefinitely (no automatic TTL/rotation)
   - repeat processing of unchanged OCR input reuses cache before provider calls
+  - manual pruning may be necessary if the directory grows large, as no cleanup is performed

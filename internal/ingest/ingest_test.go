@@ -132,6 +132,8 @@ func TestClassifyDocType(t *testing.T) {
 		{"yaml", "config.yaml", "data"},
 		{"toml", "Cargo.toml", "data"},
 		{"env", ".env", "data"},
+		{"env local", ".env.local", "data"},
+		{"env prod", ".env.production", "data"},
 
 		// HTML
 		{"html", "index.html", "html"},
@@ -317,43 +319,43 @@ func TestMatchesAnyPathExclude(t *testing.T) {
 func TestMatchesGlobPattern(t *testing.T) {
 	tests := []struct {
 		name     string
-		path     string
+		filePath string
 		pattern  string
 		expected bool
 	}{
 		{
 			name:     "exact match",
-			path:     ".env",
+			filePath: ".env",
 			pattern:  ".env",
 			expected: true,
 		},
 		{
 			name:     "star single segment",
-			path:     "test.txt",
+			filePath: "test.txt",
 			pattern:  "*.txt",
 			expected: true,
 		},
 		{
 			name:     "star no match",
-			path:     "dir/test.txt",
+			filePath: "dir/test.txt",
 			pattern:  "*.txt",
 			expected: false,
 		},
 		{
 			name:     "double star prefix",
-			path:     "a/b/c/file.js",
+			filePath: "a/b/c/file.js",
 			pattern:  "**/file.js",
 			expected: true,
 		},
 		{
 			name:     "double star suffix",
-			path:     ".git/config",
+			filePath: ".git/config",
 			pattern:  ".git/**",
 			expected: true,
 		},
 		{
 			name:     "double star middle",
-			path:     "src/components/Button.jsx",
+			filePath: "src/components/Button.jsx",
 			pattern:  "**/*.jsx",
 			expected: true,
 		},
@@ -361,9 +363,9 @@ func TestMatchesGlobPattern(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := matchesGlobPattern(tt.path, tt.pattern)
+			result := matchesGlobPattern(tt.filePath, tt.pattern)
 			if result != tt.expected {
-				t.Errorf("matchesGlobPattern(%q, %q) = %v, want %v", tt.path, tt.pattern, result, tt.expected)
+				t.Errorf("matchesGlobPattern(%q, %q) = %v, want %v", tt.filePath, tt.pattern, result, tt.expected)
 			}
 		})
 	}

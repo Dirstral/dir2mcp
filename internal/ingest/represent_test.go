@@ -16,7 +16,7 @@ func TestNewRepresentationGeneratorNil(t *testing.T) {
 	defer func() {
 		if r := recover(); r == nil {
 			t.Fatalf("expected panic for nil store")
-		} else if !strings.Contains(fmt.Sprint(r), "nil model.Store") {
+		} else if !strings.Contains(fmt.Sprint(r), "nil representationStore") {
 			t.Fatalf("unexpected panic message: %v", r)
 		}
 	}()
@@ -134,7 +134,7 @@ func TestRepTypeConstants(t *testing.T) {
 
 // Example integration test structure (implementation would be in a separate file)
 func TestRepresentationGeneratorIntegration(t *testing.T) {
-	st := &fakeRepStore{}
+	st := &fakeRepStore{failAfter: -1}
 	rg := NewRepresentationGenerator(st)
 	doc := model.Document{
 		DocID:   1,
@@ -159,6 +159,32 @@ func TestRepresentationGeneratorIntegration(t *testing.T) {
 	}
 	if st.softDeleteCall == 0 {
 		t.Fatalf("expected stale-chunk cleanup call")
+	}
+}
+
+func TestGenerateRawTextFromContentPrefersGivenBytes(t *testing.T) {
+	st := &fakeRepStore{failAfter: -1}
+	rg := NewRepresentationGenerator(st)
+	doc := model.Document{DocID: 1, RelPath: "foo.txt", DocType: "text"}
+
+	// create a real file with different contents to ensure the method uses the
+	// provided bytes instead of re-reading from disk.
+	tmp := t.TempDir() + "/foo.txt"
+	if err := os.WriteFile(tmp, []byte("disk content"), 0o644); err != nil {
+		t.Fatalf("write disk file: %v", err)
+	}
+
+	provided := []byte("provided content")
+	if err := rg.GenerateRawTextFromContent(context.Background(), doc, tmp, provided); err != nil {
+		t.Fatalf("GenerateRawTextFromContent failed: %v", err)
+	}
+	if st.upsertCount != 1 {
+		t.Fatalf("expected 1 representation upsert, got %d", st.upsertCount)
+	}
+	// compute hash of provided content to ensure it was used
+	hash := computeRepHash(normalizeUTF8(provided))
+	if len(st.reps) > 0 && st.reps[0].RepHash != hash {
+		t.Fatalf("representation hash %q does not match provided content hash %q", st.reps[0].RepHash, hash)
 	}
 }
 
@@ -226,10 +252,18 @@ func TestChunkTextByChars(t *testing.T) {
 }
 
 type fakeRepStore struct {
-	upsertCount    int
-	nextRepID      int64
-	chunks         []model.Chunk
-	softDeleteCall int
+	upsertCount int
+	nextRepID   int64
+	reps        []model.Representation
+	chunks      []model.Chunk
+	// store all spans that have been passed in so tests can inspect them
+	spans []model.Span
+	// when non-zero, InsertChunkWithSpans will enforce this span count
+	expectedSpanCount int
+	softDeleteCall    int
+	// failAfter simulates a failure after inserting this many chunks (0-based)
+	// negative means never fail.
+	failAfter int
 }
 
 func (s *fakeRepStore) UpsertRepresentation(_ context.Context, rep model.Representation) (int64, error) {
@@ -240,6 +274,8 @@ func (s *fakeRepStore) UpsertRepresentation(_ context.Context, rep model.Represe
 	if rep.DocID <= 0 {
 		return 0, fmt.Errorf("invalid doc id")
 	}
+	// record rep for later inspection
+	s.reps = append(s.reps, rep)
 	return s.nextRepID, nil
 }
 
@@ -247,10 +283,22 @@ func (s *fakeRepStore) InsertChunkWithSpans(_ context.Context, chunk model.Chunk
 	if chunk.RepID <= 0 {
 		return 0, fmt.Errorf("invalid rep id")
 	}
-	if len(spans) != 1 {
-		return 0, fmt.Errorf("expected one span")
+	// simulate failure injection before doing any work
+	if s.failAfter >= 0 && len(s.chunks) == s.failAfter {
+		return 0, fmt.Errorf("injected failure at chunk %d", s.failAfter)
 	}
+	// if an expected span count has been configured, enforce it
+	if s.expectedSpanCount != 0 && len(spans) != s.expectedSpanCount {
+		return 0, fmt.Errorf("expected %d span(s), got %d", s.expectedSpanCount, len(spans))
+	}
+	// require at least one span
+	if len(spans) < 1 {
+		return 0, fmt.Errorf("expected at least one span")
+	}
+
+	// record the chunk and all provided spans so later assertions can examine them
 	s.chunks = append(s.chunks, chunk)
+	s.spans = append(s.spans, spans...)
 	return int64(len(s.chunks)), nil
 }
 
@@ -260,4 +308,38 @@ func (s *fakeRepStore) SoftDeleteChunksFromOrdinal(_ context.Context, repID int6
 	}
 	s.softDeleteCall++
 	return nil
+}
+
+// WithTx implements a very basic transaction emulation.  We snapshot mutable
+// fields and restore them if the callback returns an error, effectively
+// rolling back.
+func (s *fakeRepStore) WithTx(ctx context.Context, fn func(tx model.RepresentationStore) error) error {
+	origChunks := append([]model.Chunk(nil), s.chunks...)
+	origSpans := append([]model.Span(nil), s.spans...)
+	origSoft := s.softDeleteCall
+	err := fn(s)
+	if err != nil {
+		s.chunks = origChunks
+		s.spans = origSpans
+		s.softDeleteCall = origSoft
+	}
+	return err
+}
+
+func TestUpsertChunksForRepresentationTransaction(t *testing.T) {
+	st := &fakeRepStore{failAfter: 1}
+	rg := NewRepresentationGenerator(st)
+	err := rg.upsertChunksForRepresentation(context.Background(), 42, "text", []chunkSegment{
+		{Text: "one", Span: model.Span{Kind: "lines", StartLine: 1, EndLine: 1}},
+		{Text: "two", Span: model.Span{Kind: "lines", StartLine: 2, EndLine: 2}},
+	})
+	if err == nil {
+		t.Fatal("expected error from failing chunk insert")
+	}
+	if len(st.chunks) != 0 {
+		t.Fatalf("expected no chunks after rollback, got %d", len(st.chunks))
+	}
+	if st.softDeleteCall != 0 {
+		t.Fatalf("expected no soft-delete call after rollback")
+	}
 }

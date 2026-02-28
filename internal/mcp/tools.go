@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 
+	"dir2mcp/internal/mistral"
 	"dir2mcp/internal/model"
 )
 
@@ -24,7 +25,7 @@ const (
 
 	defaultEmbedTextModel = "mistral-embed"
 	defaultEmbedCodeModel = "codestral-embed"
-	defaultOCRModel       = "mistral-ocr-latest"
+	defaultOCRModel       = mistral.DefaultOCRModel
 	defaultSTTProvider    = "mistral"
 	defaultSTTModel       = "voxtral-mini-latest"
 	defaultChatModel      = "mistral-small-2506"

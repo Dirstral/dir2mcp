@@ -45,3 +45,16 @@ type Transcriber interface {
 type Generator interface {
 	Generate(ctx context.Context, prompt string) (string, error)
 }
+
+// RepresentationStore defines the subset of store operations used by the
+// ingest package for handling representations and their chunks.  It is
+// defined here in the model package to avoid cyclic dependencies between the
+// ingest and store packages; both can import model without forming a cycle.
+// The interface mirrors the one previously declared inside ingest/represent.go
+// but is now exported so other packages (like store) can implement it.
+type RepresentationStore interface {
+	UpsertRepresentation(ctx context.Context, rep Representation) (int64, error)
+	InsertChunkWithSpans(ctx context.Context, chunk Chunk, spans []Span) (int64, error)
+	SoftDeleteChunksFromOrdinal(ctx context.Context, repID int64, fromOrdinal int) error
+	WithTx(ctx context.Context, fn func(tx RepresentationStore) error) error
+}

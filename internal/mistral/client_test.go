@@ -4,38 +4,64 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
-	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"dir2mcp/internal/model"
 )
 
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
+func newJSONResponse(status int, body string) *http.Response {
+	return &http.Response{
+		StatusCode: status,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+}
+
 func TestExtract_OCRPagesJoinedByFormFeed(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	clientErr := false
+	rt := roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		if r.URL.Path != "/v1/ocr" {
-			t.Fatalf("unexpected path: %s", r.URL.Path)
+			clientErr = true
+			t.Errorf("unexpected path: %s", r.URL.Path)
+			return newJSONResponse(http.StatusBadRequest, ""), nil
 		}
 		if r.Method != http.MethodPost {
-			t.Fatalf("unexpected method: %s", r.Method)
+			clientErr = true
+			t.Errorf("unexpected method: %s", r.Method)
+			return newJSONResponse(http.StatusBadRequest, ""), nil
 		}
 		if got := r.Header.Get("Authorization"); got != "Bearer key" {
-			t.Fatalf("unexpected auth header: %q", got)
+			clientErr = true
+			t.Errorf("unexpected auth header: %q", got)
+			return newJSONResponse(http.StatusBadRequest, ""), nil
 		}
 
 		var req map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			t.Fatalf("decode request: %v", err)
+			clientErr = true
+			t.Errorf("decode request: %v", err)
+			return newJSONResponse(http.StatusBadRequest, ""), nil
 		}
-		if req["model"] != "mistral-ocr-latest" {
-			t.Fatalf("unexpected model: %#v", req["model"])
+		if req["model"] != DefaultOCRModel {
+			clientErr = true
+			t.Errorf("unexpected model: %#v", req["model"])
+			return newJSONResponse(http.StatusBadRequest, ""), nil
 		}
 
-		_, _ = w.Write([]byte(`{"pages":[{"markdown":"first page"},{"markdown":"second page"}]}`))
-	}))
-	defer srv.Close()
+		return newJSONResponse(http.StatusOK, `{"pages":[{"markdown":"first page"},{"markdown":"second page"}]}`), nil
+	})
 
-	c := NewClient(srv.URL, "key")
+	c := NewClient("https://api.mistral.ai", "key")
+	c.HTTPClient = &http.Client{Transport: rt}
 	got, err := c.Extract(context.Background(), "docs/file.pdf", []byte("pdf-bytes"))
 	if err != nil {
 		t.Fatalf("Extract failed: %v", err)
@@ -43,15 +69,17 @@ func TestExtract_OCRPagesJoinedByFormFeed(t *testing.T) {
 	if got != "first page\fsecond page" {
 		t.Fatalf("unexpected ocr text: %q", got)
 	}
+	if clientErr {
+		t.Fatalf("handler encountered errors, see previous logs")
+	}
 }
 
 func TestExtract_MapsUnauthorizedToProviderAuthError(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-	}))
-	defer srv.Close()
-
-	c := NewClient(srv.URL, "key")
+	rt := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return newJSONResponse(http.StatusUnauthorized, "unauthorized"), nil
+	})
+	c := NewClient("https://api.mistral.ai", "key")
+	c.HTTPClient = &http.Client{Transport: rt}
 	_, err := c.Extract(context.Background(), "scan.png", []byte("img"))
 	if err == nil {
 		t.Fatalf("expected error")
@@ -74,5 +102,104 @@ func TestExtract_MissingAPIKey(t *testing.T) {
 	var pe *model.ProviderError
 	if !errors.As(err, &pe) || pe.Code != "MISTRAL_AUTH" {
 		t.Fatalf("expected provider auth error, got: %v", err)
+	}
+}
+
+func TestExtract_UnsupportedExtension(t *testing.T) {
+	c := NewClient("http://example.test", "key")
+	_, err := c.Extract(context.Background(), "file.txt", []byte("data"))
+	if err == nil {
+		t.Fatalf("expected error for unsupported extension")
+	}
+	var pe *model.ProviderError
+	if !errors.As(err, &pe) {
+		t.Fatalf("expected provider error type, got %T", err)
+	}
+	if pe.Retryable {
+		t.Fatalf("error for unsupported extension should not be retryable")
+	}
+	if !strings.Contains(pe.Message, "unsupported file extension") {
+		t.Fatalf("unexpected message: %s", pe.Message)
+	}
+}
+
+func TestExtract_RetryableErrorsAreRetried(t *testing.T) {
+	attempts := 0
+	rt := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		attempts++
+		if attempts <= 2 {
+			return newJSONResponse(http.StatusTooManyRequests, "rate limited"), nil
+		}
+		// succeed on third try
+		return newJSONResponse(http.StatusOK, `{"pages":[{"markdown":"ok"}]}`), nil
+	})
+
+	c := NewClient("https://api.mistral.ai", "key")
+	c.HTTPClient = &http.Client{Transport: rt}
+	c.MaxRetries = 3
+	ctx := context.Background()
+	out, err := c.Extract(ctx, "file.pdf", []byte("data"))
+	if err != nil {
+		t.Fatalf("expected success, got %v", err)
+	}
+	if out != "ok" {
+		t.Fatalf("unexpected output: %q", out)
+	}
+	if attempts != 3 {
+		t.Fatalf("expected 3 attempts, got %d", attempts)
+	}
+}
+
+func TestExtract_RetryStopsOnNonRetryableOrMax(t *testing.T) {
+	attempts := 0
+	rt := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		attempts++
+		if attempts <= 2 {
+			return newJSONResponse(http.StatusUnauthorized, "auth"), nil
+		}
+		return newJSONResponse(http.StatusOK, `{"pages":[{"markdown":"ok"}]}`), nil
+	})
+
+	c := NewClient("https://api.mistral.ai", "key")
+	c.HTTPClient = &http.Client{Transport: rt}
+	c.MaxRetries = 5
+	_, err := c.Extract(context.Background(), "file.pdf", []byte("data"))
+	if err == nil {
+		t.Fatalf("expected error due to auth failure")
+	}
+	if attempts != 1 {
+		t.Fatalf("expected only 1 attempt for non-retryable error, got %d", attempts)
+	}
+}
+
+// Verify that supplying a custom model string to the client actually changes
+// the value sent in the OCR payload.  Regression against the earlier hardcode.
+func TestExtract_CustomModel(t *testing.T) {
+	testModel := "my-custom-ocr"
+
+	clientErr := false
+	rt := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		var req map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			clientErr = true
+			t.Errorf("decode request: %v", err)
+			return newJSONResponse(http.StatusBadRequest, ""), nil
+		}
+		if req["model"] != testModel {
+			clientErr = true
+			t.Errorf("expected model %q, got %v", testModel, req["model"])
+			return newJSONResponse(http.StatusBadRequest, ""), nil
+		}
+		return newJSONResponse(http.StatusOK, `{"pages":[{"markdown":"ok"}]}`), nil
+	})
+
+	c := NewClient("https://api.mistral.ai", "key")
+	c.HTTPClient = &http.Client{Transport: rt}
+	c.DefaultOCRModel = testModel
+	if _, err := c.Extract(context.Background(), "x.pdf", []byte("data")); err != nil {
+		t.Fatalf("Extract returned error: %v", err)
+	}
+	if clientErr {
+		t.Fatalf("handler encountered errors, see previous logs")
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +14,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
+	"dir2mcp/internal/mistral"
 	"dir2mcp/internal/model"
 )
 
@@ -403,6 +405,200 @@ func (s *SQLiteStore) SoftDeleteChunksFromOrdinal(ctx context.Context, repID int
 	return err
 }
 
+// WithTx begins a new database transaction and passes a transaction-bound
+// representation store to the supplied callback. If the callback returns an
+// error the transaction is rolled back; otherwise it is committed.  The
+// implementation is specific to SQLite but the interface is used by callers
+// such as the representation generator.
+func (s *SQLiteStore) WithTx(ctx context.Context, fn func(tx model.RepresentationStore) error) error {
+	db, err := s.ensureDB(ctx)
+	if err != nil {
+		return err
+	}
+	defer s.ReleaseDB()
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	txStore := &txSQLiteStore{parent: s, tx: tx}
+	if err := fn(txStore); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// txSQLiteStore is a lightweight wrapper around SQLiteStore that routes all
+// operations through a specific *sql.Tx.  Only the methods needed by
+// representationStore are implemented.
+type txSQLiteStore struct {
+	parent *SQLiteStore
+	tx     *sql.Tx
+}
+
+// WithTx on a txSQLiteStore is a no-op; the transaction already exists, so
+// simply invoke the callback with the receiver itself.
+func (t *txSQLiteStore) WithTx(ctx context.Context, fn func(tx model.RepresentationStore) error) error {
+	return fn(t)
+}
+
+func (t *txSQLiteStore) UpsertRepresentation(ctx context.Context, rep model.Representation) (int64, error) {
+	// copy of SQLiteStore.UpsertRepresentation but using t.tx instead of db
+	if rep.DocID <= 0 {
+		return 0, errors.New("doc_id must be > 0")
+	}
+	repType := strings.TrimSpace(rep.RepType)
+	if repType == "" {
+		repType = "raw_text"
+	}
+	repHash := strings.TrimSpace(rep.RepHash)
+	if repHash == "" {
+		return 0, errors.New("rep_hash must be non-empty")
+	}
+	createdUnix := rep.CreatedUnix
+	if createdUnix <= 0 {
+		createdUnix = time.Now().Unix()
+	}
+
+	_, err := t.tx.ExecContext(
+		ctx,
+		`INSERT INTO representations(doc_id, rep_type, rep_hash, created_unix, deleted)
+		 VALUES(?, ?, ?, ?, ?)
+		 ON CONFLICT(doc_id, rep_type) DO UPDATE SET
+		   rep_hash=excluded.rep_hash,
+		   created_unix=excluded.created_unix,
+		   deleted=excluded.deleted`,
+		rep.DocID,
+		repType,
+		repHash,
+		createdUnix,
+		boolToInt(rep.Deleted),
+	)
+	if err != nil {
+		return 0, err
+	}
+
+	var repID int64
+	if err := t.tx.QueryRowContext(
+		ctx,
+		`SELECT rep_id FROM representations WHERE doc_id = ? AND rep_type = ? LIMIT 1`,
+		rep.DocID,
+		repType,
+	).Scan(&repID); err != nil {
+		return 0, err
+	}
+	if repID <= 0 {
+		return 0, errors.New("representation upsert did not return a row")
+	}
+	return repID, nil
+}
+
+func (t *txSQLiteStore) InsertChunkWithSpans(ctx context.Context, chunk model.Chunk, spans []model.Span) (int64, error) {
+	if chunk.RepID <= 0 {
+		return 0, errors.New("rep_id must be > 0")
+	}
+	if strings.TrimSpace(chunk.Text) == "" {
+		return 0, errors.New("chunk text must be non-empty")
+	}
+
+	var (
+		relPath string
+		docType string
+		repType string
+	)
+	if err := t.tx.QueryRowContext(
+		ctx,
+		`SELECT d.rel_path, d.doc_type, r.rep_type
+		 FROM representations r
+		 JOIN documents d ON d.doc_id = r.doc_id
+		 WHERE r.rep_id = ?
+		 LIMIT 1`,
+		chunk.RepID,
+	).Scan(&relPath, &docType, &repType); err != nil {
+		return 0, err
+	}
+
+	_, err := t.tx.ExecContext(
+		ctx,
+		`INSERT INTO chunks(rep_id, ordinal, rel_path, doc_type, rep_type, text, text_hash, tokens_est, index_kind, embedding_status, embedding_error, deleted)
+		 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(rep_id, ordinal) DO UPDATE SET
+		   rel_path=excluded.rel_path,
+		   doc_type=excluded.doc_type,
+		   rep_type=excluded.rep_type,
+		   text=excluded.text,
+		   text_hash=excluded.text_hash,
+		   tokens_est=excluded.tokens_est,
+		   index_kind=excluded.index_kind,
+		   embedding_status=excluded.embedding_status,
+		   embedding_error=excluded.embedding_error,
+		   deleted=excluded.deleted`,
+		chunk.RepID,
+		chunk.Ordinal,
+		relPath,
+		docType,
+		defaultIfEmpty(repType, "raw_text"),
+		chunk.Text,
+		strings.TrimSpace(chunk.TextHash),
+		0,
+		normalizeIndexKind(chunk.IndexKind),
+		normalizeEmbeddingStatus(chunk.EmbeddingStatus),
+		strings.TrimSpace(chunk.EmbeddingError),
+		boolToInt(chunk.Deleted),
+	)
+	if err != nil {
+		return 0, err
+	}
+
+	var chunkID int64
+	if err := t.tx.QueryRowContext(
+		ctx,
+		`SELECT chunk_id FROM chunks WHERE rep_id = ? AND ordinal = ? LIMIT 1`,
+		chunk.RepID,
+		chunk.Ordinal,
+	).Scan(&chunkID); err != nil {
+		return 0, err
+	}
+
+	if _, err := t.tx.ExecContext(ctx, `DELETE FROM spans WHERE chunk_id = ?`, chunkID); err != nil {
+		return 0, err
+	}
+
+	for _, span := range spans {
+		spanKind, startValue, endValue, spanErr := spanToRow(span)
+		if spanErr != nil {
+			return 0, spanErr
+		}
+		if _, err := t.tx.ExecContext(
+			ctx,
+			`INSERT INTO spans (chunk_id, span_kind, start, end, extra_json) VALUES (?, ?, ?, ?, NULL)`,
+			chunkID,
+			spanKind,
+			startValue,
+			endValue,
+		); err != nil {
+			return 0, err
+		}
+	}
+
+	return chunkID, nil
+}
+
+func (t *txSQLiteStore) SoftDeleteChunksFromOrdinal(ctx context.Context, repID int64, fromOrdinal int) error {
+	if repID <= 0 {
+		return errors.New("rep_id must be > 0")
+	}
+	if fromOrdinal < 0 {
+		return errors.New("from_ordinal must be >= 0")
+	}
+	_, err := t.tx.ExecContext(ctx, `UPDATE chunks
+	 SET deleted = 1
+	 WHERE rep_id = ? AND ordinal >= ?`, repID, fromOrdinal)
+	return err
+}
+
 func (s *SQLiteStore) GetChunksByRepID(ctx context.Context, repID int64) ([]model.Chunk, error) {
 	if repID <= 0 {
 		return nil, errors.New("rep_id must be > 0")
@@ -789,6 +985,16 @@ func (s *SQLiteStore) markEmbeddingStatus(ctx context.Context, labels []uint64, 
 	if len(labels) == 0 {
 		return nil
 	}
+
+	// validate labels fit in signed 64-bit range before casting below; this
+	// mirrors the check we perform when reading chunk IDs from the database in
+	// NextPending/ListEmbeddedChunkMetadata where we convert them to uint64.
+	for _, label := range labels {
+		if label > uint64(math.MaxInt64) {
+			return fmt.Errorf("label %d is too large for int64", label)
+		}
+	}
+
 	db, err := s.ensureDB(ctx)
 	if err != nil {
 		return err
@@ -882,7 +1088,7 @@ func bootstrapSettingsLocked(ctx context.Context, db *sql.DB) error {
 		"index_format_version": "1",
 		"embed_text_model":     "mistral-embed",
 		"embed_code_model":     "codestral-embed",
-		"ocr_model":            "mistral-ocr-latest",
+		"ocr_model":            mistral.DefaultOCRModel,
 		"stt_provider":         "mistral",
 		"stt_model":            "voxtral-mini-latest",
 		"chat_model":           "mistral-small-2506",

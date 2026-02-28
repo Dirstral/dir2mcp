@@ -27,6 +27,9 @@ func TestClassifyDocType(t *testing.T) {
 		{path: "Makefile", want: "code"},
 		{path: "Jenkinsfile", want: "code"},
 		{path: "go.mod", want: "data"},
+		{path: ".env", want: "data"},
+		{path: ".env.local", want: "data"},
+		{path: ".env.production", want: "data"},
 	}
 
 	for _, tc := range tests {

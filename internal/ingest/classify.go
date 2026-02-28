@@ -8,11 +8,19 @@ import (
 // ClassifyDocType maps a path to an ingestion document type.
 func ClassifyDocType(relPath string) string {
 	base := strings.ToLower(filepath.Base(relPath))
+
+	// treat any file whose basename starts with ".env" as data, e.g.
+	// ".env", ".env.local", ".env.production" etc. previously only
+	// exact ".env" matched and other variants fell through to the
+	// extension-based classifier (resulting in "binary_ignored").
+	if strings.HasPrefix(base, ".env") {
+		return "data"
+	}
+
 	switch base {
 	case "dockerfile", "makefile", "jenkinsfile":
 		return "code"
-	case ".env":
-		return "data"
+	// note: ".env" already handled above via HasPrefix
 	case "readme", "license", "changelog":
 		return "text"
 	case "go.mod", "go.sum", "package.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml":

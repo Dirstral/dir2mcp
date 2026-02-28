@@ -136,13 +136,47 @@ func TestServiceRun_ContextCancelled(t *testing.T) {
 	}
 }
 
+// verify that when a document is upserted and processed, any generated
+// representations include the persisted DocID instead of zero.  This
+// guards against the previous bug where the in-memory doc lacked an ID and
+// orphaned rows were written.
+func TestProcessDocument_DocIDSetBeforeRepGeneration(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "foo.txt")
+	if err := os.WriteFile(path, []byte("hello world"), 0o644); err != nil {
+		t.Fatalf("write test file: %v", err)
+	}
+
+	cfg := config.Default()
+	cfg.RootDir = root
+
+	st := newMemoryStore()
+	svc := ingest.NewService(cfg, st)
+
+	// run a single scan by invoking Run; service will create raw text
+	// representation since memoryStore implements model.RepresentationStore.
+	if err := svc.Run(context.Background()); err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+
+	if len(st.reps) == 0 {
+		t.Fatal("expected at least one representation")
+	}
+	if st.reps[0].DocID == 0 {
+		t.Fatalf("representation created with zero DocID")
+	}
+}
+
 type memoryStore struct {
 	docs map[string]model.Document
+	// hold persisted representations for verification
+	reps []model.Representation
 }
 
 func newMemoryStore() *memoryStore {
 	return &memoryStore{
 		docs: make(map[string]model.Document),
+		reps: make([]model.Representation, 0),
 	}
 }
 
@@ -157,6 +191,28 @@ func (s *memoryStore) UpsertDocument(_ context.Context, doc model.Document) erro
 	}
 	s.docs[doc.RelPath] = doc
 	return nil
+}
+
+// representationStore (model.RepresentationStore) methods ------------------------------------------------
+func (s *memoryStore) UpsertRepresentation(_ context.Context, rep model.Representation) (int64, error) {
+	rep.RepID = int64(len(s.reps) + 1)
+	s.reps = append(s.reps, rep)
+	return rep.RepID, nil
+}
+
+func (s *memoryStore) InsertChunkWithSpans(_ context.Context, _ model.Chunk, _ []model.Span) (int64, error) {
+	// no-op for tests
+	return 0, nil
+}
+
+func (s *memoryStore) SoftDeleteChunksFromOrdinal(_ context.Context, _ int64, _ int) error {
+	return nil
+}
+
+// WithTx is a noop for the in-memory implementation since there is no
+// underlying database to transact against.
+func (s *memoryStore) WithTx(ctx context.Context, fn func(tx model.RepresentationStore) error) error {
+	return fn(s)
 }
 
 func (s *memoryStore) GetDocumentByPath(_ context.Context, relPath string) (model.Document, error) {

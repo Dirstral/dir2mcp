@@ -16,6 +16,17 @@ type fakeIncrementalStore struct {
 	upsertDocCalls   int
 	upsertRepCalls   int
 	insertChunkCalls int
+
+	// recorded inputs for verification
+	lastUpsertedDoc model.Document
+	upsertedDocs    []model.Document
+
+	lastUpsertedRep model.Representation
+	upsertedReps    []model.Representation
+
+	lastInsertedChunk model.Chunk
+	insertedChunks    []model.Chunk
+	lastInsertedSpans [][]model.Span
 }
 
 func (f *fakeIncrementalStore) Init(context.Context) error { return nil }
@@ -23,8 +34,11 @@ func (f *fakeIncrementalStore) Close() error               { return nil }
 func (f *fakeIncrementalStore) ListFiles(context.Context, string, string, int, int) ([]model.Document, int64, error) {
 	return nil, 0, nil
 }
-func (f *fakeIncrementalStore) UpsertDocument(_ context.Context, _ model.Document) error {
+func (f *fakeIncrementalStore) UpsertDocument(_ context.Context, doc model.Document) error {
 	f.upsertDocCalls++
+	// record for assertions
+	f.lastUpsertedDoc = doc
+	f.upsertedDocs = append(f.upsertedDocs, doc)
 	return nil
 }
 func (f *fakeIncrementalStore) GetDocumentByPath(_ context.Context, _ string) (model.Document, error) {
@@ -33,16 +47,30 @@ func (f *fakeIncrementalStore) GetDocumentByPath(_ context.Context, _ string) (m
 	}
 	return f.existingDoc, nil
 }
-func (f *fakeIncrementalStore) UpsertRepresentation(_ context.Context, _ model.Representation) (int64, error) {
+func (f *fakeIncrementalStore) UpsertRepresentation(_ context.Context, rep model.Representation) (int64, error) {
 	f.upsertRepCalls++
+	// record
+	f.lastUpsertedRep = rep
+	f.upsertedReps = append(f.upsertedReps, rep)
 	return 1, nil
 }
-func (f *fakeIncrementalStore) InsertChunkWithSpans(_ context.Context, _ model.Chunk, _ []model.Span) (int64, error) {
+func (f *fakeIncrementalStore) InsertChunkWithSpans(_ context.Context, chunk model.Chunk, spans []model.Span) (int64, error) {
 	f.insertChunkCalls++
+	// record
+	f.lastInsertedChunk = chunk
+	f.insertedChunks = append(f.insertedChunks, chunk)
+	f.lastInsertedSpans = append(f.lastInsertedSpans, spans)
 	return int64(f.insertChunkCalls), nil
 }
 func (f *fakeIncrementalStore) SoftDeleteChunksFromOrdinal(context.Context, int64, int) error {
 	return nil
+}
+
+// WithTx is a no-op transaction wrapper required by the
+// model.RepresentationStore interface.  All operations happen directly on the
+// fake store, so we simply invoke the callback immediately.
+func (f *fakeIncrementalStore) WithTx(ctx context.Context, fn func(tx model.RepresentationStore) error) error {
+	return fn(f)
 }
 
 func TestProcessDocument_IncrementalSkipsUnchangedRepresentation(t *testing.T) {

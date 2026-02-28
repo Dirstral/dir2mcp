@@ -198,12 +198,12 @@ func TestEmbeddingWorker_RunOnce_EmbeddingTransient(t *testing.T) {
 type panicEmbedder struct{}
 
 func (p *panicEmbedder) Embed(_ context.Context, _ string, _ []string) ([][]float32, error) {
-	panic("embedder should not be invoked for negative-label batches")
+	panic("embedder should not be invoked for zero/invalid-label batches")
 }
 
-func TestEmbeddingWorker_RunOnce_NegativeLabel(t *testing.T) {
-	t.Run("single-negative", func(t *testing.T) {
-		// single negative label
+func TestEmbeddingWorker_RunOnce_InvalidLabel(t *testing.T) {
+	t.Run("single-invalid", func(t *testing.T) {
+		// single zero/invalid label
 		source := &fakeChunkSource{
 			tasks: []model.ChunkTask{model.NewChunkTask(0, "oops", "", model.ChunkMetadata{})},
 		}
@@ -217,7 +217,7 @@ func TestEmbeddingWorker_RunOnce_NegativeLabel(t *testing.T) {
 
 		n, err := worker.RunOnce(context.Background(), "text")
 		if err == nil {
-			t.Fatal("expected error for negative label")
+			t.Fatal("expected error for invalid label")
 		}
 		if !errors.Is(err, ErrFatal) {
 			t.Fatalf("expected fatal error, got %v", err)
@@ -225,9 +225,9 @@ func TestEmbeddingWorker_RunOnce_NegativeLabel(t *testing.T) {
 		if n != 0 {
 			t.Fatalf("expected 0 tasks processed, got %d", n)
 		}
-		// MarkFailed must NOT be called for negative labels.
+		// MarkFailed must NOT be called for invalid labels.
 		if len(source.failedLabels) != 0 {
-			t.Fatalf("expected no MarkFailed call for negative label, got %#v", source.failedLabels)
+			t.Fatalf("expected no MarkFailed call for invalid label, got %#v", source.failedLabels)
 		}
 		if source.failedReason != "" {
 			t.Fatalf("expected no failure reason, got %q", source.failedReason)
@@ -253,7 +253,7 @@ func TestEmbeddingWorker_RunOnce_NegativeLabel(t *testing.T) {
 
 		n, err := worker.RunOnce(context.Background(), "text")
 		if err == nil {
-			t.Fatal("expected error for negative label in mixed batch")
+			t.Fatal("expected error for invalid label in mixed batch")
 		}
 		if !errors.Is(err, ErrFatal) {
 			t.Fatalf("expected fatal error for mixed batch, got %v", err)
@@ -262,7 +262,7 @@ func TestEmbeddingWorker_RunOnce_NegativeLabel(t *testing.T) {
 			t.Fatalf("expected 0 tasks processed on mixed batch, got %d", n)
 		}
 		if len(source.failedLabels) != 0 {
-			t.Fatalf("expected no MarkFailed call for negative label in mixed batch, got %#v", source.failedLabels)
+			t.Fatalf("expected no MarkFailed call for invalid label in mixed batch, got %#v", source.failedLabels)
 		}
 		if source.failedReason != "" {
 			t.Fatalf("expected no failure reason on mixed batch, got %q", source.failedReason)

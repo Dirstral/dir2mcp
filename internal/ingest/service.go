@@ -23,6 +23,12 @@ type Service struct {
 	indexingState *appstate.IndexingState
 	repGen        *RepresentationGenerator
 	ocr           model.OCR
+
+	// optional cache policy for OCR results. maxBytes bounds the total
+	// bytes of files kept in the on‑disk cache; zero disables size pruning.
+	// ttl, if non‑zero, causes files older than the duration to be removed.
+	ocrCacheMaxBytes int64
+	ocrCacheTTL      time.Duration
 }
 
 type documentDeleteMarker interface {
@@ -34,7 +40,7 @@ func NewService(cfg config.Config, store model.Store) *Service {
 		cfg:   cfg,
 		store: store,
 	}
-	if rs, ok := store.(representationStore); ok {
+	if rs, ok := store.(model.RepresentationStore); ok {
 		svc.repGen = NewRepresentationGenerator(rs)
 	}
 	return svc
@@ -46,6 +52,23 @@ func (s *Service) SetIndexingState(state *appstate.IndexingState) {
 
 func (s *Service) SetOCR(ocr model.OCR) {
 	s.ocr = ocr
+}
+
+// SetOCRCacheLimits configures in‑memory limits that the service will enforce
+// when writing to the OCR cache. A maxBytes value of zero disables size
+// pruning; a ttl value of zero disables age‑based pruning. Both limits can be
+// applied simultaneously. These are primarily useful for tests or for
+// embedding the service in environments where disk usage must be bounded.
+func (s *Service) SetOCRCacheLimits(maxBytes int64, ttl time.Duration) {
+	s.ocrCacheMaxBytes = maxBytes
+	s.ocrCacheTTL = ttl
+}
+
+// ClearOCRCache deletes any cached OCR data.  The caller may use this to
+// forcibly reset state (e.g. during tests).
+func (s *Service) ClearOCRCache() error {
+	cacheDir := filepath.Join(s.cfg.StateDir, "cache", "ocr")
+	return os.RemoveAll(cacheDir)
 }
 
 func (s *Service) Run(ctx context.Context) error {
@@ -142,12 +165,29 @@ func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretP
 		return fmt.Errorf("upsert document: %w", err)
 	}
 
+	// after upsert we need the persisted DocID for downstream
+	// representation creation.  The store implementation assigns the ID,
+	// but UpsertDocument only returns an error, so query the record again
+	// and update the local copy.  We ignore not-found errors because that
+	// would be surprising immediately after a successful upsert and is
+	// already handled by the store implementation.
+	if updated, err := s.store.GetDocumentByPath(ctx, doc.RelPath); err == nil {
+		doc.DocID = updated.DocID
+	} else if !isNotFoundError(err) {
+		return fmt.Errorf("fetch document after upsert: %w", err)
+	}
+
 	switch doc.Status {
 	case "ok":
 		s.addIndexed(1)
 	case "skipped", "secret_excluded":
 		s.addSkipped(1)
 	case "error":
+		// although buildDocumentWithContent will never return a document with
+		// Status="error" (the error case returns early above), we leave this
+		// branch in place as a defensive measure. future changes to document
+		// construction might introduce new terminal statuses and it's nicer
+		// to handle them explicitly here rather than silently falling through.
 		s.addErrors(1)
 		return nil
 	}
@@ -296,7 +336,9 @@ func (s *Service) generateRepresentations(ctx context.Context, doc model.Documen
 	}
 
 	if ShouldGenerateRawText(doc.DocType) {
-		if err := s.repGen.GenerateRawText(ctx, doc, absPath); err != nil {
+		// we already loaded the file contents earlier in processDocument,
+		// avoid re-reading it by using the new helper method.
+		if err := s.repGen.GenerateRawTextFromContent(ctx, doc, absPath, content); err != nil {
 			return err
 		}
 		s.addRepresentations(1)
@@ -370,11 +412,90 @@ func (s *Service) generateOCRMarkdownRepresentation(ctx context.Context, doc mod
 	return nil
 }
 
+// enforceOCRCachePolicy scans cacheDir and removes entries that violate
+// the configured size or age limits.  It's safe to call even if neither
+// policy is enabled; in that case it is a no-op.
+func (s *Service) enforceOCRCachePolicy(cacheDir string) error {
+	if s.ocrCacheMaxBytes <= 0 && s.ocrCacheTTL <= 0 {
+		return nil
+	}
+	entries, err := os.ReadDir(cacheDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("read ocr cache dir: %w", err)
+	}
+
+	type fileInfo struct {
+		path string
+		info os.FileInfo
+	}
+	var files []fileInfo
+	var total int64
+	now := time.Now()
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		p := filepath.Join(cacheDir, e.Name())
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		files = append(files, fileInfo{path: p, info: info})
+		total += info.Size()
+	}
+
+	// age-based eviction first
+	if s.ocrCacheTTL > 0 {
+		cutoff := now.Add(-s.ocrCacheTTL)
+		kept := make([]fileInfo, 0, len(files))
+		for _, f := range files {
+			if f.info.ModTime().Before(cutoff) {
+				if err := os.Remove(f.path); err != nil && !os.IsNotExist(err) {
+					return fmt.Errorf("prune ocr cache ttl remove %s: %w", f.path, err)
+				}
+				total -= f.info.Size()
+				continue
+			}
+			kept = append(kept, f)
+		}
+		files = kept
+	}
+
+	// size-based eviction
+	if s.ocrCacheMaxBytes > 0 && total > s.ocrCacheMaxBytes {
+		sort.Slice(files, func(i, j int) bool {
+			return files[i].info.ModTime().Before(files[j].info.ModTime())
+		})
+		for _, f := range files {
+			if total <= s.ocrCacheMaxBytes {
+				break
+			}
+			if err := os.Remove(f.path); err != nil && !os.IsNotExist(err) {
+				return fmt.Errorf("prune ocr cache size remove %s: %w", f.path, err)
+			}
+			total -= f.info.Size()
+		}
+	}
+
+	return nil
+}
+
 func (s *Service) readOrComputeOCR(ctx context.Context, doc model.Document, content []byte) (string, error) {
 	cacheDir := filepath.Join(s.cfg.StateDir, "cache", "ocr")
 	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
 		return "", fmt.Errorf("create ocr cache dir: %w", err)
 	}
+
+	// enforce any configured cache policy before we write a new entry. doing the
+	// pruning here (rather than lazily) keeps the directory bounded even if the
+	// service never restarts.
+	if err := s.enforceOCRCachePolicy(cacheDir); err != nil {
+		return "", err
+	}
+
 	cachePath := filepath.Join(cacheDir, computeContentHash(content)+".md")
 	if cached, err := os.ReadFile(cachePath); err == nil {
 		return string(cached), nil
