@@ -199,6 +199,7 @@ CREATE TABLE IF NOT EXISTS documents (
   doc_id INTEGER PRIMARY KEY AUTOINCREMENT,
   rel_path TEXT NOT NULL UNIQUE,
   doc_type TEXT NOT NULL,
+  source_type TEXT NOT NULL DEFAULT 'filesystem',
   size_bytes INTEGER NOT NULL DEFAULT 0,
   mtime_unix INTEGER NOT NULL DEFAULT 0,
   content_hash TEXT NOT NULL DEFAULT '',
@@ -263,6 +264,10 @@ CREATE INDEX IF NOT EXISTS idx_spans_chunk_id ON spans(chunk_id);
 		_ = db.Close()
 		return err
 	}
+	if _, err := db.ExecContext(ctx, `ALTER TABLE documents ADD COLUMN source_type TEXT NOT NULL DEFAULT 'filesystem'`); err != nil && !isDuplicateColumnError(err) {
+		_ = db.Close()
+		return err
+	}
 
 	if err := bootstrapSettingsLocked(ctx, db); err != nil {
 		_ = db.Close()
@@ -293,10 +298,11 @@ func (s *SQLiteStore) UpsertDocument(ctx context.Context, doc model.Document) er
 
 	_, err = db.ExecContext(
 		ctx,
-		`INSERT INTO documents(rel_path, doc_type, size_bytes, mtime_unix, content_hash, status, deleted)
-		 VALUES(?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO documents(rel_path, doc_type, source_type, size_bytes, mtime_unix, content_hash, status, deleted)
+		 VALUES(?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(rel_path) DO UPDATE SET
 		   doc_type=excluded.doc_type,
+		   source_type=excluded.source_type,
 		   size_bytes=excluded.size_bytes,
 		   mtime_unix=excluded.mtime_unix,
 		   content_hash=excluded.content_hash,
@@ -304,6 +310,7 @@ func (s *SQLiteStore) UpsertDocument(ctx context.Context, doc model.Document) er
 		   deleted=excluded.deleted`,
 		relPath,
 		normalizeDocType(doc.DocType),
+		normalizeSourceType(doc.SourceType),
 		doc.SizeBytes,
 		doc.MTimeUnix,
 		strings.TrimSpace(doc.ContentHash),
@@ -654,7 +661,7 @@ func (s *SQLiteStore) GetDocumentByPath(ctx context.Context, relPath string) (mo
 	var deleted int
 	row := db.QueryRowContext(
 		ctx,
-		`SELECT doc_id, rel_path, doc_type, size_bytes, mtime_unix, content_hash, status, deleted
+		`SELECT doc_id, rel_path, doc_type, source_type, size_bytes, mtime_unix, content_hash, status, deleted
 		 FROM documents WHERE rel_path = ?`,
 		normalizedPath,
 	)
@@ -662,6 +669,7 @@ func (s *SQLiteStore) GetDocumentByPath(ctx context.Context, relPath string) (mo
 		&doc.DocID,
 		&doc.RelPath,
 		&doc.DocType,
+		&doc.SourceType,
 		&doc.SizeBytes,
 		&doc.MTimeUnix,
 		&doc.ContentHash,
@@ -693,7 +701,7 @@ func (s *SQLiteStore) ListFiles(ctx context.Context, prefix, glob string, limit,
 
 	normalizedPrefix := normalizePrefix(prefix)
 
-	query := `SELECT doc_id, rel_path, doc_type, size_bytes, mtime_unix, content_hash, status, deleted FROM documents`
+	query := `SELECT doc_id, rel_path, doc_type, source_type, size_bytes, mtime_unix, content_hash, status, deleted FROM documents`
 	where := []string{"deleted = 0"}
 	args := make([]any, 0, 4)
 	if normalizedPrefix != "" {
@@ -722,6 +730,7 @@ func (s *SQLiteStore) ListFiles(ctx context.Context, prefix, glob string, limit,
 			&doc.DocID,
 			&doc.RelPath,
 			&doc.DocType,
+			&doc.SourceType,
 			&doc.SizeBytes,
 			&doc.MTimeUnix,
 			&doc.ContentHash,
@@ -1068,6 +1077,22 @@ func normalizeDocType(docType string) string {
 		return "text"
 	}
 	return docType
+}
+
+func normalizeSourceType(sourceType string) string {
+	switch strings.ToLower(strings.TrimSpace(sourceType)) {
+	case "archive_member":
+		return "archive_member"
+	default:
+		return "filesystem"
+	}
+}
+
+func isDuplicateColumnError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "duplicate column name")
 }
 
 func normalizeIndexKind(indexKind string) string {
