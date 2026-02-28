@@ -21,10 +21,10 @@ import (
 )
 
 const (
-	sessionHeaderName = "MCP-Session-Id"
-	authTokenEnvVar   = "DIR2MCP_AUTH_TOKEN"
-	maxRequestBody    = 1 << 20
-	sessionTTL        = 24 * time.Hour
+	sessionHeaderName      = "MCP-Session-Id"
+	authTokenEnvVar        = "DIR2MCP_AUTH_TOKEN"
+	maxRequestBody         = 1 << 20
+	sessionTTL             = 24 * time.Hour
 	sessionCleanupInterval = time.Hour
 )
 
@@ -59,6 +59,15 @@ type rpcError struct {
 type rpcErrorData struct {
 	Code      string `json:"code"`
 	Retryable bool   `json:"retryable"`
+}
+
+type validationError struct {
+	message       string
+	canonicalCode string
+}
+
+func (e validationError) Error() string {
+	return e.message
 }
 
 func NewServer(cfg config.Config, retriever model.Retriever) *Server {
@@ -119,7 +128,7 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 
 	ct := r.Header.Get("Content-Type")
 	if !strings.HasPrefix(strings.ToLower(ct), "application/json") {
-		writeError(w, http.StatusUnsupportedMediaType, nil, -32600, "Content-Type must be application/json", "INVALID_CONTENT_TYPE", false)
+		writeError(w, http.StatusUnsupportedMediaType, nil, -32600, "Content-Type must be application/json", "INVALID_FIELD", false)
 		return
 	}
 
@@ -133,7 +142,12 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 
 	req, parseErr := parseRequest(r.Body)
 	if parseErr != nil {
-		writeError(w, http.StatusBadRequest, nil, -32600, parseErr.Error(), "INVALID_REQUEST", false)
+		canonicalCode := "INVALID_FIELD"
+		var vErr validationError
+		if errors.As(parseErr, &vErr) && vErr.canonicalCode != "" {
+			canonicalCode = vErr.canonicalCode
+		}
+		writeError(w, http.StatusBadRequest, nil, -32600, parseErr.Error(), canonicalCode, false)
 		return
 	}
 
@@ -172,13 +186,13 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleInitialize(w http.ResponseWriter, id interface{}) {
 	if id == nil {
-		writeError(w, http.StatusBadRequest, nil, -32600, "initialize requires id", "INVALID_REQUEST", false)
+		writeError(w, http.StatusBadRequest, nil, -32600, "initialize requires id", "MISSING_FIELD", false)
 		return
 	}
 
 	sessionID, err := generateSessionID()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, id, -32603, "failed to initialize session", "INTERNAL", false)
+		writeError(w, http.StatusInternalServerError, id, -32603, "failed to initialize session", "", false)
 		return
 	}
 	s.storeSession(sessionID)
@@ -250,23 +264,23 @@ func parseRequest(body io.ReadCloser) (rpcRequest, error) {
 		return rpcRequest{}, err
 	}
 	if len(raw) > maxRequestBody {
-		return rpcRequest{}, errors.New("request body too large")
+		return rpcRequest{}, validationError{message: "request body too large", canonicalCode: "INVALID_FIELD"}
 	}
 
 	trimmed := strings.TrimSpace(string(raw))
 	if trimmed == "" {
-		return rpcRequest{}, errors.New("empty request body")
+		return rpcRequest{}, validationError{message: "empty request body", canonicalCode: "MISSING_FIELD"}
 	}
 	if strings.HasPrefix(trimmed, "[") {
-		return rpcRequest{}, errors.New("batch requests are not supported")
+		return rpcRequest{}, validationError{message: "batch requests are not supported", canonicalCode: "INVALID_FIELD"}
 	}
 
 	var req rpcRequest
 	if err := json.Unmarshal(raw, &req); err != nil {
-		return rpcRequest{}, err
+		return rpcRequest{}, validationError{message: "invalid json body", canonicalCode: "INVALID_FIELD"}
 	}
-	if req.JSONRPC != "" && req.JSONRPC != "2.0" {
-		return rpcRequest{}, errors.New("unsupported jsonrpc version")
+	if req.JSONRPC != "2.0" {
+		return rpcRequest{}, validationError{message: "jsonrpc must be \"2.0\"", canonicalCode: "INVALID_FIELD"}
 	}
 	return req, nil
 }
@@ -292,16 +306,21 @@ func writeResult(w http.ResponseWriter, statusCode int, id interface{}, result i
 }
 
 func writeError(w http.ResponseWriter, statusCode int, id interface{}, code int, message, canonicalCode string, retryable bool) {
+	var errData *rpcErrorData
+	if canonicalCode != "" {
+		errData = &rpcErrorData{
+			Code:      canonicalCode,
+			Retryable: retryable,
+		}
+	}
+
 	writeResponse(w, statusCode, rpcResponse{
 		JSONRPC: "2.0",
 		ID:      id,
 		Error: &rpcError{
 			Code:    code,
 			Message: message,
-			Data: &rpcErrorData{
-				Code:      canonicalCode,
-				Retryable: retryable,
-			},
+			Data:    errData,
 		},
 	})
 }
@@ -401,6 +420,18 @@ func isOriginAllowed(origin string, allowlist []string) bool {
 			if err != nil || parsedAllowed.Scheme == "" || parsedAllowed.Host == "" {
 				continue
 			}
+			if !strings.EqualFold(parsedAllowed.Scheme, parsedOrigin.Scheme) {
+				continue
+			}
+
+			// Allow entries without an explicit port (e.g. http://localhost) to match any origin port.
+			if parsedAllowed.Port() == "" {
+				if strings.EqualFold(parsedAllowed.Hostname(), parsedOrigin.Hostname()) {
+					return true
+				}
+				continue
+			}
+
 			normalizedAllowed := parsedAllowed.Scheme + "://" + strings.ToLower(parsedAllowed.Host)
 			if strings.EqualFold(normalizedAllowed, normalizedOrigin) {
 				return true
