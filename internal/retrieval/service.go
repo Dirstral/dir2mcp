@@ -457,7 +457,7 @@ func (s *Service) searchHitForLabel(indexName string, label uint64) model.Search
 	if byIndex, ok := s.chunkByIndex[indexName]; ok {
 		if meta, exists := byIndex[label]; exists {
 			s.metaMu.RUnlock()
-			meta.ChunkID = int64(label)
+			meta.ChunkID = label
 			return meta
 		}
 	}
@@ -465,12 +465,12 @@ func (s *Service) searchHitForLabel(indexName string, label uint64) model.Search
 	s.metaMu.RUnlock()
 
 	if ok {
-		meta.ChunkID = int64(label)
+		meta.ChunkID = label
 		return meta
 	}
 
 	return model.SearchHit{
-		ChunkID: int64(label),
+		ChunkID: label,
 		RelPath: "",
 		DocType: "unknown",
 		RepType: "unknown",
@@ -566,7 +566,7 @@ func (s *Service) searchBothIndices(ctx context.Context, query string, k int, te
 	normalizeScores(textHits)
 	normalizeScores(codeHits)
 
-	merged := make(map[int64]model.SearchHit)
+	merged := make(map[uint64]model.SearchHit)
 	for _, hit := range textHits {
 		merged[hit.ChunkID] = hit
 	}

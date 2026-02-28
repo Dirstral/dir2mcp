@@ -130,7 +130,11 @@ func NewAppWithIO(stdout, stderr io.Writer) *App {
 		stdout: stdout,
 		stderr: stderr,
 		newIngestor: func(cfg config.Config, st model.Store) model.Ingestor {
-			return ingest.NewService(cfg, st)
+			svc := ingest.NewService(cfg, st)
+			if strings.TrimSpace(cfg.MistralAPIKey) != "" {
+				svc.SetOCR(mistral.NewClient(cfg.MistralBaseURL, cfg.MistralAPIKey))
+			}
+			return svc
 		},
 	}
 }
@@ -436,14 +440,31 @@ func (a *App) runAsk(args []string) int {
 }
 
 func (a *App) runReindex(ctx context.Context) int {
-	st := store.NewSQLiteStore(filepath.Join(".dir2mcp", "meta.sqlite"))
+	// load configuration first so that both the ingestor and any
+	// auxiliary components (OCR client) share the same settings.  When
+	// Load returns an error we treat it as fatal instead of silently
+	// proceeding with defaults as was previously the case.
+	cfg, err := config.Load(".dir2mcp.yaml")
+	if err != nil {
+		writef(a.stderr, "load config: %v\n", err)
+		return exitConfigInvalid
+	}
+
+	baseDir := strings.TrimSpace(cfg.StateDir)
+	if baseDir == "" {
+		baseDir = ".dir2mcp"
+	}
+	st := store.NewSQLiteStore(filepath.Join(baseDir, "meta.sqlite"))
 	defer func() {
 		if closeErr := st.Close(); closeErr != nil {
 			writef(a.stderr, "close store: %v\n", closeErr)
 		}
 	}()
-	ing := ingest.NewService(config.Default(), st)
-	err := ing.Reindex(ctx)
+
+	// use the factory hook (same as runUp) to allow tests to intercept
+	ing := a.newIngestor(cfg, st)
+
+	err = ing.Reindex(ctx)
 	if errors.Is(err, model.ErrNotImplemented) {
 		writeln(a.stdout, "reindex skeleton: ingestion pipeline not implemented yet")
 		return exitSuccess

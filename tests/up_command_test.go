@@ -142,6 +142,79 @@ func TestUpNonInteractiveMissingConfigReturnsExitCode2(t *testing.T) {
 	}
 }
 
+// Reindex command should also load configuration early and surface any
+// errors from config.Load.  The config loader only returns an error when
+// statting the path fails for some unexpected reason (for example permission
+// denied on a dotenv file), so we simulate that by creating an unreadable
+// ".env" file in the working directory.
+func TestReindexConfigLoadErrorReturnsExitCode2(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("file permission semantics differ on Windows")
+	}
+
+	tmp := t.TempDir()
+	// ensure there is something to upset loadDotEnvFiles
+	bad := filepath.Join(tmp, ".env")
+	if err := os.WriteFile(bad, []byte("FOO=bar"), 0); err != nil {
+		t.Fatalf("write bad env: %v", err)
+	}
+	if err := os.Chmod(bad, 0); err != nil {
+		t.Fatalf("chmod bad env: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := cli.NewAppWithIO(&stdout, &stderr)
+
+	var code int
+	withWorkingDir(t, tmp, func() {
+		code = app.RunWithContext(context.Background(), []string{"reindex"})
+	})
+
+	if code != 2 {
+		t.Fatalf("unexpected exit code: got=%d want=2", code)
+	}
+
+	if !strings.Contains(stderr.String(), "load config") {
+		t.Fatalf("expected load config error in stderr, got: %s", stderr.String())
+	}
+}
+
+// When a real configuration is available it should be passed through to the
+// ingestor factory.  Previously runReindex always used config.Default(),
+// causing the ingest service to be unaware of any environment overrides.
+func TestReindexPassesConfigToNewIngestor(t *testing.T) {
+	tmp := t.TempDir()
+	// exercise a non-default value so we can distinguish default vs loaded
+	t.Setenv("MISTRAL_API_KEY", "abc123")
+	t.Setenv("MISTRAL_BASE_URL", "https://example.local/")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	var seenCfg config.Config
+	app := cli.NewAppWithIOAndHooks(&stdout, &stderr, cli.RuntimeHooks{
+		NewIngestor: func(cfg config.Config, st model.Store) model.Ingestor {
+			seenCfg = cfg
+			// return the failingIngestor defined later in this file
+			return failingIngestor{}
+		},
+	})
+
+	withWorkingDir(t, tmp, func() {
+		code := app.RunWithContext(context.Background(), []string{"reindex"})
+		if code != 0 {
+			t.Fatalf("unexpected exit code: %d stderr=%s", code, stderr.String())
+		}
+	})
+
+	if seenCfg.MistralAPIKey != "abc123" {
+		t.Fatalf("config not propagated to ingestor: got api key %q", seenCfg.MistralAPIKey)
+	}
+	if seenCfg.MistralBaseURL != "https://example.local/" {
+		t.Fatalf("config not propagated to ingestor: got base url %q", seenCfg.MistralBaseURL)
+	}
+}
+
 func TestUpJSONConnectionEventIncludesTokenSourceForFileAuth(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("MISTRAL_API_KEY", "test-key")

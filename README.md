@@ -176,6 +176,10 @@ Notes:
 
 ### Optional integration test (Mistral API)
 
+Test organization:
+- `tests/` contains black-box/integration-style tests and uses `package tests`.
+- `internal/<pkg>/*_test.go` contains package-level white-box tests and may use unexported symbols.
+
 By default, integration tests are skipped. To run the live Mistral embedding integration test:
 
 ```bash
@@ -185,3 +189,34 @@ RUN_INTEGRATION_TESTS=1 go test -v ./internal/mistral -run Integration
 Required env vars:
 - `MISTRAL_API_KEY`
 - optional `MISTRAL_BASE_URL` (defaults to `https://api.mistral.ai`)
+
+To run the live OCR integration test as well:
+
+```bash
+RUN_INTEGRATION_TESTS=1 \
+MISTRAL_OCR_SAMPLE=/absolute/path/to/sample.pdf \
+go test -v ./tests -run MistralOCR
+```
+
+`MISTRAL_OCR_SAMPLE` can be a local `.pdf`, `.png`, `.jpg`, or `.jpeg` file.
+
+## Ingestion notes
+
+- Incremental hashing:
+  - Document-level: `content_hash` decides whether representation regeneration is needed.
+  - `reindex` mode forces regeneration regardless of hash match.
+- `raw_text` chunking defaults:
+  - code: `200` lines with `30` line overlap
+  - text/md/data/html: `2500` chars with `250` char overlap (`min 200` chars)
+- Span persistence:
+  - raw text chunks persist `lines` spans
+  - OCR chunks persist `page` spans
+- OCR cache:
+  - OCR outputs are cached in `.dir2mcp/cache/ocr/<content-hash>.md`
+  - cache lifecycle supports automatic TTL and max-size pruning when limits are configured
+  - default behavior is unbounded (`ttl=0`, `maxBytes=0`)
+  - currently, cache-policy values are set programmatically by the embedding runtime (no dedicated CLI/config keys are exposed yet)
+  - repeat processing of unchanged OCR input reuses cache before provider calls
+  - manual pruning can still be useful, but automatic pruning reclaims space when TTL or max-size limits are set
+  - to check cache size: `du -sh .dir2mcp/cache/ocr/`
+  - to clear the cache: `rm -rf .dir2mcp/cache/ocr/*` (cache will be rebuilt on next OCR operation)
