@@ -712,7 +712,7 @@ func extractPortFromAddress(addr string) string {
 		return ""
 	}
 	port := addr[i+1:]
-	if strings.IndexAny(port, " \t\r\n/\\") >= 0 {
+	if strings.ContainsAny(port, " \t\r\n/\\") {
 		return ""
 	}
 	if isNumericPort(port) {
