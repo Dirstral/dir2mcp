@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -27,7 +29,11 @@ type Config struct {
 	ResolvedAuthToken string
 	MistralAPIKey     string
 	MistralBaseURL    string
-	AllowedOrigins    []string
+	ElevenLabsAPIKey  string
+	ElevenLabsBaseURL string
+	// AllowedOrigins is always initialized with local defaults and then extended
+	// via env/CLI comma-separated origin lists.
+	AllowedOrigins []string
 }
 
 func Default() Config {
@@ -57,8 +63,10 @@ func Default() Config {
 			`(?i)token\s*[:=]\s*[A-Za-z0-9_.-]{20,}`,
 			`sk_[a-z0-9]{32}|api_[A-Za-z0-9]{32}`,
 		},
-		MistralAPIKey:  "",
-		MistralBaseURL: "",
+		MistralAPIKey:     "",
+		MistralBaseURL:    "",
+		ElevenLabsAPIKey:  "",
+		ElevenLabsBaseURL: "",
 		AllowedOrigins: []string{
 			"http://localhost",
 			"http://127.0.0.1",
@@ -103,6 +111,77 @@ func applyEnvOverrides(cfg *Config, overrideEnv map[string]string) {
 	if baseURL, ok := envLookup("MISTRAL_BASE_URL", overrideEnv); ok && strings.TrimSpace(baseURL) != "" {
 		cfg.MistralBaseURL = baseURL
 	}
+	if apiKey, ok := envLookup("ELEVENLABS_API_KEY", overrideEnv); ok && strings.TrimSpace(apiKey) != "" {
+		cfg.ElevenLabsAPIKey = apiKey
+	}
+	if baseURL, ok := envLookup("ELEVENLABS_BASE_URL", overrideEnv); ok && strings.TrimSpace(baseURL) != "" {
+		cfg.ElevenLabsBaseURL = baseURL
+	}
+	if allowedOrigins, ok := envLookup("DIR2MCP_ALLOWED_ORIGINS", overrideEnv); ok {
+		cfg.AllowedOrigins = MergeAllowedOrigins(cfg.AllowedOrigins, allowedOrigins)
+	}
+}
+
+// MergeAllowedOrigins appends comma-separated origins to an existing allowlist,
+// preserving first-seen entries and deduplicating with case-insensitive host
+// matching.
+func MergeAllowedOrigins(existing []string, csv string) []string {
+	merged := make([]string, 0, len(existing))
+	seen := make(map[string]struct{}, len(existing))
+
+	add := func(origin string) {
+		origin = strings.TrimSpace(origin)
+		if origin == "" {
+			return
+		}
+		key := normalizeOriginKey(origin)
+		if key == "" {
+			return
+		}
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		merged = append(merged, origin)
+	}
+
+	for _, origin := range existing {
+		add(origin)
+	}
+	for _, origin := range strings.Split(csv, ",") {
+		add(origin)
+	}
+	return merged
+}
+
+func normalizeOriginKey(origin string) string {
+	origin = strings.TrimSpace(origin)
+	if origin == "" {
+		return ""
+	}
+
+	if strings.Contains(origin, "://") {
+		parsed, err := url.Parse(origin)
+		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+			return ""
+		}
+		scheme := strings.ToLower(parsed.Scheme)
+		host := strings.ToLower(parsed.Hostname())
+		port := parsed.Port()
+		if port == "" || (scheme == "http" && port == "80") || (scheme == "https" && port == "443") {
+			return scheme + "://" + host
+		}
+		return scheme + "://" + host + ":" + port
+	}
+
+	if host, port, err := net.SplitHostPort(origin); err == nil {
+		return strings.ToLower(host) + ":" + port
+	}
+	if strings.Contains(origin, "/") || strings.Contains(origin, "\\") || strings.ContainsAny(origin, " \t\r\n") {
+		return ""
+	}
+
+	return strings.ToLower(origin)
 }
 
 func loadDotEnvFiles(paths []string, overrideEnv map[string]string) error {
