@@ -136,8 +136,8 @@ func (a *App) runUp() int {
 	bootstrapMetadata(runCtx, st, ret)
 
 	fmt.Printf("State dir: %s\n", cfg.StateDir)
-	fmt.Printf("MCP endpoint (planned): http://%s%s\n", cfg.ListenAddr, cfg.MCPPath)
-	fmt.Println("Skeleton wiring complete; server/indexing logic is not implemented yet.")
+	fmt.Printf("MCP endpoint: http://%s%s\n", cfg.ListenAddr, cfg.MCPPath)
+	fmt.Println("Starting embedding workers and MCP server...")
 
 	go func() {
 		if err := textWorker.Run(runCtx, 2*time.Second, "text"); err != nil && !errors.Is(err, context.Canceled) {
