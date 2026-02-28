@@ -131,7 +131,7 @@ func runUp(cmd *cobra.Command, _ []string) error {
 		fmt.Println("  URL:   ", mcpURL)
 		fmt.Println("  Auth:  ", "Bearer (source="+tokenSource+")")
 		fmt.Println("  Headers:")
-		fmt.Println("    MCP-Protocol-Version: 2025-11-25")
+		fmt.Println("    MCP-Protocol-Version:", cfg.Server.ProtocolVersion)
 		fmt.Println("    Authorization: Bearer <token>")
 		fmt.Println("    MCP-Session-Id: (assigned after initialize response)")
 		fmt.Println()
