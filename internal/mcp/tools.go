@@ -656,7 +656,7 @@ func (s *Server) handleOpenFileTool(ctx context.Context, args map[string]interfa
 		"truncated": truncated,
 	}
 	if strings.TrimSpace(span.Kind) != "" {
-		structured["span"] = span
+		structured["span"] = buildOpenFileSpan(span)
 	}
 
 	return toolCallResult{
@@ -729,6 +729,33 @@ func inferDocType(relPath string) string {
 		return "image"
 	default:
 		return "unknown"
+	}
+}
+
+func buildOpenFileSpan(span model.Span) map[string]interface{} {
+	kind := strings.TrimSpace(span.Kind)
+	switch kind {
+	case "lines":
+		return map[string]interface{}{
+			"kind":       "lines",
+			"start_line": span.StartLine,
+			"end_line":   span.EndLine,
+		}
+	case "page":
+		return map[string]interface{}{
+			"kind": "page",
+			"page": span.Page,
+		}
+	case "time":
+		return map[string]interface{}{
+			"kind":     "time",
+			"start_ms": span.StartMS,
+			"end_ms":   span.EndMS,
+		}
+	default:
+		return map[string]interface{}{
+			"kind": kind,
+		}
 	}
 }
 

@@ -327,6 +327,9 @@ func TestServer_ToolsCall_OpenFile(t *testing.T) {
 	if fr.lastRelPath != "docs/a.md" {
 		t.Fatalf("unexpected rel_path forwarded to retriever: %q", fr.lastRelPath)
 	}
+	if fr.lastMaxChars != 200 {
+		t.Fatalf("unexpected max_chars forwarded to retriever: got %d want %d", fr.lastMaxChars, 200)
+	}
 	if fr.lastSpan.Kind != "lines" || fr.lastSpan.StartLine != 2 || fr.lastSpan.EndLine != 2 {
 		t.Fatalf("unexpected span forwarded to retriever: %#v", fr.lastSpan)
 	}
