@@ -67,7 +67,7 @@
 
 # DAY 1 — Core Pipeline + Working MCP Server
 
-**Goal by end of Day 1:** `dir2mcp up` starts, scans a directory, indexes text+code files, embeds chunks, and serves a live MCP endpoint where an agent (or curl) can call `search`, `open_file`, `list_files`, `stats`. OCR for PDFs should also be working.
+**Goal by end of Day 1:** `dir2mcp up` starts, scans a directory, indexes text+code files, embeds chunks, and serves a live MCP endpoint where an agent (or curl) can call `search`, `ask` (search_only mode), `open_file`, `list_files`, `stats`. OCR for PDFs should also be working. `ask` with full RAG answer generation completes on Day 2.
 
 ---
 
@@ -88,7 +88,7 @@
   internal/mistral/     ← Mistral API client
   ```
 - Define Go interfaces for `Store`, `Index`, `Retriever`, `Ingestor` that each team member's code implements against — **this is critical to enable parallel work from the start**
-- Set up `go.mod` with dependencies: sqlite (`modernc.org/sqlite`), HTTP router (`net/http` or `chi`), HNSW library
+- Set up `go.mod` with dependencies: sqlite (`modernc.org/sqlite`), HTTP router (`net/http` or `chi`), HNSW library, CLI (`spf13/cobra`), prompt wizard (`charmbracelet/huh`), output styling (`charmbracelet/lipgloss`), TTY detection (`golang.org/x/term`), OS keychain (`github.com/zalando/go-keyring`)
 
 **Task 1.2 — MCP Streamable HTTP server core** (~2.5h)
 - Implement the HTTP server at `/mcp` (POST endpoint)
@@ -105,10 +105,12 @@
 - Implement `tools/list` handler
 - Build a tool registry that maps tool names to handlers with full JSON Schema `inputSchema` + `outputSchema`
 - Register all Day 1 tools as stubs initially (return partial/empty results) so the server is valid and testable immediately
+- **Must register `dir2mcp.ask` on Day 1** — initially backed by search-only mode (no LLM call); full RAG answer generation added Day 2
 
 **Task 1.4 — `dir2mcp.stats` tool** (~1h)
 - Read `corpus.json` + live indexing state (shared atomic counters from ingest goroutine)
 - Return full stats schema: root, state_dir, protocol_version, indexing progress, models config
+- `indexing` object must include `mode` field (`"incremental"` or `"full"`) — required by SPEC §15.6
 
 **Task 1.5 — `dir2mcp.list_files` tool** (~1h)
 - Query SQLite `documents` table
@@ -116,13 +118,18 @@
 - Return files with `rel_path`, `doc_type`, `size_bytes`, `mtime_unix`, `status`, `deleted`
 
 **Task 1.6 — CLI `up` command wiring** (~1h)
-- Wire `dir2mcp up` to: init config → init state dir → load/create SQLite → start MCP server → spawn ingest goroutine → print connection block to stdout
+- Wire `dir2mcp up` to: init config → preflight checks → init state dir → load/create SQLite → start MCP server → spawn ingest goroutine → print connection block to stdout
 - Token generation and writing to `secret.token` (chmod 0600)
-- Write `connection.json` to state dir
+- Write `connection.json` to state dir — include a `session` object: `{ "uses_mcp_session_id": true, "header_name": "MCP-Session-Id", "assigned_on_initialize": true }`
+- If `--auth file:<path>`, populate `connection.json` and NDJSON `connection.data` with `"token_source": "file"` and `"token_file": "<path>"`
 - Print human-readable connection block (URL, auth header, token location)
+- New global flag: `--non-interactive` (disables prompts; exits code 2 with actionable instructions on missing config)
+- New `up` flags: `--read-only`, `--x402-resource-base-url <url>`
+- Exit codes: 0=success, 1=generic, 2=config invalid, 3=root inaccessible, 4=bind failure, 5=index load failure, 6=ingestion fatal error
 
 **Task 1.7 — NDJSON structured output mode** (~30min)
 - `--json` flag: emit NDJSON events for `index_loaded`, `server_started`, `connection`, `scan_progress`, `embed_progress`, `file_error`
+- `connection` event data must include `token_source` field; include `token_file` when `--auth file:` is used
 
 ---
 
@@ -146,8 +153,9 @@ Write Go functions for: insert/upsert document, insert representation, insert ch
 - Recursive walk from root directory
 - Default ignore list: `.git/`, `node_modules/`, `dist/`, `build/`, `.venv/`, `.dir2mcp/`
 - Optional `.gitignore` parsing (read `.gitignore` and apply patterns)
-- Safety exclusions: `**/.env`, `**/*.pem`, `**/*.key`, `**/id_rsa`, `**/*credentials*`
-- Max file size check (configurable, default 20MB)
+- Path-based safety exclusions: `**/.env`, `**/*.pem`, `**/*.key`, `**/id_rsa`, `**/*credentials*` — configurable via `security.path_excludes`
+- **Content-based secret pattern detection** (regex scan of file contents, default on): AWS key IDs (`AKIA[0-9A-Z]{16}`), AWS secret heuristic, JWTs (context-anchored), generic bearer tokens (`(?i)token\s*[:=]\s*[A-Za-z0-9_.-]{20,}`), common API key formats (`sk_[a-z0-9]{32}`, `api_[A-Za-z0-9]{32}`) — patterns configurable via `security.secret_patterns`; files matching are excluded from indexing and from `open_file` responses
+- Max file size check (configurable per doc_type, default 20MB)
 - Type classification: extension lookup + MIME sniff + binary heuristics → classify to `code|md|text|data|html|pdf|image|audio|archive|binary_ignored`
 - Symlink policy: default no-follow
 
@@ -219,6 +227,7 @@ Write Go functions for: insert/upsert document, insert representation, insert ch
 **Task 1.17 — `dir2mcp.open_file` tool** (~1h)
 - Accept: `rel_path`, optional `start_line`/`end_line`, `page`, `start_ms`/`end_ms`, `max_chars`
 - Validate `rel_path` resolves under root (PATH_OUTSIDE_ROOT check — no path traversal)
+- **Before returning any content**, run `rel_path` AND extracted content through the exclusion engine (path_excludes + secret_patterns) — return `FORBIDDEN` error (not the content) if a match is found; this prevents tool-level bypass of ingestion filters
 - If `page`: look up OCR representation → return page text
 - If `start_ms/end_ms`: look up transcript → slice
 - If `start_line/end_line`: read file lines directly
@@ -232,17 +241,21 @@ Write Go functions for: insert/upsert document, insert representation, insert ch
 ### Morning (9am–1pm)
 
 **Task 1.18 — Config loading (YAML + env + flags)** (~1.5h)
-- Define `Config` struct covering all fields (server, mistral, rag, ingest, chunking, stt, x402, security)
-- Parsing order: defaults → `.dir2mcp.yaml` → env vars (e.g., `MISTRAL_API_KEY`) → CLI flags
-- `dir2mcp config init`: write default `.dir2mcp.yaml` to root
+- Define `Config` struct covering all fields (server, mistral, rag, ingest, chunking, stt, x402, security, secrets)
+- **Correct precedence order: CLI flags → env vars → `.dir2mcp.yaml` → defaults** (flags win, not lose)
+- Secret source precedence (for API keys/tokens): env var → OS keychain → config file reference → interactive session-only
+- New top-level `secrets:` config block: `provider: auto|keychain|file|env|session`, keychain service/account, file path+mode
+- New top-level `security:` config block: `auth` (mode, token_file, token_env), `allowed_origins`, `path_excludes`, `secret_patterns`
+- Config snapshot (`.dir2mcp.yaml.snapshot`) MUST record secret source metadata and MUST NOT contain plaintext secrets
+- `dir2mcp config init`: **interactive TTY wizard** using `charmbracelet/huh`; prompts masked for secret inputs; fast path skips prompts if all required config already present; supports `--non-interactive` (exits code 2 with actionable instructions)
 - `dir2mcp config print`: print effective resolved config as YAML
 - Validate config (missing API key, invalid fields) → exit code 2
 
 **Task 1.19 — State directory + file outputs** (~1h)
 - On `dir2mcp up`: create `.dir2mcp/` with subdirs (`cache/ocr`, `cache/transcribe`, `cache/annotations`, `payments/`, `locks/`)
 - Write `secret.token` (generate random 32-byte hex token, chmod 0600)
-- Write `connection.json` (URL, headers, session info)
-- Write `.dir2mcp.yaml.snapshot` (resolved config snapshot)
+- Write `connection.json` with full schema including `session: { uses_mcp_session_id: true, header_name: "MCP-Session-Id", assigned_on_initialize: true }`; if `--auth file:` include `token_source: "file"` + `token_file: "<path>"`
+- Write `.dir2mcp.yaml.snapshot` (resolved config snapshot — no plaintext secrets, only source metadata)
 - Lock file: `locks/index.lock` to prevent concurrent `up` instances
 
 **Task 1.20 — CLI progress output** (~1h)
@@ -289,15 +302,16 @@ Write Go functions for: insert/upsert document, insert representation, insert ch
 **Task 2.1 — x402 HTTP middleware** (~2.5h)
 - Read config `x402.mode` (off/on/required)
 - If `on`/`required`: intercept `tools/call` requests at HTTP layer before MCP dispatch
-- Return HTTP 402 with payment requirements JSON body:
-  ```json
-  { "scheme": "exact", "network": "eip155:8453", "price": "0.001", "resource": "<url>", "pay_to": "<addr>" }
-  ```
-- Parse `X-Payment` header on retry requests
-- POST payment payload to `x402.facilitator_url` for verification
+- Use **x402 v2 header semantics** (not JSON body):
+  - Return HTTP 402 with `PAYMENT-REQUIRED` header containing machine-readable payment requirements (network MUST use CAIP-2 format, e.g. `eip155:8453`)
+  - Client retries with `PAYMENT-SIGNATURE` header containing payment proof
+  - On successful payment, include `PAYMENT-RESPONSE` header with facilitator settlement metadata
+- POST payment payload to `x402.facilitator_url` endpoints (`/v2/x402/verify` then `/v2/x402/settle`) for verification and settlement — dir2mcp remains non-custodial
+- Keep `initialize` and `tools/list` ungated; only gate `tools/call`
 - On success: continue to MCP handler; on failure: return 402 with failure reason
 - Emit NDJSON events: `payment_required`, `payment_verified`, `payment_settled`, `payment_failed`
 - Write settlement outcome to `.dir2mcp/payments/settlement.log`
+- Optional: if `x402.bazaar.enabled`, emit discovery metadata via x402 extension metadata to facilitator discovery API (`GET {facilitator_url}/discovery/resources`)
 
 **Task 2.2 — Rate limiting middleware** (~1h)
 - When `--public` is set: apply token bucket rate limiter (requests/minute + burst)
@@ -367,7 +381,15 @@ Write Go functions for: insert/upsert document, insert representation, insert ch
 
 ### Morning (9am–1pm)
 
-**Task 2.10 — `dir2mcp.annotate` tool** (~2h)
+**Task 2.10 — `dir2mcp.transcribe` MCP tool** (~1h)
+- Expose `dir2mcp.transcribe` as a standalone MCP tool (SPEC §15.7 — listed in "recommended" tools)
+- Accept: `rel_path`, `language`, `timestamps` (default true), `retranscribe` (default false)
+- Check if transcript already exists in SQLite; if `retranscribe=false` and transcript exists, return cached result
+- Otherwise call the STT pipeline (Tia's Task 2.5/2.6) and wait for completion
+- Return: `rel_path`, `provider`, `model`, `indexed`, `segments[]` (start_ms, end_ms, text)
+- This is separate from `transcribe_and_ask` — it only transcribes, does not run ask
+
+**Task 2.11 — `dir2mcp.annotate` tool** (~2h)
 - Accept: `rel_path`, `schema_json` (user-provided JSON Schema), `index_flattened_text`
 - Read file content (or OCR/transcript if already indexed)
 - POST to Mistral chat: "Extract structured data matching this schema from the document"
@@ -377,31 +399,31 @@ Write Go functions for: insert/upsert document, insert representation, insert ch
 - Cache to `.dir2mcp/cache/annotations/`
 - Return: `{rel_path, stored, flattened_indexed, annotation_json, annotation_text_preview}`
 
-**Task 2.11 — `dir2mcp.transcribe_and_ask` tool** (~1.5h)
+**Task 2.12 — `dir2mcp.transcribe_and_ask` tool** (~1.5h)
 - Accept: `rel_path`, `question`, `k`
-- Check if transcript exists in SQLite for `rel_path` → if not, call transcription pipeline
+- Check if transcript exists in SQLite for `rel_path` → if not, call transcription pipeline (reuse logic from Task 2.10)
 - Run `ask` with transcript chunks filtered to `rel_path`
 - Return `ask` output schema + `{transcript_provider, transcript_model, transcribed: bool}`
 
 ### Afternoon (1pm–6pm)
 
-**Task 2.12 — `both` index fusion quality** (~1h)
+**Task 2.13 — `both` index fusion quality** (~1h)
 - Test `index=both` with queries that span code + text
 - Tune per-index score normalization (min-max normalization per index before merge)
 - Ensure no duplicate chunks in merged results
 
-**Task 2.13 — RAG quality tuning** (~1h)
+**Task 2.14 — RAG quality tuning** (~1h)
 - Test RAG `ask` responses with the demo corpus
 - Tune system prompt (refine for citation accuracy and answer quality)
 - Test citation accuracy — ensure cited spans actually contain the relevant content
 - Confirm `oversample_factor=5` is sufficient for typical deletion rates
 
-**Task 2.14 — `dir2mcp reindex` + corpus.json writer** (~1h)
+**Task 2.15 — `dir2mcp reindex` + corpus.json writer** (~1h)
 - `dir2mcp reindex`: force full rebuild (clear `content_hash` in SQLite to trigger re-indexing of all docs)
 - Periodic `corpus.json` writer goroutine (update every 5 seconds during indexing)
 - Ensure `corpus.json` has correct `code_ratio` calculation from `doc_counts`
 
-**Task 2.15 — Performance test with larger corpus** (~1h)
+**Task 2.16 — Performance test with larger corpus** (~1h)
 - Test with a corpus of 200+ files
 - Ensure embedding batching doesn't overwhelm Mistral rate limits
 - Ensure SQLite WAL mode is enabled for concurrent read/write
@@ -412,20 +434,20 @@ Write Go functions for: insert/upsert document, insert representation, insert ch
 
 ### Morning (9am–1pm)
 
-**Task 2.16 — Web UI: search + citations display** (~2h)
+**Task 2.17 — Web UI: search + citations display** (~2h)
 - Search page: text input, submit → call `/api/mcp` proxy → parse results
 - Display hits as cards: filename badge, doc_type color-coded, snippet text, citation reference (`path:L12-L25` or `path#p=3` or `path@t=1:23-1:53`)
 - Click citation → call `open_file` → show source content in a side panel or modal
 - Corpus stats page: doc_type breakdown chart, live indexing progress bar (poll `stats` every 2s)
 
-**Task 2.17 — Web UI: ask interface** (~1.5h)
+**Task 2.18 — Web UI: ask interface** (~1.5h)
 - Ask page: question text area → call `dir2mcp.ask` → show answer with inline citations highlighted
 - Collapsible "Sources" section with all hit snippets
 - Show `indexing_complete: false` banner if indexing is still running
 
 ### Afternoon (1pm–6pm)
 
-**Task 2.18 — Demo corpus setup** (~1h)
+**Task 2.19 — Demo corpus setup** (~1h)
 - Curate a compelling demo corpus showing all modalities:
   - A technical PDF (research paper or documentation)
   - An audio file (meeting recording or lecture clip)
@@ -433,7 +455,7 @@ Write Go functions for: insert/upsert document, insert representation, insert ch
   - Some structured data or markdown notes
 - Run full index, verify all doc types indexed correctly
 
-**Task 2.19 — Demo script + talking points** (~1h)
+**Task 2.20 — Demo script + talking points** (~1h)
 - Write a step-by-step demo script (target 3–5 minutes):
   1. `dir2mcp up` on demo corpus → show live progress
   2. Connect via web UI → show corpus stats
@@ -444,12 +466,12 @@ Write Go functions for: insert/upsert document, insert representation, insert ch
   7. Enable x402 → show HTTP 402 payment required flow
 - Rehearse and time the demo
 
-**Task 2.20 — README and quick-start docs** (~1h)
+**Task 2.21 — README and quick-start docs** (~1h)
 - Update `README.md` with: install instructions, quick-start example, env vars required (`MISTRAL_API_KEY`, optional `ELEVENLABS_API_KEY`)
 - Add example config YAML snippet
 - Screenshot or GIF of web UI
 
-**Task 2.21 — Final integration smoke test** (~1h)
+**Task 2.22 — Final integration smoke test** (~1h)
 - Full clean-room test: fresh directory, set `MISTRAL_API_KEY`, run `dir2mcp up ./demo-corpus`
 - Verify every tool works via MCP client (or curl)
 - Verify web UI connects and displays correctly
@@ -460,10 +482,10 @@ Write Go functions for: insert/upsert document, insert representation, insert ch
 
 | | Ali | Ark | Tia | Samet |
 |---|---|---|---|---|
-| **Day 1 AM** | Go scaffold + shared interfaces + MCP server core (JSON-RPC, sessions, auth) | Mistral embed client + HNSW index wrapper | SQLite schema + file discovery + type classification | Config loading + state dir + secret.token / connection.json |
-| **Day 1 PM** | `tools/list`, `stats`, `list_files`, `up` command wiring + NDJSON mode | Embedding pipeline + `search` tool + `open_file` tool | `raw_text` rep + chunking + incremental hash logic + Mistral OCR | CLI progress output + `status`/`ask` commands + Web UI scaffold |
-| **Day 2 AM** | x402 middleware + rate limiting | `annotate` tool + `transcribe_and_ask` tool | Mistral STT + ElevenLabs STT (both normalized) | Web UI: search + citations display |
-| **Day 2 PM** | ElevenLabs TTS + `ask_audio` + integration tests + binary build | Index fusion tuning + RAG quality + `reindex` + perf test | `ask` RAG generation + archive ingestion + bug fixes | Web UI: ask interface + demo corpus + demo script + README |
+| **Day 1 AM** | Go scaffold + shared interfaces + MCP server core (JSON-RPC, sessions, auth) | Mistral embed client + HNSW index wrapper | SQLite schema + file discovery + type classification (incl. content-based secret patterns) | Config loading (correct precedence: flags→env→yaml→defaults) + secrets/keychain block + interactive wizard |
+| **Day 1 PM** | `tools/list`, `stats` (with `mode` field), `list_files`, `ask` stub (search_only), `up` wiring (exit codes, new flags, extended connection.json) + NDJSON mode | Embedding pipeline + `search` tool + `open_file` tool (with exclusion engine enforcement) | `raw_text` rep + chunking + incremental hash logic + Mistral OCR | CLI progress output + `status`/`ask` commands + Web UI scaffold |
+| **Day 2 AM** | x402 v2 middleware (PAYMENT-REQUIRED/SIGNATURE/RESPONSE headers) + rate limiting | `transcribe` MCP tool + `annotate` tool + `transcribe_and_ask` tool | Mistral STT + ElevenLabs STT (both normalized) | Web UI: search + citations display |
+| **Day 2 PM** | ElevenLabs TTS + `ask_audio` + integration tests + binary build | Index fusion tuning + RAG quality + `reindex` + perf test | `ask` RAG generation (full LLM call) + archive ingestion + bug fixes | Web UI: ask interface + demo corpus + demo script + README |
 
 ---
 
@@ -474,9 +496,10 @@ Write Go functions for: insert/upsert document, insert representation, insert ch
 3. **Mistral embed client (Ark, Day 1 AM)** — blocks the embedding pipeline
 4. **HNSW wrapper (Ark, Day 1 AM)** — blocks the `search` tool
 5. **MCP server + tool dispatch (Ali, Day 1 PM)** — blocks any tool being actually callable
-6. **Config (Samet, Day 1 AM)** — blocks everyone needing API keys and model name constants
-7. **`search` tool (Ark, Day 1 PM)** — blocks `ask` tool (Day 2, needs retrieval to build RAG context)
-8. **STT integration (Tia, Day 2 AM)** — blocks `transcribe_and_ask` tool (Ark, Day 2 AM)
+6. **Config (Samet, Day 1 AM)** — blocks everyone needing API keys and model name constants; must use correct precedence (flags→env→yaml→defaults)
+7. **`search` tool (Ark, Day 1 PM)** — blocks `ask` stub on Day 1 (search_only) and full RAG `ask` on Day 2
+8. **Exclusion engine (Tia, Day 1 AM)** — blocks `open_file` (Ark, Day 1 PM) which must call it before returning content
+9. **STT integration (Tia, Day 2 AM)** — blocks `transcribe` tool (Ark, Day 2 AM) and `transcribe_and_ask` tool (Ark, Day 2 AM)
 
 ---
 
@@ -488,5 +511,10 @@ Write Go functions for: insert/upsert document, insert representation, insert ch
 | HTTP router | `chi` or standard `net/http` + mux | Ali |
 | SQLite driver | `modernc.org/sqlite` — pure Go, no CGo | Tia |
 | File hashing | `crypto/sha256` (standard lib) | Tia |
+| CLI framework | `spf13/cobra` (SPEC §20 recommendation) | Samet |
+| Prompt wizard | `charmbracelet/huh` for interactive config init | Samet |
+| Output styling | `charmbracelet/lipgloss` | Samet |
+| TTY detection | `golang.org/x/term` | Samet |
+| OS keychain | `github.com/zalando/go-keyring` | Samet |
 | Frontend stack | Next.js + Tailwind | Samet |
 | Embedding batch size | 32 chunks per API call (tune later) | Ark |
