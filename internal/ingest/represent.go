@@ -66,6 +66,14 @@ func NewRepresentationGenerator(store model.RepresentationStore) *Representation
 // - Normalize to UTF-8 with \n line endings
 // - Route code → index_kind=code, others → index_kind=text
 func (rg *RepresentationGenerator) GenerateRawText(ctx context.Context, doc model.Document, absPath string) error {
+	info, err := os.Stat(absPath)
+	if err != nil {
+		return fmt.Errorf("stat file %s: %w", doc.RelPath, err)
+	}
+	if info.Size() > defaultMaxFileSizeBytes {
+		return fmt.Errorf("file %s too large (%d bytes); limit %d", doc.RelPath, info.Size(), defaultMaxFileSizeBytes)
+	}
+
 	// Read file content first so we can delegate to the new helper which
 	// accepts pre-loaded bytes.  This keeps the original behaviour intact
 	// while allowing callers that already have the content to avoid the I/O.
@@ -104,42 +112,45 @@ func (rg *RepresentationGenerator) GenerateRawTextFromContent(ctx context.Contex
 		Deleted:     false,
 	}
 
-	// Store representation
-	repID, err := rg.store.UpsertRepresentation(ctx, rep)
-	if err != nil {
-		return fmt.Errorf("upsert representation: %w", err)
-	}
-
 	segments := chunkRawTextByDocType(doc.DocType, string(normalizedContent))
-	if err := rg.upsertChunksForRepresentation(ctx, repID, indexKindForDocType(doc.DocType), segments); err != nil {
-		return err
-	}
-
-	return nil
+	return rg.store.WithTx(ctx, func(tx model.RepresentationStore) error {
+		repID, err := tx.UpsertRepresentation(ctx, rep)
+		if err != nil {
+			return fmt.Errorf("upsert representation: %w", err)
+		}
+		if err := rg.upsertChunksForRepresentationWithStore(ctx, tx, repID, indexKindForDocType(doc.DocType), segments); err != nil {
+			return err
+		}
+		return nil
+	})
 }
 func (rg *RepresentationGenerator) upsertChunksForRepresentation(ctx context.Context, repID int64, indexKind string, segments []chunkSegment) error {
 	// wrap the entire operation in a transaction so we don't end up with a
 	// partial set of chunks if an insertion fails halfway through.  The store
 	// implementation handles beginning/committing/rolling back the tx.
 	return rg.store.WithTx(ctx, func(tx model.RepresentationStore) error {
-		for i, seg := range segments {
-			chunk := model.Chunk{
-				RepID:           repID,
-				Ordinal:         i,
-				Text:            seg.Text,
-				TextHash:        computeRepHash([]byte(seg.Text)),
-				IndexKind:       indexKind,
-				EmbeddingStatus: "pending",
-			}
-			if _, err := tx.InsertChunkWithSpans(ctx, chunk, []model.Span{seg.Span}); err != nil {
-				return fmt.Errorf("insert chunk %d: %w", i, err)
-			}
-		}
-		if err := tx.SoftDeleteChunksFromOrdinal(ctx, repID, len(segments)); err != nil {
-			return fmt.Errorf("soft delete stale chunks: %w", err)
-		}
-		return nil
+		return rg.upsertChunksForRepresentationWithStore(ctx, tx, repID, indexKind, segments)
 	})
+}
+
+func (rg *RepresentationGenerator) upsertChunksForRepresentationWithStore(ctx context.Context, st model.RepresentationStore, repID int64, indexKind string, segments []chunkSegment) error {
+	for i, seg := range segments {
+		chunk := model.Chunk{
+			RepID:           repID,
+			Ordinal:         i,
+			Text:            seg.Text,
+			TextHash:        computeRepHash([]byte(seg.Text)),
+			IndexKind:       indexKind,
+			EmbeddingStatus: "pending",
+		}
+		if _, err := st.InsertChunkWithSpans(ctx, chunk, []model.Span{seg.Span}); err != nil {
+			return fmt.Errorf("insert chunk %d: %w", i, err)
+		}
+	}
+	if err := st.SoftDeleteChunksFromOrdinal(ctx, repID, len(segments)); err != nil {
+		return fmt.Errorf("soft delete stale chunks: %w", err)
+	}
+	return nil
 }
 
 // normalizeUTF8 ensures content is valid UTF-8 and normalizes line endings to \n
