@@ -1058,13 +1058,32 @@ func writeCorpusSnapshot(ctx context.Context, stateDir string, st model.Store, i
 	path := filepath.Join(stateDir, "corpus.json")
 	// Use a per-write temporary file so concurrent snapshot writers don't
 	// stomp each other's tmp file and trigger spurious ENOENT on rename.
-	tmp := fmt.Sprintf("%s.tmp.%d", path, time.Now().UnixNano())
+	tmpFile, err := os.CreateTemp(stateDir, "corpus.json.tmp.")
+	if err != nil {
+		return fmt.Errorf("create temp corpus snapshot: %w", err)
+	}
+	tmp := tmpFile.Name()
+
 	raw, err := json.MarshalIndent(snapshot, "", "  ")
 	if err != nil {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmp)
 		return fmt.Errorf("marshal corpus snapshot: %w", err)
 	}
-	if err := os.WriteFile(tmp, raw, 0o644); err != nil {
+
+	if _, err := tmpFile.Write(raw); err != nil {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmp)
 		return fmt.Errorf("write temp corpus snapshot: %w", err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("close temp corpus snapshot: %w", err)
+	}
+	// Match previous file mode (0o644) used with os.WriteFile.
+	if err := os.Chmod(tmp, 0o644); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("chmod temp corpus snapshot: %w", err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
 		_ = os.Remove(tmp)
