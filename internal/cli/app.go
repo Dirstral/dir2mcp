@@ -74,6 +74,10 @@ type embeddedChunkLister interface {
 	ListEmbeddedChunkMetadata(ctx context.Context, indexKind string, limit, offset int) ([]model.ChunkTask, error)
 }
 
+type activeDocCountStore interface {
+	ActiveDocCounts(ctx context.Context) (map[string]int64, int64, error)
+}
+
 type RuntimeHooks struct {
 	NewIngestor func(config.Config, model.Store) model.Ingestor
 }
@@ -362,6 +366,9 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	if preloadedChunks > 0 {
 		indexingState.AddEmbeddedOK(int64(preloadedChunks))
 	}
+	ret.SetIndexingCompleteProvider(func() bool {
+		return !indexingState.Snapshot().Running
+	})
 
 	serverOptions := []mcp.ServerOption{
 		mcp.WithStore(st),
@@ -413,7 +420,7 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 		}
 	}()
 
-	embedErrCh := make(chan error, 2)
+	embedErrCh := make(chan error, 4)
 	if !opts.readOnly {
 		startEmbeddingWorkers(runCtx, st, textIx, codeIx, client, ret, indexingState, embedErrCh)
 	}
@@ -611,10 +618,7 @@ func startEmbeddingWorkers(
 			if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return
 			}
-			select {
-			case errCh <- fmt.Errorf("%s worker: %w", workerKind, err):
-			default:
-			}
+			errCh <- fmt.Errorf("%s worker: %w", workerKind, err)
 		}()
 	}
 
@@ -1132,6 +1136,15 @@ func buildCorpusSnapshot(ctx context.Context, st model.Store, indexingState *app
 func collectActiveDocCounts(ctx context.Context, st model.Store) (map[string]int64, int64, error) {
 	if st == nil {
 		return map[string]int64{}, 0, nil
+	}
+	if agg, ok := st.(activeDocCountStore); ok {
+		counts, total, err := agg.ActiveDocCounts(ctx)
+		if err == nil {
+			return counts, total, nil
+		}
+		if !errors.Is(err, model.ErrNotImplemented) {
+			return nil, 0, fmt.Errorf("active doc counts: %w", err)
+		}
 	}
 
 	const pageSize = 500

@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"math"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"sync"
@@ -73,8 +75,9 @@ func TestRunCorpusWriterWithInterval_UpdatesSnapshotWhileRunning(t *testing.T) {
 	if initial.TotalDocs != 2 {
 		t.Fatalf("expected initial total_docs=2, got %d", initial.TotalDocs)
 	}
-	if initial.CodeRatio < 0.49 || initial.CodeRatio > 0.51 {
-		t.Fatalf("expected initial code_ratio ~0.5, got %f", initial.CodeRatio)
+	eps := 1e-3
+	if math.Abs(initial.CodeRatio-0.5) > eps {
+		t.Fatalf("expected initial code_ratio around 0.5 (±%f), got %f", eps, initial.CodeRatio)
 	}
 
 	store.setDocs([]model.Document{
@@ -92,8 +95,8 @@ func TestRunCorpusWriterWithInterval_UpdatesSnapshotWhileRunning(t *testing.T) {
 		return updated.TotalDocs == 3 && updated.DocCounts["md"] == 2
 	})
 	updated := readCorpusFile(t, corpusPath)
-	if updated.CodeRatio < 0.32 || updated.CodeRatio > 0.34 {
-		t.Fatalf("expected updated code_ratio ~0.3333, got %f", updated.CodeRatio)
+	if math.Abs(updated.CodeRatio-0.3333) > eps {
+		t.Fatalf("expected updated code_ratio around 0.3333 (±%f), got %f", eps, updated.CodeRatio)
 	}
 }
 
@@ -142,12 +145,15 @@ func TestWriteCorpusSnapshot_ConcurrentWriters(t *testing.T) {
 
 func waitForCondition(t *testing.T, timeout time.Duration, fn func() bool) {
 	t.Helper()
+	if fn() {
+		return
+	}
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		if fn() {
 			return
 		}
-		time.Sleep(15 * time.Millisecond)
+		time.Sleep(time.Duration(10+rand.Intn(11)) * time.Millisecond)
 	}
 	t.Fatalf("condition not met within %s", timeout)
 }

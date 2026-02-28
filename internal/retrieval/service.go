@@ -75,6 +75,7 @@ type Service struct {
 	embedder            model.Embedder
 	gen                 model.Generator
 	logger              *log.Logger
+	indexingStateFn     func() bool
 	textModel           string
 	codeModel           string
 	overfetchMultiplier int
@@ -130,6 +131,14 @@ func (s *Service) SetLogger(l *log.Logger) {
 		return
 	}
 	s.logger = l
+}
+
+// SetIndexingCompleteProvider sets a callback used to populate AskResult.IndexingComplete.
+// The callback should return true when indexing is complete.
+func (s *Service) SetIndexingCompleteProvider(fn func() bool) {
+	s.metaMu.Lock()
+	defer s.metaMu.Unlock()
+	s.indexingStateFn = fn
 }
 
 func (s *Service) logf(format string, args ...interface{}) {
@@ -352,12 +361,20 @@ func (s *Service) Ask(ctx context.Context, question string, query model.SearchQu
 	}
 	answer = ensureAnswerAttributions(answer, citations)
 
+	indexingComplete := true
+	s.metaMu.RLock()
+	indexingFn := s.indexingStateFn
+	s.metaMu.RUnlock()
+	if indexingFn != nil {
+		indexingComplete = indexingFn()
+	}
+
 	return model.AskResult{
 		Question:         question,
 		Answer:           answer,
 		Citations:        citations,
 		Hits:             hits,
-		IndexingComplete: true,
+		IndexingComplete: indexingComplete,
 	}, nil
 }
 

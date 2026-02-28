@@ -570,7 +570,6 @@ func (s *Server) handleAskTool(ctx context.Context, args map[string]interface{})
 	}
 
 	askResult, askErr := s.retriever.Ask(ctx, question, model.SearchQuery{
-		Query:      question,
 		K:          k,
 		Index:      indexName,
 		PathPrefix: pathPrefix,
@@ -580,11 +579,13 @@ func (s *Server) handleAskTool(ctx context.Context, args map[string]interface{})
 	if askErr != nil {
 		code := "INTERNAL_ERROR"
 		message := "internal server error"
+		retryable := true
 		if errors.Is(askErr, model.ErrIndexNotReady) || errors.Is(askErr, model.ErrIndexNotConfigured) {
 			code = "INDEX_NOT_READY"
 			message = "index not ready"
+			retryable = false
 		}
-		return toolCallResult{}, &toolExecutionError{Code: code, Message: message, Retryable: true}
+		return toolCallResult{}, &toolExecutionError{Code: code, Message: message, Retryable: retryable}
 	}
 	if mode == "search_only" {
 		askResult.Answer = ""
