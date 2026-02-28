@@ -250,6 +250,42 @@ func TestServer_ToolsCall_Search_NonPositiveK(t *testing.T) {
 	}
 }
 
+func TestServer_ToolsCall_MissingParams(t *testing.T) {
+	cfg := config.Default()
+	cfg.AuthMode = "none"
+	srv := NewServer(cfg, &fakeRetriever{})
+	sessionID := initializeSession(t, srv)
+
+	// omit params entirely
+	reqBody := `{"jsonrpc":"2.0","id":"req-4","method":"tools/call"}`
+	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("MCP-Session-Id", sessionID)
+	rr := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rr, req)
+
+	var resp map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	errObj, ok := resp["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected error object, got: %#v", resp["error"])
+	}
+	msg, _ := errObj["message"].(string)
+	if msg != "params is required" {
+		t.Fatalf("expected 'params is required' error, got %q", msg)
+	}
+	data, ok := errObj["data"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected error data object, got: %#v", errObj["data"])
+	}
+	if data["code"] != "MISSING_FIELD" {
+		t.Fatalf("expected MISSING_FIELD code, got %v", data["code"])
+	}
+}
+
 func initializeSession(t *testing.T, srv *Server) string {
 	t.Helper()
 	reqBody := `{"jsonrpc":"2.0","id":"init-1","method":"initialize","params":{}}`
