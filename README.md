@@ -4,7 +4,33 @@
 
 ## Current status
 
-This repository is currently spec-first. The core implementation is planned as a Go single binary.
+This repository is currently spec-first. The core implementation is a Go single binary.
+
+## Build and run
+
+**1. Install Go** (if needed, macOS):
+
+```bash
+brew install go
+```
+
+Or download from [go.dev/dl](https://go.dev/dl/).
+
+**2. Build the binary:**
+
+```bash
+cd /path/to/dir2mcp
+make build
+```
+
+Or: `go build -o dir2mcp ./cmd/dir2mcp/`
+
+**3. Run:**
+
+```bash
+export MISTRAL_API_KEY=your_key_here
+./dir2mcp up
+```
 
 ## Documentation
 
