@@ -673,12 +673,19 @@ func buildListWhereClause(prefix, glob string) string {
 
 func normalizeRelPath(relPath string) (string, error) {
 	normalized := strings.TrimSpace(relPath)
-	normalized = strings.TrimPrefix(normalized, "./")
-	normalized = filepath.ToSlash(filepath.Clean(normalized))
-	normalized = strings.TrimPrefix(normalized, "/")
-	if normalized == "" || normalized == "." {
-		return "", errors.New("rel_path must be non-empty")
+	if filepath.IsAbs(normalized) {
+		return "", errors.New("rel_path must be a non-empty relative path without parent-traversal or absolute paths")
 	}
+
+	normalized = filepath.ToSlash(filepath.Clean(normalized))
+	if normalized == "" ||
+		normalized == "." ||
+		normalized == ".." ||
+		strings.HasPrefix(normalized, "../") ||
+		strings.Contains(normalized, "/..") {
+		return "", errors.New("rel_path must be a non-empty relative path without parent-traversal or absolute paths")
+	}
+
 	return normalized, nil
 }
 

@@ -136,6 +136,50 @@ func TestSQLiteStoreDocumentCRUDAndListFilters(t *testing.T) {
 	}
 }
 
+func TestSQLiteStoreRejectsAbsoluteAndTraversalRelPaths(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	if err := st.Init(ctx); err != nil {
+		t.Fatalf("Init failed: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = st.Close()
+	})
+
+	absolutePath := filepath.Join(t.TempDir(), "escape.txt")
+	invalidPaths := []string{
+		absolutePath,
+		"../escape.txt",
+		"..",
+		"a/../../b.txt",
+	}
+
+	for _, relPath := range invalidPaths {
+		err := st.UpsertDocument(ctx, model.Document{
+			RelPath:     relPath,
+			DocType:     "text",
+			SizeBytes:   12,
+			MTimeUnix:   1700000999,
+			ContentHash: "invalid",
+			Status:      "ok",
+		})
+		if err == nil {
+			t.Fatalf("expected invalid rel_path to fail: %q", relPath)
+		}
+	}
+
+	if err := st.UpsertDocument(ctx, model.Document{
+		RelPath:     "safe/path.txt",
+		DocType:     "text",
+		SizeBytes:   12,
+		MTimeUnix:   1700001000,
+		ContentHash: "valid",
+		Status:      "ok",
+	}); err != nil {
+		t.Fatalf("expected valid rel_path to succeed: %v", err)
+	}
+}
+
 func TestSQLiteStoreRepresentationChunkSpanAndDeleteCascade(t *testing.T) {
 	ctx := context.Background()
 	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
