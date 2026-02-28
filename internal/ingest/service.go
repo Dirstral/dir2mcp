@@ -400,6 +400,7 @@ func (s *Service) processDocumentFromContent(ctx context.Context, relPath string
 	doc := model.Document{
 		RelPath:     relPath,
 		DocType:     docType,
+		SourceType:  "archive_member",
 		SizeBytes:   int64(len(content)),
 		MTimeUnix:   mtimeUnix,
 		ContentHash: computeContentHash(content),
