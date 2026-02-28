@@ -12,18 +12,50 @@ type fakeEmbedder struct {
 	vectorsByModel map[string][]float32
 }
 
-func (e *fakeEmbedder) Embed(_ context.Context, model string, _ []string) ([][]float32, error) {
-	if vec, ok := e.vectorsByModel[model]; ok {
-		return [][]float32{vec}, nil
+// fakeIndex allows inspection of the 'k' value passed to Search.
+type fakeIndex struct {
+	lastK int
+}
+
+func (f *fakeIndex) Add(label uint64, vector []float32) error { return nil }
+func (f *fakeIndex) Search(vector []float32, k int) ([]uint64, []float32, error) {
+	f.lastK = k
+	return []uint64{}, []float32{}, nil
+}
+func (f *fakeIndex) Save(path string) error { return nil }
+func (f *fakeIndex) Load(path string) error { return nil }
+func (f *fakeIndex) Close() error           { return nil }
+
+func (e *fakeEmbedder) Embed(_ context.Context, model string, texts []string) ([][]float32, error) {
+	// return one embedding per input text, matching the real embedder behaviour
+	n := len(texts)
+	if n == 0 {
+		return [][]float32{}, nil
 	}
-	return [][]float32{{1, 0}}, nil
+	var vec []float32
+	if v, ok := e.vectorsByModel[model]; ok {
+		vec = v
+	} else {
+		vec = []float32{1, 0}
+	}
+	res := make([][]float32, n)
+	for i := range res {
+		res[i] = vec
+	}
+	return res, nil
 }
 
 func TestSearch_ReturnsRankedHitsWithFilters(t *testing.T) {
 	idx := index.NewHNSWIndex("")
-	_ = idx.Add(1, []float32{1, 0})
-	_ = idx.Add(2, []float32{0.9, 0.1})
-	_ = idx.Add(3, []float32{0, 1})
+	if err := idx.Add(1, []float32{1, 0}); err != nil {
+		t.Fatalf("idx.Add failed: %v", err)
+	}
+	if err := idx.Add(2, []float32{0.9, 0.1}); err != nil {
+		t.Fatalf("idx.Add failed: %v", err)
+	}
+	if err := idx.Add(3, []float32{0, 1}); err != nil {
+		t.Fatalf("idx.Add failed: %v", err)
+	}
 
 	svc := NewService(nil, idx, &fakeEmbedder{vectorsByModel: map[string][]float32{
 		"mistral-embed":   {1, 0},
@@ -76,6 +108,34 @@ func TestSearch_FileGlobFilter(t *testing.T) {
 	}
 }
 
+func TestSearch_OverfetchMultiplier_DefaultAndConfigurable(t *testing.T) {
+	fi := &fakeIndex{}
+	svc := NewService(nil, fi, &fakeEmbedder{vectorsByModel: map[string][]float32{}}, nil)
+	// first search should use default multiplier (5)
+	_, _ = svc.Search(context.Background(), model.SearchQuery{Query: "x", K: 3})
+	if fi.lastK != 3*5 {
+		t.Fatalf("expected default overfetch 5x (got %d)", fi.lastK)
+	}
+	// change multiplier to a smaller value and verify it takes effect
+	svc.SetOverfetchMultiplier(2)
+	_, _ = svc.Search(context.Background(), model.SearchQuery{Query: "x", K: 3})
+	if fi.lastK != 3*2 {
+		t.Fatalf("expected overfetch 2x after set (got %d)", fi.lastK)
+	}
+	// invalid values should be normalized
+	svc.SetOverfetchMultiplier(0)
+	_, _ = svc.Search(context.Background(), model.SearchQuery{Query: "x", K: 1})
+	if fi.lastK != 1*1 {
+		t.Fatalf("multiplier lower bound not enforced (got %d)", fi.lastK)
+	}
+	// extremely large value should be capped
+	svc.SetOverfetchMultiplier(1000)
+	_, _ = svc.Search(context.Background(), model.SearchQuery{Query: "x", K: 1})
+	if fi.lastK > 100*1 {
+		t.Fatalf("multiplier upper cap not enforced (got %d)", fi.lastK)
+	}
+}
+
 func TestSearch_BothMode_DedupesAndNormalizes(t *testing.T) {
 	textIdx := index.NewHNSWIndex("")
 	codeIdx := index.NewHNSWIndex("")
@@ -112,6 +172,32 @@ func TestSearch_BothMode_DedupesAndNormalizes(t *testing.T) {
 		seen[hit.ChunkID] = true
 		if hit.Score < 0 || hit.Score > 1 {
 			t.Fatalf("score should be normalized to [0,1], got %f", hit.Score)
+		}
+	}
+}
+
+func TestLooksLikeCodeQuery(t *testing.T) {
+	cases := []struct {
+		query  string
+		expect bool
+	}{
+		{"func main() {}", true},
+		{"I love python", false},
+		{"go to the store", false},
+		{"use import and ([])", true},
+		{"I wrote code in .go file", false},
+		{"I wrote code in .go file `snippet`", true},
+		{"this is just plain text", false},
+		{"```go\nfmt.Println(\"hi\")\n```", true},
+		{"some `inline code`", false},
+		{"python code", false},
+		{"fix bug in java { }", false},
+	}
+
+	for _, c := range cases {
+		got := looksLikeCodeQuery(c.query)
+		if got != c.expect {
+			t.Errorf("looksLikeCodeQuery(%q) = %v; want %v", c.query, got, c.expect)
 		}
 	}
 }

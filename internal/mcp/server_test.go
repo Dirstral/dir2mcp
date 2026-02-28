@@ -52,8 +52,23 @@ func TestServer_ToolsList(t *testing.T) {
 	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("unmarshal response: %v", err)
 	}
-	result := resp["result"].(map[string]any)
-	tools := result["tools"].([]any)
+	result, ok := resp["result"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected result object, got: %#v", resp["result"])
+	}
+	tools, ok := result["tools"].([]any)
+	if !ok {
+		t.Fatalf("expected tools array, got: %#v", result["tools"])
+	}
+	for idx, toolVal := range tools {
+		tool, ok := toolVal.(map[string]any)
+		if !ok {
+			t.Fatalf("expected tool object at index %d, got: %#v", idx, toolVal)
+		}
+		if _, ok := tool["name"].(string); !ok {
+			t.Fatalf("expected tool.name string at index %d, got: %#v", idx, tool["name"])
+		}
+	}
 	if len(tools) == 0 {
 		t.Fatal("expected at least one tool")
 	}
@@ -84,6 +99,134 @@ func TestServer_ToolsCall_Search(t *testing.T) {
 	}
 	if resp["error"] != nil {
 		t.Fatalf("expected no error, got %v", resp["error"])
+	}
+
+	result, ok := resp["result"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected result object, got: %#v", resp["result"])
+	}
+	content, ok := result["content"].([]any)
+	if !ok {
+		t.Fatalf("expected content array, got: %#v", result["content"])
+	}
+	if len(content) == 0 {
+		t.Fatal("expected at least one content item")
+	}
+	structured, ok := result["structuredContent"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected structuredContent object, got: %#v", result["structuredContent"])
+	}
+	hitsValue, ok := structured["hits"].([]any)
+	if !ok {
+		t.Fatalf("expected structuredContent.hits array, got: %#v", structured["hits"])
+	}
+	if len(hitsValue) != 1 {
+		t.Fatalf("expected exactly 1 hit, got %d (%#v)", len(hitsValue), hitsValue)
+	}
+
+	// verify that the hit we returned matches the fixture we supplied above
+	hitObj, ok := hitsValue[0].(map[string]any)
+	if !ok {
+		t.Fatalf("expected hit object, got %#v", hitsValue[0])
+	}
+	// chunk IDs are unmarshaled as float64 from JSON numbers
+	if hitObj["ChunkID"] != float64(hits[0].ChunkID) {
+		t.Fatalf("unexpected ChunkID: got %v, want %d", hitObj["ChunkID"], hits[0].ChunkID)
+	}
+	if hitObj["RelPath"] != hits[0].RelPath {
+		t.Fatalf("unexpected RelPath: got %v, want %s", hitObj["RelPath"], hits[0].RelPath)
+	}
+	if hitObj["DocType"] != hits[0].DocType {
+		t.Fatalf("unexpected DocType: got %v, want %s", hitObj["DocType"], hits[0].DocType)
+	}
+	if hitObj["Score"] != hits[0].Score {
+		t.Fatalf("unexpected Score: got %v, want %f", hitObj["Score"], hits[0].Score)
+	}
+	// ensure the k we sent is echoed back
+	kVal, ok := structured["k"].(float64)
+	if !ok {
+		t.Fatalf("expected structuredContent.k number, got %#v", structured["k"])
+	}
+	if int(kVal) != 5 {
+		t.Fatalf("expected structuredContent.k 5, got %v", kVal)
+	}
+}
+
+func TestServer_ToolsCall_Search_DefaultK(t *testing.T) {
+	hits := []model.SearchHit{{ChunkID: 42, RelPath: "foo.txt", DocType: "txt", Score: 1.0}}
+	cfg := config.Default()
+	cfg.AuthMode = "none"
+	srv := NewServer(cfg, &fakeRetriever{hits: hits})
+	sessionID := initializeSession(t, srv)
+	// omit `k` entirely
+	reqBody := `{"jsonrpc":"2.0","id":"req-2","method":"tools/call","params":{"name":"dir2mcp.search","arguments":{"query":"hello"}}}`
+	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("MCP-Session-Id", sessionID)
+	rr := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if resp["error"] != nil {
+		t.Fatalf("expected no error, got %v", resp["error"])
+	}
+
+	structured, ok := resp["result"].(map[string]any)["structuredContent"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected structuredContent object, got: %#v", resp["result"])
+	}
+	kVal, ok := structured["k"].(float64)
+	if !ok {
+		t.Fatalf("expected structuredContent.k number, got %#v", structured["k"])
+	}
+	if int(kVal) != DefaultSearchK {
+		t.Fatalf("expected default k %d, got %v", DefaultSearchK, kVal)
+	}
+}
+
+func TestServer_ToolsCall_Search_NegativeK(t *testing.T) {
+	hits := []model.SearchHit{{ChunkID: 99, RelPath: "bar.txt", DocType: "txt", Score: 0.5}}
+	cfg := config.Default()
+	cfg.AuthMode = "none"
+	srv := NewServer(cfg, &fakeRetriever{hits: hits})
+	sessionID := initializeSession(t, srv)
+	// send a non‑positive k; should also fall back to default
+	reqBody := `{"jsonrpc":"2.0","id":"req-3","method":"tools/call","params":{"name":"dir2mcp.search","arguments":{"query":"hello","k":0}}}`
+	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("MCP-Session-Id", sessionID)
+	rr := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if resp["error"] != nil {
+		t.Fatalf("expected no error, got %v", resp["error"])
+	}
+
+	structured, ok := resp["result"].(map[string]any)["structuredContent"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected structuredContent object, got: %#v", resp["result"])
+	}
+	kVal, ok := structured["k"].(float64)
+	if !ok {
+		t.Fatalf("expected structuredContent.k number, got %#v", structured["k"])
+	}
+	if int(kVal) != DefaultSearchK {
+		t.Fatalf("expected default k %d, got %v", DefaultSearchK, kVal)
 	}
 }
 

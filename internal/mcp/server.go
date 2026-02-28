@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -27,6 +28,11 @@ const (
 	sessionTTL             = 24 * time.Hour
 	sessionCleanupInterval = time.Hour
 )
+
+// DefaultSearchK is the default number of hits to request when a search
+// query omits the `k` parameter or supplies a non‑positive value. This
+// mirrors the JSON schema in SPEC.md which specifies a default of 10.
+const DefaultSearchK = 10
 
 type Server struct {
 	cfg       config.Config
@@ -305,6 +311,14 @@ func (s *Server) handleToolsCall(ctx context.Context, w http.ResponseWriter, id 
 			return
 		}
 
+		// k is optional.  If the client does not provide a value (or provides a
+		// non‑positive one) we fall back to a sensible default rather than return
+		// an error.  This matches the `default` keyword in the JSON schema
+		// defined in SPEC.md.
+		if args.K <= 0 {
+			args.K = DefaultSearchK
+		}
+
 		hits, err := s.retriever.Search(ctx, model.SearchQuery{
 			Query:      args.Query,
 			K:          args.K,
@@ -314,7 +328,8 @@ func (s *Server) handleToolsCall(ctx context.Context, w http.ResponseWriter, id 
 			DocTypes:   args.DocTypes,
 		})
 		if err != nil {
-			writeError(w, http.StatusOK, id, -32000, err.Error(), "INDEX_NOT_READY", true)
+			log.Printf("tools/call search failed: id=%v tool=%s err=%v", id, params.Name, err)
+			writeError(w, http.StatusOK, id, -32000, "internal server error", "INDEX_NOT_READY", true)
 			return
 		}
 

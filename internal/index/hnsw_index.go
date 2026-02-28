@@ -3,15 +3,37 @@ package index
 import (
 	"encoding/gob"
 	"errors"
+	"log"
+	"math"
 	"os"
 	"sort"
 	"sync"
+	"sync/atomic"
 )
 
 type HNSWIndex struct {
 	path    string
 	mu      sync.RWMutex
 	vectors map[uint64][]float32
+
+	// Logger is optional; if non-nil its Printf method will be used for
+	// informational messages. When nil the standard library's log package
+	// is used.
+	Logger *log.Logger
+
+	// Metrics collects optional counters that callers can inspect. The
+	// zero-value of HNSWIndexMetrics is usable, so callers may simply pass a
+	// pointer and read it after operations. If Metrics is nil nothing is
+	// incremented.
+	Metrics *HNSWIndexMetrics
+}
+
+// HNSWIndexMetrics holds counters gathered by an index instance.
+//
+// Additional fields may be added in future if callers require them.
+// Only the dimension mismatch counter is currently defined.
+type HNSWIndexMetrics struct {
+	DimensionMismatch int64
 }
 
 func NewHNSWIndex(path string) *HNSWIndex {
@@ -54,6 +76,12 @@ func (i *HNSWIndex) Search(vector []float32, k int) ([]uint64, []float32, error)
 	scoredItems := make([]scored, 0, len(i.vectors))
 	for label, candidate := range i.vectors {
 		if len(candidate) != len(vector) {
+			// dimension mismatch: log and bump metric if configured but
+			// otherwise behave exactly as before by skipping the vector.
+			i.logf("dimension mismatch: label=%d candidate_len=%d query_len=%d", label, len(candidate), len(vector))
+			if i.Metrics != nil {
+				atomic.AddInt64(&i.Metrics.DimensionMismatch, 1)
+			}
 			continue
 		}
 		scoredItems = append(scoredItems, scored{
@@ -83,6 +111,16 @@ func (i *HNSWIndex) Search(vector []float32, k int) ([]uint64, []float32, error)
 	return labels, scores, nil
 }
 
+// logf is a small helper that routes messages to the configured logger or
+// the global log package. It mirrors the helper defined on EmbeddingWorker.
+func (i *HNSWIndex) logf(format string, args ...interface{}) {
+	if i != nil && i.Logger != nil {
+		i.Logger.Printf(format, args...)
+		return
+	}
+	log.Printf(format, args...)
+}
+
 func (i *HNSWIndex) Save(path string) error {
 	if path == "" {
 		path = i.path
@@ -91,17 +129,35 @@ func (i *HNSWIndex) Save(path string) error {
 		return errors.New("path is required")
 	}
 
-	file, err := os.Create(path)
+	tmpPath := path + ".tmp"
+	file, err := os.Create(tmpPath)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = file.Close() }()
 
 	i.mu.RLock()
 	defer i.mu.RUnlock()
-
 	enc := gob.NewEncoder(file)
-	return enc.Encode(i.vectors)
+	err = enc.Encode(i.vectors)
+	if err != nil {
+		closeErr := file.Close()
+		_ = os.Remove(tmpPath)
+		return errors.Join(err, closeErr)
+	}
+	if err := file.Sync(); err != nil {
+		closeErr := file.Close()
+		_ = os.Remove(tmpPath)
+		return errors.Join(err, closeErr)
+	}
+	if err := file.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	return nil
 }
 
 func (i *HNSWIndex) Load(path string) error {
@@ -114,7 +170,7 @@ func (i *HNSWIndex) Load(path string) error {
 
 	file, err := os.Open(path)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			return nil
 		}
 		return err
@@ -156,13 +212,7 @@ func cosineSimilarity(a, b []float32) float32 {
 }
 
 func sqrt32(v float32) float32 {
-	// Newton-Raphson iteration is sufficient for ranking comparisons.
-	x := v
-	if x == 0 {
-		return 0
-	}
-	for iter := 0; iter < 8; iter++ {
-		x = 0.5 * (x + v/x)
-	}
-	return x
+	// use standard library math for correctness and simplicity; casting
+	// handles 0 implicitly.
+	return float32(math.Sqrt(float64(v)))
 }

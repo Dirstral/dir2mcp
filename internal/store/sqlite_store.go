@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"path/filepath"
 	"strings"
 	"sync"
 
@@ -65,6 +64,14 @@ CREATE TABLE IF NOT EXISTS chunks (
   embedding_error TEXT NOT NULL DEFAULT '',
   deleted INTEGER NOT NULL DEFAULT 0
 );
+
+-- indexes to speed up common lookups; part of the same initialization so they
+-- are available immediately for NextPending and any rel_path queries.
+CREATE INDEX IF NOT EXISTS idx_chunks_embedding_status ON chunks(embedding_status);
+CREATE INDEX IF NOT EXISTS idx_chunks_index_kind ON chunks(index_kind);
+-- rel_path lookups often filter deleted rows; use a composite index to cover
+-- both columns and avoid scanning the entire table.
+CREATE INDEX IF NOT EXISTS idx_chunks_rel_path_deleted ON chunks(rel_path, deleted);
 `
 	if _, err := db.ExecContext(ctx, schema); err != nil {
 		_ = db.Close()
@@ -123,6 +130,7 @@ func (s *SQLiteStore) UpsertChunkTask(ctx context.Context, task model.ChunkTask)
 		   rep_type=excluded.rep_type,
 		   text=excluded.text,
 		   index_kind=excluded.index_kind,
+		   deleted=0,
 		   embedding_status='pending',
 		   embedding_error=''`,
 		int64(task.Label),
@@ -185,6 +193,10 @@ func (s *SQLiteStore) ListFiles(ctx context.Context, prefix, glob string, limit,
 		where = append(where, "rel_path LIKE ?")
 		args = append(args, prefix+"%")
 	}
+	if strings.TrimSpace(glob) != "" {
+		where = append(where, "rel_path GLOB ?")
+		args = append(args, glob)
+	}
 	if len(where) > 0 {
 		query += " WHERE " + strings.Join(where, " AND ")
 	}
@@ -214,12 +226,6 @@ func (s *SQLiteStore) ListFiles(ctx context.Context, prefix, glob string, limit,
 			return nil, 0, err
 		}
 		doc.Deleted = deleted == 1
-		if glob != "" {
-			matched, matchErr := filepath.Match(glob, doc.RelPath)
-			if matchErr != nil || !matched {
-				continue
-			}
-		}
 		docs = append(docs, doc)
 	}
 	if err := rows.Err(); err != nil {
@@ -249,12 +255,17 @@ func (s *SQLiteStore) NextPending(ctx context.Context, limit int, indexKind stri
 		limit = 32
 	}
 
-	args := []any{"pending", limit}
+	// build argument list incrementally: always start with the pending status,
+	// optionally filter by indexKind, and append the limit last so positional
+	// placeholders in the query (`?`) remain in order.
+	args := []any{"pending"}
 	query := `SELECT chunk_id, rel_path, doc_type, rep_type, text, index_kind FROM chunks WHERE embedding_status = ? AND deleted = 0`
 	if strings.TrimSpace(indexKind) != "" {
 		query += " AND index_kind = ?"
-		args = []any{"pending", indexKind, limit}
+		args = append(args, indexKind)
 	}
+	// limit placeholder comes after any indexKind parameter
+	args = append(args, limit)
 	query += " ORDER BY chunk_id LIMIT ?"
 
 	rows, err := db.QueryContext(ctx, query, args...)
@@ -277,18 +288,16 @@ func (s *SQLiteStore) NextPending(ctx context.Context, limit int, indexKind stri
 			return nil, err
 		}
 		tasks = append(tasks, model.ChunkTask{
-			Label:     uint64(chunkID),
+			Label:     chunkID,
 			Text:      text,
 			IndexKind: idxKind,
-			Metadata: model.SearchHit{
+			Metadata: model.ChunkMetadata{
 				ChunkID: chunkID,
 				RelPath: relPath,
 				DocType: docType,
 				RepType: repType,
 				Snippet: snippet(text, 240),
-				Span: model.Span{
-					Kind: "lines",
-				},
+				Span:    model.Span{Kind: "lines"},
 			},
 		})
 	}
@@ -337,33 +346,31 @@ func (s *SQLiteStore) ListEmbeddedChunkMetadata(ctx context.Context, indexKind s
 			return nil, err
 		}
 		out = append(out, model.ChunkTask{
-			Label:     uint64(chunkID),
+			Label:     chunkID,
 			Text:      text,
 			IndexKind: kind,
-			Metadata: model.SearchHit{
+			Metadata: model.ChunkMetadata{
 				ChunkID: chunkID,
 				RelPath: relPath,
 				DocType: docType,
 				RepType: repType,
 				Snippet: snippet(text, 240),
-				Span: model.Span{
-					Kind: "lines",
-				},
+				Span:    model.Span{Kind: "lines"},
 			},
 		})
 	}
 	return out, rows.Err()
 }
 
-func (s *SQLiteStore) MarkEmbedded(ctx context.Context, labels []uint64) error {
+func (s *SQLiteStore) MarkEmbedded(ctx context.Context, labels []int64) error {
 	return s.markEmbeddingStatus(ctx, labels, "ok", "")
 }
 
-func (s *SQLiteStore) MarkFailed(ctx context.Context, labels []uint64, reason string) error {
+func (s *SQLiteStore) MarkFailed(ctx context.Context, labels []int64, reason string) error {
 	return s.markEmbeddingStatus(ctx, labels, "error", reason)
 }
 
-func (s *SQLiteStore) markEmbeddingStatus(ctx context.Context, labels []uint64, status, reason string) error {
+func (s *SQLiteStore) markEmbeddingStatus(ctx context.Context, labels []int64, status, reason string) error {
 	if len(labels) == 0 {
 		return nil
 	}
@@ -385,7 +392,7 @@ func (s *SQLiteStore) markEmbeddingStatus(ctx context.Context, labels []uint64, 
 	defer func() { _ = stmt.Close() }()
 
 	for _, label := range labels {
-		if _, err := stmt.ExecContext(ctx, status, reason, int64(label)); err != nil {
+		if _, err := stmt.ExecContext(ctx, status, reason, label); err != nil {
 			return err
 		}
 	}
@@ -432,8 +439,9 @@ func defaultIfEmpty(v, fallback string) string {
 
 func snippet(text string, max int) string {
 	text = strings.TrimSpace(text)
-	if len(text) <= max {
+	runes := []rune(text)
+	if len(runes) <= max {
 		return text
 	}
-	return text[:max]
+	return string(runes[:max])
 }

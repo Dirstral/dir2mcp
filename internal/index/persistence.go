@@ -10,7 +10,11 @@ import (
 )
 
 type IndexedFile struct {
-	Name  string
+	// Path specifies the filesystem location where the index should be
+	// persisted and restored. The previous version of this struct also
+	// contained a Name field which was only ever used in struct literals
+	// for human readability. The field was not referenced anywhere in the
+	// package or exported APIs, so it has been removed to avoid dead code.
 	Path  string
 	Index model.Index
 }
@@ -20,8 +24,17 @@ type PersistenceManager struct {
 	interval time.Duration
 	onError  func(error)
 
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
+	// saveMu must be held while iterating over indices and invoking
+	// Index.Save. persistence.Start spawns a goroutine that periodically
+	// calls SaveAll, and users may call SaveAll/StopAndSave manually as
+	// well; serializing the calls protects indices that are not themselves
+	// safe for concurrent Save invocations.
+	saveMu sync.Mutex
+
+	stateMu sync.Mutex
+	running bool
+	cancel  context.CancelFunc
+	wg      sync.WaitGroup
 }
 
 func NewPersistenceManager(indices []IndexedFile, interval time.Duration, onError func(error)) *PersistenceManager {
@@ -40,9 +53,24 @@ func (m *PersistenceManager) LoadAll(ctx context.Context) error {
 		if idx.Index == nil {
 			continue
 		}
+		// always check the context *before* doing any work. load
+		// implementations currently have a simple `Load(path string)`
+		// signature and are therefore unable to observe the context
+		// directly, so this pre-flight check gives callers a chance to
+		// bail out early if cancellation has already been requested.
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
 		if err := idx.Index.Load(idx.Path); err != nil {
 			return err
 		}
+
+		// check again after the call in case the context was cancelled
+		// while the load was in progress; we can't interrupt the load
+		// itself, but callers still need to see the error promptly.
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -53,6 +81,13 @@ func (m *PersistenceManager) LoadAll(ctx context.Context) error {
 }
 
 func (m *PersistenceManager) SaveAll() error {
+	// protect against concurrent callers; the underlying model.Index
+	// implementations are not required to be goroutine‑safe so we serialize
+	// accesses here. callers such as the ticker goroutine and external
+	// StopAndSave/SaveAll invocations all use this same lock.
+	m.saveMu.Lock()
+	defer m.saveMu.Unlock()
+
 	var combined error
 	for _, idx := range m.indices {
 		if idx.Index == nil {
@@ -69,12 +104,27 @@ func (m *PersistenceManager) Start(ctx context.Context) {
 	if len(m.indices) == 0 {
 		return
 	}
+
+	m.stateMu.Lock()
+	if m.running {
+		m.stateMu.Unlock()
+		return
+	}
 	runCtx, cancel := context.WithCancel(ctx)
 	m.cancel = cancel
+	m.running = true
+	m.stateMu.Unlock()
 
 	m.wg.Add(1)
 	go func() {
 		defer m.wg.Done()
+		defer func() {
+			m.stateMu.Lock()
+			m.cancel = nil
+			m.running = false
+			m.stateMu.Unlock()
+		}()
+
 		ticker := time.NewTicker(m.interval)
 		defer ticker.Stop()
 		for {
@@ -91,10 +141,20 @@ func (m *PersistenceManager) Start(ctx context.Context) {
 }
 
 func (m *PersistenceManager) StopAndSave() error {
-	if m.cancel != nil {
-		m.cancel()
+	m.stateMu.Lock()
+	cancel := m.cancel
+	m.cancel = nil
+	m.stateMu.Unlock()
+
+	if cancel != nil {
+		cancel()
 	}
 	m.wg.Wait()
+
+	m.stateMu.Lock()
+	m.running = false
+	m.stateMu.Unlock()
+
 	return m.SaveAll()
 }
 

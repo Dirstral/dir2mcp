@@ -3,6 +3,7 @@ package index
 import (
 	"context"
 	"errors"
+	"log"
 	"strings"
 	"time"
 
@@ -11,8 +12,8 @@ import (
 
 type ChunkSource interface {
 	NextPending(ctx context.Context, limit int, indexKind string) ([]model.ChunkTask, error)
-	MarkEmbedded(ctx context.Context, labels []uint64) error
-	MarkFailed(ctx context.Context, labels []uint64, reason string) error
+	MarkEmbedded(ctx context.Context, labels []int64) error
+	MarkFailed(ctx context.Context, labels []int64, reason string) error
 }
 
 type EmbeddingWorker struct {
@@ -22,7 +23,28 @@ type EmbeddingWorker struct {
 	ModelForText   string
 	ModelForCode   string
 	BatchSize      int
-	OnIndexedChunk func(label uint64, metadata model.SearchHit)
+	OnIndexedChunk func(label int64, metadata model.ChunkMetadata)
+
+	// Logger is optional; if non‑nil its Printf method will be used for
+	// informational messages. When nil the standard library's log package
+	// is used. Logging is only performed for transient/retryable errors or
+	// when a fatal condition occurs in Run().
+	Logger *log.Logger
+
+	// ErrCh is an optional channel that will receive fatal errors before
+	// Run returns. The caller may provide a buffered channel if it wants to
+	// monitor errors asynchronously; Run will still return the error as its
+	// return value. The channel is never closed by EmbeddingWorker.
+	ErrCh chan error
+
+	// RunOnceFunc, if non‑nil, is invoked by Run instead of the receiver's
+	// own RunOnce method. This hook exists primarily for testing and
+	// allows callers that embed EmbeddingWorker to override the behaviour
+	// without having to duplicate the entire Run implementation.
+	//
+	// Production code should rarely set this field; it is unexported so only
+	// packages within index can access it.
+	RunOnceFunc func(ctx context.Context, indexKind string) (int, error)
 }
 
 func (w *EmbeddingWorker) RunOnce(ctx context.Context, indexKind string) (int, error) {
@@ -45,7 +67,7 @@ func (w *EmbeddingWorker) RunOnce(ctx context.Context, indexKind string) (int, e
 
 	modelName := w.modelForKind(indexKind)
 	inputs := make([]string, len(tasks))
-	labels := make([]uint64, len(tasks))
+	labels := make([]int64, len(tasks))
 	for idx, task := range tasks {
 		inputs[idx] = task.Text
 		labels[idx] = task.Label
@@ -53,21 +75,28 @@ func (w *EmbeddingWorker) RunOnce(ctx context.Context, indexKind string) (int, e
 
 	vectors, err := w.Embedder.Embed(ctx, modelName, inputs)
 	if err != nil {
-		_ = w.Source.MarkFailed(ctx, labels, err.Error())
+		if mfErr := w.Source.MarkFailed(ctx, labels, err.Error()); mfErr != nil {
+			w.logf("mark failed update error: %v (source error: %v) labels=%v", mfErr, err, labels)
+		}
 		return 0, err
 	}
 	if len(vectors) != len(tasks) {
-		_ = w.Source.MarkFailed(ctx, labels, "embedding vector count mismatch")
-		return 0, errors.New("embedding vector count mismatch")
+		reason := "embedding vector count mismatch"
+		if mfErr := w.Source.MarkFailed(ctx, labels, reason); mfErr != nil {
+			w.logf("mark failed update error: %v (reason: %s) labels=%v", mfErr, reason, labels)
+		}
+		return 0, errors.New(reason)
 	}
 
 	for idx := range tasks {
-		if addErr := w.Index.Add(tasks[idx].Label, vectors[idx]); addErr != nil {
+		if addErr := w.Index.Add(uint64(tasks[idx].Label), vectors[idx]); addErr != nil {
 			// Mark successfully indexed chunks before this failure
 			if idx > 0 {
 				_ = w.Source.MarkEmbedded(ctx, labels[:idx])
 			}
-			_ = w.Source.MarkFailed(ctx, labels[idx:idx+1], addErr.Error())
+			if mfErr := w.Source.MarkFailed(ctx, labels[idx:idx+1], addErr.Error()); mfErr != nil {
+				w.logf("mark failed update error: %v (index error: %v) labels=%v", mfErr, addErr, labels[idx:idx+1])
+			}
 			return idx, addErr
 		}
 		if w.OnIndexedChunk != nil {
@@ -82,6 +111,17 @@ func (w *EmbeddingWorker) RunOnce(ctx context.Context, indexKind string) (int, e
 	return len(labels), nil
 }
 
+// Run starts a background loop that periodically calls RunOnce. A small
+// tick interval is used to check for context cancellation and to space
+// invocations; the caller may choose a large interval if they only want to
+// poll infrequently. If RunOnce returns an error the behaviour depends on
+// whether the error is retryable. Retryable errors are logged and the
+// method sleeps with exponential backoff before trying again. Fatal errors
+// are logged, propagated via ErrCh (if provided) and cause Run to return.
+//
+// Note that Run does not attempt to restart itself if a fatal error occurs;
+// callers that want resilient workers should either monitor ErrCh or simply
+// re‑invoke Run in a supervising goroutine.
 func (w *EmbeddingWorker) Run(ctx context.Context, interval time.Duration, indexKind string) error {
 	if interval <= 0 {
 		interval = 2 * time.Second
@@ -90,17 +130,89 @@ func (w *EmbeddingWorker) Run(ctx context.Context, interval time.Duration, index
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
+	// start backoff at the same interval passed in so tests using very small
+	// intervals won't sleep for a full second on the first retry.
+	backoff := interval
+	if backoff <= 0 {
+		backoff = time.Second
+	}
+	const maxBackoff = 30 * time.Second
+
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
-			_, err := w.RunOnce(ctx, indexKind)
+			// allow an override for testing or specialised behaviour
+			runOnce := w.RunOnce
+			if w.RunOnceFunc != nil {
+				runOnce = w.RunOnceFunc
+			}
+			_, err := runOnce(ctx, indexKind)
 			if err != nil {
+				if isRetryable(err) {
+					w.logf("run once failed (retryable): %v; backing off %v", err, backoff)
+					// wait either for context cancel or the backoff timer
+					select {
+					case <-ctx.Done():
+						return ctx.Err()
+					case <-time.After(backoff):
+					}
+					backoff *= 2
+					if backoff > maxBackoff {
+						backoff = maxBackoff
+					}
+					continue
+				}
+				// fatal
+				w.logf("run once failed (fatal): %v", err)
+				if w.ErrCh != nil {
+					select {
+					case w.ErrCh <- err:
+					default:
+					}
+				}
 				return err
+			}
+			// success, reset backoff to minimum
+			backoff = interval
+			if backoff <= 0 {
+				backoff = time.Second
 			}
 		}
 	}
+}
+
+// logf is a small helper that routes messages to the configured logger or
+// the global log package.
+func (w *EmbeddingWorker) logf(format string, args ...interface{}) {
+	if w != nil && w.Logger != nil {
+		w.Logger.Printf(format, args...)
+		return
+	}
+	log.Printf(format, args...)
+}
+
+// ErrFatal can be returned by RunOnce to signal that the worker should
+// not retry and should exit immediately. It is exported so callers can wrap
+// or compare against it if they produce fatal conditions themselves.
+var ErrFatal = errors.New("fatal")
+
+// isRetryable determines whether RunOnce should be retried when it returns
+// the provided error. The predicate is intentionally conservative; context
+// cancellation, deadline errors, and ErrFatal are considered fatal because
+// re‑running after they have occurred is unlikely to succeed.
+func isRetryable(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	if errors.Is(err, ErrFatal) {
+		return false
+	}
+	return true
 }
 
 func (w *EmbeddingWorker) modelForKind(indexKind string) string {

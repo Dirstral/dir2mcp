@@ -1,18 +1,24 @@
 package index
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/Dirstral/dir2mcp/internal/model"
 )
 
 type fakeChunkSource struct {
 	tasks        []model.ChunkTask
-	embedded     []uint64
-	failedLabels []uint64
+	embedded     []int64
+	failedLabels []int64
 	failedReason string
+	// markFailedErr, if non-nil, is returned from MarkFailed.
+	markFailedErr error
 }
 
 func (s *fakeChunkSource) NextPending(_ context.Context, _ int, _ string) ([]model.ChunkTask, error) {
@@ -21,20 +27,41 @@ func (s *fakeChunkSource) NextPending(_ context.Context, _ int, _ string) ([]mod
 	return out, nil
 }
 
-func (s *fakeChunkSource) MarkEmbedded(_ context.Context, labels []uint64) error {
+func (s *fakeChunkSource) MarkEmbedded(_ context.Context, labels []int64) error {
 	s.embedded = append(s.embedded, labels...)
 	return nil
 }
 
-func (s *fakeChunkSource) MarkFailed(_ context.Context, labels []uint64, reason string) error {
+func (s *fakeChunkSource) MarkFailed(_ context.Context, labels []int64, reason string) error {
 	s.failedLabels = append(s.failedLabels, labels...)
 	s.failedReason = reason
-	return nil
+	return s.markFailedErr
 }
 
 type fakeEmbedder struct {
 	vectors [][]float32
 	err     error
+}
+
+// testWorker provides a fake RunOnce sequence; it also implements the
+// retrying Run loop derived from EmbeddingWorker.Run so tests can exercise
+// backoff behaviour without depending on the real worker's internal state.
+//
+// testWorker implements a custom RunOnce that returns a sequence of
+// errors; it is used with an EmbeddingWorker through the RunOnceFunc
+// hook so we can exercise the run loop without needing a full source
+// or embedder.
+type testWorker struct {
+	calls int
+	errs  []error
+}
+
+func (w *testWorker) RunOnce(ctx context.Context, indexKind string) (int, error) {
+	w.calls++
+	if w.calls <= len(w.errs) {
+		return 0, w.errs[w.calls-1]
+	}
+	return 1, nil
 }
 
 func (e *fakeEmbedder) Embed(_ context.Context, _ string, _ []string) ([][]float32, error) {
@@ -47,8 +74,8 @@ func (e *fakeEmbedder) Embed(_ context.Context, _ string, _ []string) ([][]float
 func TestEmbeddingWorker_RunOnce_Success(t *testing.T) {
 	source := &fakeChunkSource{
 		tasks: []model.ChunkTask{
-			{Label: 11, Text: "alpha", Metadata: model.SearchHit{RelPath: "a.txt", DocType: "text"}},
-			{Label: 22, Text: "beta", Metadata: model.SearchHit{RelPath: "b.go", DocType: "code"}},
+			{Label: 11, Text: "alpha", Metadata: model.ChunkMetadata{ChunkID: 11, RelPath: "a.txt", DocType: "text"}},
+			{Label: 22, Text: "beta", Metadata: model.ChunkMetadata{ChunkID: 22, RelPath: "b.go", DocType: "code"}},
 		},
 	}
 
@@ -60,14 +87,14 @@ func TestEmbeddingWorker_RunOnce_Success(t *testing.T) {
 		},
 	}
 
-	indexed := make(map[uint64]model.SearchHit)
+	indexed := make(map[int64]model.ChunkMetadata)
 	worker := &EmbeddingWorker{
 		Source:       source,
 		Index:        idx,
 		Embedder:     embedder,
 		BatchSize:    2,
 		ModelForText: "mistral-embed",
-		OnIndexedChunk: func(label uint64, metadata model.SearchHit) {
+		OnIndexedChunk: func(label int64, metadata model.ChunkMetadata) {
 			indexed[label] = metadata
 		},
 	}
@@ -95,9 +122,10 @@ func TestEmbeddingWorker_RunOnce_EmbeddingFailure(t *testing.T) {
 	}
 
 	worker := &EmbeddingWorker{
-		Source:   source,
-		Index:    NewHNSWIndex(""),
-		Embedder: &fakeEmbedder{err: errors.New("upstream failed")},
+		Source:    source,
+		Index:     NewHNSWIndex(""),
+		Embedder:  &fakeEmbedder{err: errors.New("upstream failed")},
+		BatchSize: 1, // explicitly ensure batching occurs
 	}
 
 	n, err := worker.RunOnce(context.Background(), "text")
@@ -109,5 +137,80 @@ func TestEmbeddingWorker_RunOnce_EmbeddingFailure(t *testing.T) {
 	}
 	if len(source.failedLabels) != 1 || source.failedLabels[0] != 99 {
 		t.Fatalf("expected failed label 99, got %#v", source.failedLabels)
+	}
+	if source.failedReason != "upstream failed" {
+		t.Fatalf("expected failedReason 'upstream failed', got %q", source.failedReason)
+	}
+}
+
+func TestEmbeddingWorker_Run_RetryableErrors(t *testing.T) {
+	// first two invocations return retryable errors; Run should keep looping
+	// until the context expires and we should see at least three calls.
+	tw := &testWorker{errs: []error{errors.New("transient1"), errors.New("transient2")}}
+	ew := &EmbeddingWorker{RunOnceFunc: tw.RunOnce}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	err := ew.Run(ctx, 1*time.Millisecond, "text")
+	if err == nil || (!errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled)) {
+		t.Fatalf("expected context error, got %v", err)
+	}
+	if tw.calls < 3 {
+		t.Fatalf("expected at least 3 RunOnce calls, got %d", tw.calls)
+	}
+}
+
+func TestEmbeddingWorker_RunOnce_MarkFailedLogging(t *testing.T) {
+	source := &fakeChunkSource{
+		tasks:         []model.ChunkTask{{Label: 123, Text: "err"}},
+		markFailedErr: errors.New("db down"),
+	}
+
+	// embedder returns error to trigger MarkFailed
+	embErr := errors.New("embed fail")
+	worker := &EmbeddingWorker{
+		Source:    source,
+		Index:     NewHNSWIndex(""),
+		Embedder:  &fakeEmbedder{err: embErr},
+		BatchSize: 1,
+	}
+
+	var buf bytes.Buffer
+	worker.Logger = log.New(&buf, "", 0)
+
+	n, err := worker.RunOnce(context.Background(), "text")
+	if !errors.Is(err, embErr) {
+		t.Fatalf("expected embed error returned, got %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("expected 0 tasks processed, got %d", n)
+	}
+
+	logged := buf.String()
+	if !strings.Contains(logged, "mark failed update error") || !strings.Contains(logged, "db down") {
+		t.Fatalf("expected log message about mark failed error, got %q", logged)
+	}
+}
+
+func TestEmbeddingWorker_Run_FatalErrorStops(t *testing.T) {
+	fatal := ErrFatal
+	tw := &testWorker{errs: []error{fatal}}
+	ew := &EmbeddingWorker{RunOnceFunc: tw.RunOnce, ErrCh: make(chan error, 1)}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+
+	err := ew.Run(ctx, 1*time.Millisecond, "text")
+	if !errors.Is(err, fatal) {
+		t.Fatalf("expected fatal error returned, got %v", err)
+	}
+	select {
+	case e := <-ew.ErrCh:
+		if !errors.Is(e, fatal) {
+			t.Fatalf("expected fatal on errCh, got %v", e)
+		}
+	default:
+		t.Fatal("expected error in errCh")
 	}
 }

@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/Dirstral/dir2mcp/internal/config"
@@ -68,8 +70,13 @@ func (a *App) runUp() int {
 		fmt.Fprintf(os.Stderr, "create state dir: %v\n", err)
 		return 1
 	}
-	runCtx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+
+	// create a context that is canceled on SIGINT/SIGTERM so that
+	// background goroutines receive a signal and can shut down
+	// gracefully.  the returned `stop` function is also a cancel
+	// and is deferred for cleanup once runUp returns.
+	runCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
 	stateDB := filepath.Join(cfg.StateDir, "meta.sqlite")
 	st := store.NewSQLiteStore(stateDB)
@@ -83,12 +90,13 @@ func (a *App) runUp() int {
 
 	persistence := index.NewPersistenceManager(
 		[]index.IndexedFile{
-			{Name: "text", Path: textIndexPath, Index: textIndex},
-			{Name: "code", Path: codeIndexPath, Index: codeIndex},
+			{Path: textIndexPath, Index: textIndex},
+			{Path: codeIndexPath, Index: codeIndex},
 		},
 		15*time.Second,
 		func(saveErr error) { fmt.Fprintf(os.Stderr, "index autosave error: %v\n", saveErr) },
 	)
+	// load and start persistence using the same signal-aware context
 	if err := persistence.LoadAll(runCtx); err != nil {
 		fmt.Fprintf(os.Stderr, "load indices: %v\n", err)
 		return 5
@@ -107,8 +115,8 @@ func (a *App) runUp() int {
 		ModelForText: "mistral-embed",
 		ModelForCode: "codestral-embed",
 		BatchSize:    32,
-		OnIndexedChunk: func(label uint64, metadata model.SearchHit) {
-			ret.SetChunkMetadata(label, metadata)
+		OnIndexedChunk: func(label int64, metadata model.ChunkMetadata) {
+			ret.SetChunkMetadataForIndex("text", uint64(label), metadata.ToSearchHit())
 		},
 	}
 	codeWorker := &index.EmbeddingWorker{
@@ -118,8 +126,8 @@ func (a *App) runUp() int {
 		ModelForText: "mistral-embed",
 		ModelForCode: "codestral-embed",
 		BatchSize:    32,
-		OnIndexedChunk: func(label uint64, metadata model.SearchHit) {
-			ret.SetChunkMetadata(label, metadata)
+		OnIndexedChunk: func(label int64, metadata model.ChunkMetadata) {
+			ret.SetChunkMetadataForIndex("code", uint64(label), metadata.ToSearchHit())
 		},
 	}
 	mcpServer := mcp.NewServer(cfg, ret)
@@ -230,7 +238,14 @@ func bootstrapMetadata(ctx context.Context, st embeddedMetadataStore, ret *retri
 				break
 			}
 			for _, task := range tasks {
-				ret.SetChunkMetadata(task.Label, task.Metadata)
+				ret.SetChunkMetadataForIndex(kind, uint64(task.Label), model.SearchHit{
+					ChunkID: task.Metadata.ChunkID,
+					RelPath: task.Metadata.RelPath,
+					DocType: task.Metadata.DocType,
+					RepType: task.Metadata.RepType,
+					Snippet: task.Metadata.Snippet,
+					Span:    task.Metadata.Span,
+				})
 			}
 			offset += len(tasks)
 		}
