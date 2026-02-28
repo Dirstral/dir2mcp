@@ -626,15 +626,7 @@ func (s *Server) handleAskAudioTool(ctx context.Context, args map[string]interfa
 		}
 		hitMaps := make([]map[string]interface{}, 0, len(hits))
 		for _, h := range hits {
-			hitMaps = append(hitMaps, map[string]interface{}{
-				"chunk_id": h.ChunkID,
-				"rel_path": h.RelPath,
-				"doc_type": h.DocType,
-				"rep_type": h.RepType,
-				"score":    h.Score,
-				"snippet":  h.Snippet,
-				"span":     buildOpenFileSpan(h.Span),
-			})
+			hitMaps = append(hitMaps, serializeHit(h))
 		}
 		structured := map[string]interface{}{
 			"question":          question,
@@ -1076,6 +1068,18 @@ func normalizeFileStatus(status string) string {
 	}
 }
 
+func serializeHit(h model.SearchHit) map[string]interface{} {
+	return map[string]interface{}{
+		"chunk_id": h.ChunkID,
+		"rel_path": h.RelPath,
+		"doc_type": h.DocType,
+		"rep_type": h.RepType,
+		"score":    h.Score,
+		"snippet":  h.Snippet,
+		"span":     buildOpenFileSpan(h.Span),
+	}
+}
+
 func buildAskStructuredContent(result model.AskResult) map[string]interface{} {
 	citations := make([]map[string]interface{}, 0, len(result.Citations))
 	for _, citation := range result.Citations {
@@ -1088,15 +1092,7 @@ func buildAskStructuredContent(result model.AskResult) map[string]interface{} {
 
 	hits := make([]map[string]interface{}, 0, len(result.Hits))
 	for _, hit := range result.Hits {
-		hits = append(hits, map[string]interface{}{
-			"chunk_id": hit.ChunkID,
-			"rel_path": hit.RelPath,
-			"doc_type": hit.DocType,
-			"rep_type": hit.RepType,
-			"score":    hit.Score,
-			"snippet":  hit.Snippet,
-			"span":     buildOpenFileSpan(hit.Span),
-		})
+		hits = append(hits, serializeHit(hit))
 	}
 
 	return map[string]interface{}{
