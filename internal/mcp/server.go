@@ -18,17 +18,17 @@ type ServerOptions struct {
 	AuthToken string
 }
 
-// Server is a minimal stub until Ali implements the full MCP Streamable HTTP server.
+// Server is a minimal stub until full MCP Streamable HTTP server is integrated (main has a full implementation with sessions/auth).
 type Server struct {
 	opts ServerOptions
 }
 
-// NewServer creates an MCP server (stub: just blocks on Serve).
+// NewServer creates an MCP server (stub: used by CLI up for shared mux with /api/mcp proxy).
 func NewServer(opts ServerOptions) (*Server, error) {
 	return &Server{opts: opts}, nil
 }
 
-// RunIndexer runs background indexing (stub: no-op until Tia/Ark implement).
+// RunIndexer runs background indexing (stub: no-op until pipeline exists).
 func (s *Server) RunIndexer(ctx context.Context) {}
 
 // MCPHandler returns the HTTP handler for the MCP path (for mounting on a shared mux).
