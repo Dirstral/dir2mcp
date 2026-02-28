@@ -178,10 +178,11 @@ func (s *Service) SetPathExcludes(patterns []string) {
 	}
 
 	s.metaMu.Lock()
-	// keep the original (unnormalized) patterns in s.pathExcludes so
-	// callers observe exactly what they provided. compiled regexps are
-	// stored in s.excludeRegexps; the helper matchExcludePattern will
-	// perform the necessary normalization when doing lookups.
+	// record the merged set of exclusions (defaults + caller patterns) in
+	// s.pathExcludes. this no longer reflects just the caller-provided
+	// values but the full list used for matching; compiled regexps are
+	// still held in s.excludeRegexps and matchExcludePattern will normalize
+	// and consult the merged patterns when performing lookups.
 	s.pathExcludes = merged
 	s.excludeRegexps = compiled
 	s.metaMu.Unlock()

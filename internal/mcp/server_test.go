@@ -478,8 +478,6 @@ func TestServer_ToolsCall_OpenFile_ConflictingSpanParameters(t *testing.T) {
 func TestServer_ToolsCall_OpenFile_PartialSpanParameters(t *testing.T) {
 	cfg := config.Default()
 	cfg.AuthMode = "none"
-	srv := NewServer(cfg, &fakeRetriever{})
-	sessionID := initializeSession(t, srv)
 
 	cases := []struct {
 		args    map[string]interface{}
@@ -492,6 +490,11 @@ func TestServer_ToolsCall_OpenFile_PartialSpanParameters(t *testing.T) {
 	}
 
 	for _, c := range cases {
+		// create fresh retriever/server so wasOpenFileCalled starts false
+		fr := &fakeRetriever{}
+		srv := NewServer(cfg, fr)
+		sessionID := initializeSession(t, srv)
+
 		body := map[string]interface{}{
 			"jsonrpc": "2.0",
 			"id":      "bad",
@@ -531,9 +534,17 @@ func TestServer_ToolsCall_OpenFile_PartialSpanParameters(t *testing.T) {
 		if !ok {
 			t.Fatalf("expected structuredContent.error object, got %#v", structured["error"])
 		}
+		// verify error code matches expectation for partial span errors
+		if errEnvelope["code"] != "INVALID_FIELD" {
+			t.Fatalf("expected INVALID_FIELD code, got %v", errEnvelope["code"])
+		}
 		msg, _ := errEnvelope["message"].(string)
 		if !strings.Contains(msg, c.message) {
 			t.Fatalf("unexpected error message: %v", msg)
+		}
+		// retriever should not have been invoked when parameters are invalid
+		if fr.wasOpenFileCalled {
+			t.Fatalf("retriever should not have been called for invalid args %v", c.args)
 		}
 	}
 }
