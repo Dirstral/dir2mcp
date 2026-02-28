@@ -1,4 +1,4 @@
-package index
+package tests
 
 import (
 	"bytes"
@@ -9,7 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Dirstral/dir2mcp/internal/model"
+	"dir2mcp/internal/index"
+	"dir2mcp/internal/model"
 )
 
 type fakeChunkSource struct {
@@ -79,7 +80,7 @@ func TestEmbeddingWorker_RunOnce_Success(t *testing.T) {
 		},
 	}
 
-	idx := NewHNSWIndex("")
+	idx := index.NewHNSWIndex("")
 	embedder := &fakeEmbedder{
 		vectors: [][]float32{
 			{1, 0},
@@ -88,7 +89,7 @@ func TestEmbeddingWorker_RunOnce_Success(t *testing.T) {
 	}
 
 	indexed := make(map[int64]model.ChunkMetadata)
-	worker := &EmbeddingWorker{
+	worker := &index.EmbeddingWorker{
 		Source:       source,
 		Index:        idx,
 		Embedder:     embedder,
@@ -121,9 +122,9 @@ func TestEmbeddingWorker_RunOnce_EmbeddingFailure(t *testing.T) {
 		},
 	}
 
-	worker := &EmbeddingWorker{
+	worker := &index.EmbeddingWorker{
 		Source:    source,
-		Index:     NewHNSWIndex(""),
+		Index:     index.NewHNSWIndex(""),
 		Embedder:  &fakeEmbedder{err: errors.New("upstream failed")},
 		BatchSize: 1, // explicitly ensure batching occurs
 	}
@@ -158,9 +159,9 @@ func TestEmbeddingWorker_RunOnce_NegativeLabel(t *testing.T) {
 			tasks: []model.ChunkTask{model.NewChunkTask(-5, "oops", "", model.ChunkMetadata{})},
 		}
 
-		worker := &EmbeddingWorker{
+		worker := &index.EmbeddingWorker{
 			Source:    source,
-			Index:     NewHNSWIndex(""),
+			Index:     index.NewHNSWIndex(""),
 			Embedder:  &panicEmbedder{},
 			BatchSize: 1,
 		}
@@ -169,7 +170,7 @@ func TestEmbeddingWorker_RunOnce_NegativeLabel(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected error for negative label")
 		}
-		if !errors.Is(err, ErrFatal) {
+		if !errors.Is(err, index.ErrFatal) {
 			t.Fatalf("expected fatal error, got %v", err)
 		}
 		if n != 0 {
@@ -194,9 +195,9 @@ func TestEmbeddingWorker_RunOnce_NegativeLabel(t *testing.T) {
 			},
 		}
 
-		worker := &EmbeddingWorker{
+		worker := &index.EmbeddingWorker{
 			Source:    source,
-			Index:     NewHNSWIndex(""),
+			Index:     index.NewHNSWIndex(""),
 			Embedder:  &panicEmbedder{},
 			BatchSize: 1,
 		}
@@ -205,7 +206,7 @@ func TestEmbeddingWorker_RunOnce_NegativeLabel(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected error for negative label in mixed batch")
 		}
-		if !errors.Is(err, ErrFatal) {
+		if !errors.Is(err, index.ErrFatal) {
 			t.Fatalf("expected fatal error for mixed batch, got %v", err)
 		}
 		if n != 0 {
@@ -224,7 +225,7 @@ func TestEmbeddingWorker_Run_RetryableErrors(t *testing.T) {
 	// first two invocations return retryable errors; Run should keep looping
 	// until the context expires and we should see at least three calls.
 	tw := &testWorker{errs: []error{errors.New("transient1"), errors.New("transient2")}}
-	ew := &EmbeddingWorker{RunOnceFunc: tw.RunOnce}
+	ew := &index.EmbeddingWorker{RunOnceFunc: tw.RunOnce}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
@@ -246,9 +247,9 @@ func TestEmbeddingWorker_RunOnce_MarkFailedLogging(t *testing.T) {
 
 	// embedder returns error to trigger MarkFailed
 	embErr := errors.New("embed fail")
-	worker := &EmbeddingWorker{
+	worker := &index.EmbeddingWorker{
 		Source:    source,
-		Index:     NewHNSWIndex(""),
+		Index:     index.NewHNSWIndex(""),
 		Embedder:  &fakeEmbedder{err: embErr},
 		BatchSize: 1,
 	}
@@ -271,9 +272,9 @@ func TestEmbeddingWorker_RunOnce_MarkFailedLogging(t *testing.T) {
 }
 
 func TestEmbeddingWorker_Run_FatalErrorStops(t *testing.T) {
-	fatal := ErrFatal
+	fatal := index.ErrFatal
 	tw := &testWorker{errs: []error{fatal}}
-	ew := &EmbeddingWorker{RunOnceFunc: tw.RunOnce, ErrCh: make(chan error, 1)}
+	ew := &index.EmbeddingWorker{RunOnceFunc: tw.RunOnce, ErrCh: make(chan error, 1)}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()

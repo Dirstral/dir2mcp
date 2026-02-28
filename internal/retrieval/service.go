@@ -10,7 +10,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/Dirstral/dir2mcp/internal/model"
+	"dir2mcp/internal/model"
 )
 
 var (

@@ -10,8 +10,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/Dirstral/dir2mcp/internal/config"
-	"github.com/Dirstral/dir2mcp/internal/model"
+	"dir2mcp/internal/config"
+	"dir2mcp/internal/model"
 )
 
 type fakeRetriever struct {
