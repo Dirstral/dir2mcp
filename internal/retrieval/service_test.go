@@ -45,7 +45,9 @@ func (e *fakeRetrievalEmbedder) Embed(_ context.Context, model string, texts []s
 	}
 	res := make([][]float32, n)
 	for i := range res {
-		res[i] = vec
+		clone := make([]float32, len(vec))
+		copy(clone, vec)
+		res[i] = clone
 	}
 	return res, nil
 }

@@ -222,9 +222,9 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 			cfg.ListenAddr = "0.0.0.0:0"
 		}
 		// Block insecure combination: --public with --auth none.
-		authMode := opts.auth
+		authMode := strings.TrimSpace(opts.auth)
 		if authMode == "" {
-			authMode = cfg.AuthMode
+			authMode = strings.TrimSpace(cfg.AuthMode)
 		}
 		if strings.EqualFold(authMode, "none") {
 			writeln(a.stderr, "ERROR: --public requires authentication; --auth none is not allowed in public mode")
