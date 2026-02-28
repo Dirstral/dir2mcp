@@ -30,7 +30,6 @@ const (
 
 type Server struct {
 	cfg       config.Config
-	retriever model.Retriever
 	authToken string
 
 	sessionMu sync.RWMutex
@@ -72,9 +71,10 @@ func (e validationError) Error() string {
 }
 
 func NewServer(cfg config.Config, retriever model.Retriever) *Server {
+	_ = retriever
+
 	return &Server{
 		cfg:       cfg,
-		retriever: retriever,
 		authToken: loadAuthToken(cfg),
 		sessions:  make(map[string]time.Time),
 	}
@@ -154,7 +154,16 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id := idValue(req.ID)
+	id, hasID, idErr := parseID(req.ID)
+	if idErr != nil {
+		canonicalCode := "INVALID_FIELD"
+		var vErr validationError
+		if errors.As(idErr, &vErr) && vErr.canonicalCode != "" {
+			canonicalCode = vErr.canonicalCode
+		}
+		writeError(w, http.StatusBadRequest, nil, -32600, idErr.Error(), canonicalCode, false)
+		return
+	}
 
 	if req.Method == "" {
 		writeError(w, http.StatusBadRequest, id, -32600, "method is required", "MISSING_FIELD", false)
@@ -171,15 +180,15 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 
 	switch req.Method {
 	case "initialize":
-		s.handleInitialize(w, id)
+		s.handleInitialize(w, id, hasID)
 	case "notifications/initialized":
-		if id == nil {
+		if !hasID {
 			w.WriteHeader(http.StatusAccepted)
 			return
 		}
 		writeResult(w, http.StatusOK, id, map[string]interface{}{})
 	default:
-		if id == nil {
+		if !hasID {
 			w.WriteHeader(http.StatusAccepted)
 			return
 		}
@@ -187,8 +196,8 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) handleInitialize(w http.ResponseWriter, id interface{}) {
-	if id == nil {
+func (s *Server) handleInitialize(w http.ResponseWriter, id interface{}, hasID bool) {
+	if !hasID {
 		writeError(w, http.StatusBadRequest, nil, -32600, "initialize requires id", "MISSING_FIELD", false)
 		return
 	}
@@ -288,16 +297,22 @@ func parseRequest(body io.ReadCloser) (rpcRequest, error) {
 	return req, nil
 }
 
-func idValue(raw json.RawMessage) interface{} {
+func parseID(raw json.RawMessage) (interface{}, bool, error) {
 	if raw == nil {
-		return nil
+		return nil, false, nil
 	}
 
 	var value interface{}
 	if err := json.Unmarshal(raw, &value); err != nil {
-		return nil
+		return nil, true, validationError{message: "invalid id", canonicalCode: "INVALID_FIELD"}
 	}
-	return value
+
+	switch value.(type) {
+	case nil, string, float64:
+		return value, true, nil
+	default:
+		return nil, true, validationError{message: "id must be string, number, or null", canonicalCode: "INVALID_FIELD"}
+	}
 }
 
 func writeResult(w http.ResponseWriter, statusCode int, id interface{}, result interface{}) {
@@ -442,7 +457,7 @@ func isOriginAllowed(origin string, allowlist []string) bool {
 			continue
 		}
 
-		if strings.EqualFold(strings.ToLower(allowed), originHost) || strings.EqualFold(strings.ToLower(allowed), strings.ToLower(parsedOrigin.Host)) {
+		if strings.EqualFold(allowed, originHost) || strings.EqualFold(allowed, parsedOrigin.Host) {
 			return true
 		}
 	}
