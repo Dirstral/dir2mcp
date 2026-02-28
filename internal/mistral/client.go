@@ -48,7 +48,9 @@ type Client struct {
 
 // NewClient constructs a client with safe default retry/timeout settings.
 func NewClient(baseURL, apiKey string) *Client {
-	if strings.TrimSpace(baseURL) == "" {
+	baseURL = strings.TrimSpace(baseURL)
+	apiKey = strings.TrimSpace(apiKey)
+	if baseURL == "" {
 		baseURL = defaultBaseURL
 	}
 
@@ -253,6 +255,7 @@ func (c *Client) embedBatch(ctx context.Context, modelName string, inputs []stri
 	}
 
 	vectors := make([][]float32, len(inputs))
+	seen := make([]bool, len(inputs))
 	for _, item := range parsed.Data {
 		if item.Index < 0 || item.Index >= len(inputs) {
 			return nil, &model.ProviderError{
@@ -262,11 +265,31 @@ func (c *Client) embedBatch(ctx context.Context, modelName string, inputs []stri
 				StatusCode: resp.StatusCode,
 			}
 		}
+		if seen[item.Index] {
+			return nil, &model.ProviderError{
+				Code:       "MISTRAL_FAILED",
+				Message:    fmt.Sprintf("embedding response contains duplicate index: %d", item.Index),
+				Retryable:  false,
+				StatusCode: resp.StatusCode,
+			}
+		}
 		vector := make([]float32, len(item.Embedding))
 		for i, val := range item.Embedding {
 			vector[i] = float32(val)
 		}
 		vectors[item.Index] = vector
+		seen[item.Index] = true
+	}
+
+	for i := range seen {
+		if !seen[i] {
+			return nil, &model.ProviderError{
+				Code:       "MISTRAL_FAILED",
+				Message:    fmt.Sprintf("embedding response missing index: %d", i),
+				Retryable:  false,
+				StatusCode: resp.StatusCode,
+			}
+		}
 	}
 
 	return vectors, nil

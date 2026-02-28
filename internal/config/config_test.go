@@ -7,12 +7,12 @@ import (
 )
 
 func TestLoad_UsesDotEnvWhenEnvIsMissing(t *testing.T) {
-	clearMistralEnv(t)
 	tmp := t.TempDir()
 	writeFile(t, filepath.Join(tmp, ".env"), "MISTRAL_API_KEY=from_dotenv\nMISTRAL_BASE_URL=https://dotenv.local\n")
 
 	withWorkingDir(t, tmp, func() {
-		cfg, err := Load("")
+		testEnv := map[string]string{}
+		cfg, err := load("", testEnv)
 		if err != nil {
 			t.Fatalf("Load failed: %v", err)
 		}
@@ -26,14 +26,15 @@ func TestLoad_UsesDotEnvWhenEnvIsMissing(t *testing.T) {
 }
 
 func TestLoad_EnvOverridesDotEnv(t *testing.T) {
-	clearMistralEnv(t)
 	tmp := t.TempDir()
 	writeFile(t, filepath.Join(tmp, ".env"), "MISTRAL_API_KEY=from_dotenv\nMISTRAL_BASE_URL=https://dotenv.local\n")
-	t.Setenv("MISTRAL_API_KEY", "from_env")
-	t.Setenv("MISTRAL_BASE_URL", "https://env.local")
 
 	withWorkingDir(t, tmp, func() {
-		cfg, err := Load("")
+		testEnv := map[string]string{
+			"MISTRAL_API_KEY":  "from_env",
+			"MISTRAL_BASE_URL": "https://env.local",
+		}
+		cfg, err := load("", testEnv)
 		if err != nil {
 			t.Fatalf("Load failed: %v", err)
 		}
@@ -47,13 +48,13 @@ func TestLoad_EnvOverridesDotEnv(t *testing.T) {
 }
 
 func TestLoad_DotEnvLocalOverridesDotEnv(t *testing.T) {
-	clearMistralEnv(t)
 	tmp := t.TempDir()
 	writeFile(t, filepath.Join(tmp, ".env"), "MISTRAL_API_KEY=from_env_file\nMISTRAL_BASE_URL=https://env-file.local\n")
 	writeFile(t, filepath.Join(tmp, ".env.local"), "MISTRAL_API_KEY=from_env_local\nMISTRAL_BASE_URL=https://env-local.local\n")
 
 	withWorkingDir(t, tmp, func() {
-		cfg, err := Load("")
+		testEnv := map[string]string{}
+		cfg, err := load("", testEnv)
 		if err != nil {
 			t.Fatalf("Load failed: %v", err)
 		}
@@ -66,6 +67,11 @@ func TestLoad_DotEnvLocalOverridesDotEnv(t *testing.T) {
 	})
 }
 
+// withWorkingDir changes the process working directory for the duration of fn.
+// Because cwd is process-global, this helper is incompatible with t.Parallel()
+// and must not be used in tests that call t.Parallel(). Tests that need
+// concurrency should isolate execution (for example in a subprocess) or use
+// explicit synchronization (for example a shared mutex).
 func withWorkingDir(t *testing.T, dir string, fn func()) {
 	t.Helper()
 	original, err := os.Getwd()
@@ -88,10 +94,4 @@ func writeFile(t *testing.T, path, content string) {
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatalf("WriteFile failed: %v", err)
 	}
-}
-
-func clearMistralEnv(t *testing.T) {
-	t.Helper()
-	t.Setenv("MISTRAL_API_KEY", "")
-	t.Setenv("MISTRAL_BASE_URL", "")
 }

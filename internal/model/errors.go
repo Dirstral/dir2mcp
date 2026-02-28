@@ -17,7 +17,16 @@ type ProviderError struct {
 
 func (e *ProviderError) Error() string {
 	if e == nil {
-		return ""
+		return "<nil ProviderError>"
+	}
+	if e.Code == "" && e.Message == "" {
+		return "<empty ProviderError>"
+	}
+	if e.Code == "" {
+		return e.Message
+	}
+	if e.Message == "" {
+		return e.Code
 	}
 	return e.Code + ": " + e.Message
 }

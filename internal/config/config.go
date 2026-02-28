@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -38,45 +39,52 @@ func Default() Config {
 }
 
 func Load(path string) (Config, error) {
+	return load(path, nil)
+}
+
+func load(path string, overrideEnv map[string]string) (Config, error) {
 	// Skeleton loader: return defaults until config parsing is implemented.
 	cfg := Default()
-	loadDotEnvFiles(".env.local", ".env")
+	_ = loadDotEnvFiles([]string{".env.local", ".env"}, overrideEnv)
 	if path == "" {
-		applyEnvOverrides(&cfg)
+		applyEnvOverrides(&cfg, overrideEnv)
 		return cfg, nil
 	}
 
 	if _, err := os.Stat(path); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			applyEnvOverrides(&cfg)
+			applyEnvOverrides(&cfg, overrideEnv)
 			return cfg, nil
 		}
 		return Config{}, fmt.Errorf("stat config: %w", err)
 	}
 
-	applyEnvOverrides(&cfg)
+	applyEnvOverrides(&cfg, overrideEnv)
 	return cfg, nil
 }
 
-func applyEnvOverrides(cfg *Config) {
+func applyEnvOverrides(cfg *Config, overrideEnv map[string]string) {
 	if cfg == nil {
 		return
 	}
-	if apiKey := strings.TrimSpace(os.Getenv("MISTRAL_API_KEY")); apiKey != "" {
+	if apiKey, ok := envLookup("MISTRAL_API_KEY", overrideEnv); ok && strings.TrimSpace(apiKey) != "" {
 		cfg.MistralAPIKey = apiKey
 	}
-	if baseURL := strings.TrimSpace(os.Getenv("MISTRAL_BASE_URL")); baseURL != "" {
+	if baseURL, ok := envLookup("MISTRAL_BASE_URL", overrideEnv); ok && strings.TrimSpace(baseURL) != "" {
 		cfg.MistralBaseURL = baseURL
 	}
 }
 
-func loadDotEnvFiles(paths ...string) {
+func loadDotEnvFiles(paths []string, overrideEnv map[string]string) error {
 	for _, p := range paths {
-		_ = loadDotEnvFile(p)
+		if err := loadDotEnvFile(p, overrideEnv); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
-func loadDotEnvFile(path string) error {
+func loadDotEnvFile(path string, overrideEnv map[string]string) error {
 	file, err := os.Open(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -107,21 +115,44 @@ func loadDotEnvFile(path string) error {
 		if key == "" {
 			continue
 		}
-		if existing, exists := os.LookupEnv(key); exists && strings.TrimSpace(existing) != "" {
+		if _, exists := envLookup(key, overrideEnv); exists {
 			continue
 		}
-		if setErr := os.Setenv(key, unquoteEnvValue(value)); setErr != nil {
-			continue
+		if setErr := envSet(key, unquoteEnvValue(value), overrideEnv); setErr != nil {
+			return setErr
 		}
 	}
 
 	return scanner.Err()
 }
 
+func envLookup(key string, overrideEnv map[string]string) (string, bool) {
+	if overrideEnv != nil {
+		val, ok := overrideEnv[key]
+		return val, ok
+	}
+	return os.LookupEnv(key)
+}
+
+func envSet(key, value string, overrideEnv map[string]string) error {
+	if overrideEnv != nil {
+		overrideEnv[key] = value
+		return nil
+	}
+	return os.Setenv(key, value)
+}
+
 func unquoteEnvValue(v string) string {
 	if len(v) >= 2 {
-		if (strings.HasPrefix(v, "\"") && strings.HasSuffix(v, "\"")) ||
-			(strings.HasPrefix(v, "'") && strings.HasSuffix(v, "'")) {
+		if strings.HasPrefix(v, "\"") && strings.HasSuffix(v, "\"") {
+			unquoted, err := strconv.Unquote(v)
+			if err != nil {
+				return v
+			}
+			return unquoted
+		}
+		if strings.HasPrefix(v, "'") && strings.HasSuffix(v, "'") {
+			// Single-quoted values are stripped but escape sequences are not processed.
 			return v[1 : len(v)-1]
 		}
 	}

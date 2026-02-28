@@ -3,6 +3,7 @@ package mistral
 import (
 	"context"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -23,7 +24,7 @@ func TestEmbed_Integration_MistralAPI(t *testing.T) {
 	client.BatchSize = 2
 	client.MaxRetries = 2
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), integrationTestTimeout())
 	defer cancel()
 
 	inputs := []string{
@@ -38,10 +39,35 @@ func TestEmbed_Integration_MistralAPI(t *testing.T) {
 	if len(vectors) != len(inputs) {
 		t.Fatalf("unexpected vector count: got %d want %d", len(vectors), len(inputs))
 	}
+	firstDim := len(vectors[0])
 
 	for i, vec := range vectors {
 		if len(vec) == 0 {
 			t.Fatalf("vector %d is empty", i)
 		}
+		if len(vec) != firstDim {
+			t.Fatalf("vector %d has length %d, expected %d", i, len(vec), firstDim)
+		}
 	}
+}
+
+func integrationTestTimeout() time.Duration {
+	const defaultTimeout = 30 * time.Second
+
+	// CI can tune this integration timeout via TEST_TIMEOUT_MS (preferred) or TEST_TIMEOUT_SECONDS.
+	if timeoutMS := strings.TrimSpace(os.Getenv("TEST_TIMEOUT_MS")); timeoutMS != "" {
+		value, err := strconv.Atoi(timeoutMS)
+		if err == nil && value > 0 {
+			return time.Duration(value) * time.Millisecond
+		}
+	}
+
+	if timeoutSeconds := strings.TrimSpace(os.Getenv("TEST_TIMEOUT_SECONDS")); timeoutSeconds != "" {
+		value, err := strconv.Atoi(timeoutSeconds)
+		if err == nil && value > 0 {
+			return time.Duration(value) * time.Second
+		}
+	}
+
+	return defaultTimeout
 }
