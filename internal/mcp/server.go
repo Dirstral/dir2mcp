@@ -24,6 +24,8 @@ const (
 	sessionHeaderName = "MCP-Session-Id"
 	authTokenEnvVar   = "DIR2MCP_AUTH_TOKEN"
 	maxRequestBody    = 1 << 20
+	sessionTTL        = 24 * time.Hour
+	sessionCleanupInterval = time.Hour
 )
 
 type Server struct {
@@ -74,6 +76,11 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) Run(ctx context.Context) error {
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	go s.runSessionCleanup(runCtx)
+
 	server := &http.Server{
 		Addr:    s.cfg.ListenAddr,
 		Handler: s.Handler(),
@@ -90,7 +97,7 @@ func (s *Server) Run(ctx context.Context) error {
 	}()
 
 	select {
-	case <-ctx.Done():
+	case <-runCtx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = server.Shutdown(shutdownCtx)
@@ -129,7 +136,7 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 
 	if req.Method != "initialize" {
 		sessionID := strings.TrimSpace(r.Header.Get(sessionHeaderName))
-		if sessionID == "" || !s.hasSession(sessionID) {
+		if sessionID == "" || !s.hasActiveSession(sessionID, time.Now()) {
 			writeError(w, http.StatusNotFound, id, -32001, "session not found", "SESSION_NOT_FOUND", false)
 			return
 		}
@@ -292,17 +299,52 @@ func writeResponse(w http.ResponseWriter, statusCode int, response rpcResponse) 
 	_ = json.NewEncoder(w).Encode(response)
 }
 
-func (s *Server) hasSession(id string) bool {
-	s.sessionMu.RLock()
-	defer s.sessionMu.RUnlock()
-	_, ok := s.sessions[id]
-	return ok
+func (s *Server) hasActiveSession(id string, now time.Time) bool {
+	s.sessionMu.Lock()
+	defer s.sessionMu.Unlock()
+
+	lastSeen, ok := s.sessions[id]
+	if !ok {
+		return false
+	}
+	if now.Sub(lastSeen) > sessionTTL {
+		delete(s.sessions, id)
+		return false
+	}
+
+	s.sessions[id] = now
+	return true
 }
 
 func (s *Server) storeSession(id string) {
 	s.sessionMu.Lock()
 	defer s.sessionMu.Unlock()
 	s.sessions[id] = time.Now()
+}
+
+func (s *Server) runSessionCleanup(ctx context.Context) {
+	ticker := time.NewTicker(sessionCleanupInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-ticker.C:
+			s.cleanupExpiredSessions(now)
+		}
+	}
+}
+
+func (s *Server) cleanupExpiredSessions(now time.Time) {
+	s.sessionMu.Lock()
+	defer s.sessionMu.Unlock()
+
+	for id, lastSeen := range s.sessions {
+		if now.Sub(lastSeen) > sessionTTL {
+			delete(s.sessions, id)
+		}
+	}
 }
 
 func generateSessionID() (string, error) {
