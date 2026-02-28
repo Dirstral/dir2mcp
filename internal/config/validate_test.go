@@ -39,4 +39,8 @@ func TestValidate_PlaceholderTreatedAsMissing(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when key is placeholder")
 	}
+	msg := err.Error()
+	if !strings.Contains(msg, "CONFIG_INVALID") {
+		t.Errorf("error should contain CONFIG_INVALID, got: %s", msg)
+	}
 }

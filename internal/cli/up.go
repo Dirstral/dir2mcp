@@ -214,6 +214,7 @@ func corsForAPI(next http.Handler, allowedOrigins []string) http.Handler {
 			if allowed[origin] {
 				w.Header().Set("Access-Control-Allow-Origin", origin)
 			}
+			w.Header().Set("Vary", "Origin")
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 			if r.Method == http.MethodOptions {

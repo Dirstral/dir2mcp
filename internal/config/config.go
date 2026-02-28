@@ -103,11 +103,13 @@ type X402ToolsCall struct {
 	PayTo   string `yaml:"pay_to"`
 }
 
+type X402BazaarMetadata struct {
+	Description string `yaml:"description"`
+}
+
 type X402Bazaar struct {
-	Enabled  bool   `yaml:"enabled"`
-	Metadata struct {
-		Description string `yaml:"description"`
-	} `yaml:"metadata"`
+	Enabled  bool              `yaml:"enabled"`
+	Metadata X402BazaarMetadata `yaml:"metadata"`
 }
 
 type Server struct {

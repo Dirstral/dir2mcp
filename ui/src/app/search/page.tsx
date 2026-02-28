@@ -21,6 +21,7 @@ export default function SearchPage() {
   const [sourceModal, setSourceModal] = useState<{ hit: Hit; content: string } | null>(null);
   const [sourceLoading, setSourceLoading] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
+  const closeButtonRef = useRef<HTMLButtonElement | null>(null);
 
   const fetchSource = useCallback(async (hit: Hit) => {
     if (!API_URL) return;
@@ -51,6 +52,7 @@ export default function SearchPage() {
 
   useEffect(() => {
     if (!sourceModal) return;
+    closeButtonRef.current?.focus();
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") setSourceModal(null);
     };
@@ -204,6 +206,7 @@ export default function SearchPage() {
               </p>
             )}
             <button
+              ref={closeButtonRef}
               type="button"
               onClick={() => setSourceModal(null)}
               className="mt-4 rounded bg-zinc-200 dark:bg-zinc-700 px-3 py-1.5 text-sm hover:bg-zinc-300 dark:hover:bg-zinc-600"

@@ -41,7 +41,7 @@ A Next.js app in `ui/` provides a dashboard, search, and ask pages.
 ```bash
 cd ui
 cp .env.example .env.local
-# Edit .env.local: set NEXT_PUBLIC_API_URL to the base URL printed by "dir2mcp up" (e.g. http://127.0.0.1:52143)
+# Edit .env.local: NEXT_PUBLIC_API_URL = base URL from "dir2mcp up"; API_TOKEN = Bearer token (required for dashboard)
 npm run dev
 ```
 

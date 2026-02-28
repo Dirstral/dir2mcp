@@ -47,5 +47,22 @@ func WriteConnectionJSON(stateDir, mcpURL, token, tokenSource, authMode string) 
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(stateDir, "connection.json"), data, 0600)
+	target := filepath.Join(stateDir, "connection.json")
+	tmp, err := os.CreateTemp(stateDir, "connection.json.tmp-*")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.Remove(tmp.Name()) }()
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), target)
 }

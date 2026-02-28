@@ -16,13 +16,14 @@ export async function GET() {
   if (!token) {
     return NextResponse.json(
       { error: "API_TOKEN not configured" },
-      { status: 503 }
+      { status: 500 }
     );
   }
   try {
     const res = await fetch(`${apiUrl}/api/corpus`, {
       headers: { Authorization: `Bearer ${token}` },
       next: { revalidate: 0 },
+      signal: AbortSignal.timeout(10000),
     });
     if (!res.ok) {
       return NextResponse.json(

@@ -103,8 +103,8 @@ export default function AskPage() {
                   Answer
                 </h2>
                 <div className="prose prose-sm dark:prose-invert max-w-none">
-                  {result.answer.split(/(\[[^\]]+\])/g).map((part, i) => {
-                    const m = part.match(/^\[([^\]]+)\]$/);
+                  {result.answer.split(/(\[[^\[\]]+\])/g).map((part, i) => {
+                    const m = part.match(/^\[([^\[\]]+)\]$/);
                     if (m) {
                       const ref = m[1];
                       return (
