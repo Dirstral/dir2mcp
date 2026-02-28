@@ -591,7 +591,9 @@ func (s *Server) handleOpenFileTool(ctx context.Context, args map[string]interfa
 		}
 	}
 
-	truncated := len([]rune(content)) >= maxChars
+	// retriever.OpenFile guarantees len([]rune(content)) <= maxChars.
+	// We treat content whose length equals maxChars as potentially truncated.
+	truncated := len([]rune(content)) == maxChars
 	structured := map[string]interface{}{
 		"rel_path":  relPath,
 		"doc_type":  inferDocType(relPath),
