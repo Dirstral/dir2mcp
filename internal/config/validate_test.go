@@ -11,7 +11,7 @@ func TestValidate_MissingConfigYieldsActionableOutput(t *testing.T) {
 	cfg := Default()
 	cfg.Mistral.APIKey = ""
 
-	err := Validate(cfg, true)
+	err := Validate(&cfg, true)
 	if err == nil {
 		t.Fatal("expected error when API key missing")
 	}
@@ -35,7 +35,7 @@ func TestValidate_PlaceholderTreatedAsMissing(t *testing.T) {
 	cfg := Default()
 	cfg.Mistral.APIKey = "${MISTRAL_API_KEY}"
 
-	err := Validate(cfg, true)
+	err := Validate(&cfg, true)
 	if err == nil {
 		t.Fatal("expected error when key is placeholder")
 	}

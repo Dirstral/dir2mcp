@@ -75,7 +75,7 @@ func TestSnapshot_NeverStoresPlaintextSecrets(t *testing.T) {
 	cfg.STT.Mistral.APIKey = "sk-mistral-stt"
 	cfg.STT.ElevenLabs.APIKey = "sk-elevenlabs-secret"
 
-	snap := SnapshotConfig(cfg)
+	snap := SnapshotConfig(&cfg)
 	if snap.Mistral.APIKey != "<from env MISTRAL_API_KEY>" {
 		t.Errorf("Mistral.APIKey should be redacted, got %q", snap.Mistral.APIKey)
 	}

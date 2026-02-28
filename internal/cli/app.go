@@ -57,31 +57,47 @@ func (a *App) printUsage() {
 }
 
 func (a *App) runUp() int {
-	cfg, err := config.Load(".dir2mcp.yaml")
+	stateDir := ".dir2mcp"
+	cfg, err := config.Load(config.Options{
+		ConfigPath: ".dir2mcp.yaml",
+		RootDir:    ".",
+		StateDir:   stateDir,
+	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "load config: %v\n", err)
 		return 2
 	}
 
-	if err := os.MkdirAll(cfg.StateDir, 0o755); err != nil {
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
 		fmt.Fprintf(os.Stderr, "create state dir: %v\n", err)
 		return 1
 	}
 
-	stateDB := filepath.Join(cfg.StateDir, "meta.sqlite")
+	stateDB := filepath.Join(stateDir, "meta.sqlite")
 	st := store.NewSQLiteStore(stateDB)
-	ix := index.NewHNSWIndex(filepath.Join(cfg.StateDir, "vectors_text.hnsw"))
+	ix := index.NewHNSWIndex(filepath.Join(stateDir, "vectors_text.hnsw"))
 	client := mistral.NewClient("", "")
 	ret := retrieval.NewService(st, ix, client)
-	mcpServer := mcp.NewServer(cfg, ret)
-	ing := ingest.NewService(cfg, st)
+	mcpServer, err := mcp.NewServer(mcp.ServerOptions{
+		RootDir:   ".",
+		StateDir:  stateDir,
+		Config:    cfg,
+		McpPath:   cfg.Server.MCPPath,
+		AuthToken: "",
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "mcp server: %v\n", err)
+		return 1
+	}
+	ing := ingest.NewService(*cfg, st)
 
-	fmt.Printf("State dir: %s\n", cfg.StateDir)
-	fmt.Printf("MCP endpoint (planned): http://%s%s\n", cfg.ListenAddr, cfg.MCPPath)
+	fmt.Printf("State dir: %s\n", stateDir)
+	fmt.Printf("MCP endpoint (planned): http://%s%s\n", cfg.Server.Listen, cfg.Server.MCPPath)
 	fmt.Println("Skeleton wiring complete; server/indexing logic is not implemented yet.")
 
 	_ = mcpServer
 	_ = ing
+	_ = ret
 	return 0
 }
 
@@ -124,7 +140,7 @@ func (a *App) runConfig(args []string) int {
 		fmt.Println("config init skeleton: not implemented")
 	case "print":
 		cfg := config.Default()
-		fmt.Printf("root=%s state_dir=%s listen=%s mcp_path=%s\n", cfg.RootDir, cfg.StateDir, cfg.ListenAddr, cfg.MCPPath)
+		fmt.Printf("root=. state_dir=.dir2mcp listen=%s mcp_path=%s\n", cfg.Server.Listen, cfg.Server.MCPPath)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown config subcommand: %s\n", args[0])
 		return 1
