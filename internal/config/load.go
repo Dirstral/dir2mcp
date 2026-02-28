@@ -56,9 +56,6 @@ func Load(opts Options) (*Config, error) {
 	if v := os.Getenv("ELEVENLABS_API_KEY"); v != "" {
 		cfg.STT.ElevenLabs.APIKey = v
 	}
-	if v := os.Getenv("DIR2MCP_AUTH_TOKEN"); v != "" && cfg.Security.Auth.TokenEnv == "" {
-		cfg.Security.Auth.TokenEnv = "DIR2MCP_AUTH_TOKEN"
-	}
 
 	// CLI overrides (highest precedence)
 	if opts.Overrides != nil {

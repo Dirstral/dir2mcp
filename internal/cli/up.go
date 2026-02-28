@@ -58,10 +58,12 @@ func runUp(cmd *cobra.Command, _ []string) error {
 	rootDir, err := filepath.Abs(globalFlags.Dir)
 	if err != nil {
 		exitWith(ExitRootInaccessible, "ERROR: root directory inaccessible: "+err.Error())
+		return nil
 	}
 	info, err := os.Stat(rootDir)
 	if err != nil || !info.IsDir() {
 		exitWith(ExitRootInaccessible, "ERROR: root directory not found or not a directory: "+globalFlags.Dir)
+		return nil
 	}
 
 	stateDir := globalFlags.StateDir
@@ -71,6 +73,7 @@ func runUp(cmd *cobra.Command, _ []string) error {
 	stateDir, err = filepath.Abs(stateDir)
 	if err != nil {
 		exitWith(ExitRootInaccessible, "ERROR: state directory path invalid: "+err.Error())
+		return nil
 	}
 
 	// Precedence: flags > env > file > defaults (issue #10).
@@ -107,6 +110,7 @@ func runUp(cmd *cobra.Command, _ []string) error {
 	})
 	if err != nil {
 		exitWith(ExitConfigInvalid, "ERROR: "+err.Error())
+		return nil
 	}
 	// Auth defaults from flag when not overridden (Cobra default is "auto")
 	if cfg.Server.Auth == "" {
@@ -116,6 +120,7 @@ func runUp(cmd *cobra.Command, _ []string) error {
 
 	if err := state.EnsureStateDir(stateDir, cfg); err != nil {
 		exitWith(ExitIndexLoadFailure, "ERROR: failed to init state: "+err.Error())
+		return nil
 	}
 	lockPath := filepath.Join(stateDir, "locks", "index.lock")
 	defer func() { _ = os.Remove(lockPath) }()
@@ -124,6 +129,7 @@ func runUp(cmd *cobra.Command, _ []string) error {
 	listener, err := net.Listen("tcp", listenAddr)
 	if err != nil {
 		exitWith(ExitBindFailure, "ERROR: server bind failure: "+err.Error())
+		return nil
 	}
 	addr := listener.Addr().(*net.TCPAddr)
 	baseURL := fmt.Sprintf("http://%s", addr.String())
@@ -135,16 +141,19 @@ func runUp(cmd *cobra.Command, _ []string) error {
 	token, tokenSource, err := state.ResolveAuthToken(stateDir, cfg.Server.Auth)
 	if err != nil {
 		exitWith(ExitConfigInvalid, "ERROR: auth: "+err.Error())
+		return nil
 	}
 
 	if err := state.WriteConnectionJSON(stateDir, mcpURL, token, tokenSource, cfg.Server.Auth); err != nil {
 		exitWith(ExitIndexLoadFailure, "ERROR: failed to write connection.json: "+err.Error())
+		return nil
 	}
 
 	jobID := "job_" + time.Now().UTC().Format("20060102-150405")
 	corpus := state.InitialCorpus(rootDir, jobID, cfg)
 	if err := state.WriteCorpusJSON(stateDir, corpus); err != nil {
 		exitWith(ExitIndexLoadFailure, "ERROR: failed to write corpus.json: "+err.Error())
+		return nil
 	}
 
 	if !globalFlags.Quiet && !globalFlags.JSON {
@@ -172,6 +181,7 @@ func runUp(cmd *cobra.Command, _ []string) error {
 	})
 	if err != nil {
 		exitWith(ExitIndexLoadFailure, "ERROR: MCP server init: "+err.Error())
+		return nil
 	}
 
 	// Start background indexer (incremental)
@@ -214,6 +224,7 @@ func runUp(cmd *cobra.Command, _ []string) error {
 	if upTLSCert != "" || upTLSKey != "" {
 		if upTLSCert == "" || upTLSKey == "" {
 			exitWith(ExitConfigInvalid, "ERROR: both --tls-cert and --tls-key are required")
+			return nil
 		}
 		return srv.ServeTLS(listener, upTLSCert, upTLSKey)
 	}

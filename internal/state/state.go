@@ -37,7 +37,13 @@ func EnsureStateDir(stateDir string, cfg *config.Config) error {
 		return err
 	}
 	_ = lockFile.Close()
-	// Lock is advisory; we leave the file in place while server runs (caller holds process).
+	// Lock is advisory; remove on failure so future runs can proceed.
+	removeLockOnError := true
+	defer func() {
+		if removeLockOnError {
+			_ = os.Remove(lockPath)
+		}
+	}()
 
 	tokenPath := filepath.Join(stateDir, "secret.token")
 	if _, err := os.Stat(tokenPath); os.IsNotExist(err) {
@@ -50,6 +56,7 @@ func EnsureStateDir(stateDir string, cfg *config.Config) error {
 		}
 	}
 
+	removeLockOnError = false // Success; caller holds lock until shutdown
 	return config.WriteSnapshot(stateDir, cfg)
 }
 

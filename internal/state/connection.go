@@ -19,6 +19,7 @@ type ConnectionJSON struct {
 	TokenFile  string          `json:"token_file,omitempty"`
 }
 
+// ConnectionSession holds MCP session header configuration.
 type ConnectionSession struct {
 	UsesMCPSessionID      bool   `json:"uses_mcp_session_id"`
 	HeaderName            string `json:"header_name"`

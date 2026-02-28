@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -43,6 +44,11 @@ func runConfigInit(_ *cobra.Command, _ []string) error {
 	}
 
 	// Write default config (issue #10: config init)
+	if _, err := os.Stat(configPath); err == nil {
+		return fmt.Errorf("config already exists at %s (refusing to overwrite)", configPath)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("failed to stat config path: %w", err)
+	}
 	if err := os.WriteFile(configPath, []byte(config.DefaultYAML), 0600); err != nil {
 		return fmt.Errorf("failed to write config: %w", err)
 	}

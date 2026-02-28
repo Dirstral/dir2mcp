@@ -82,11 +82,13 @@ type Chunking struct {
 	Transcript   ChunkingTranscript `yaml:"transcript"`
 }
 
+// ChunkingCode holds code-specific chunking parameters (max lines, overlap).
 type ChunkingCode struct {
 	MaxLines     int `yaml:"max_lines"`
 	OverlapLines int `yaml:"overlap_lines"`
 }
 
+// ChunkingTranscript holds transcript/audio segment parameters (ms).
 type ChunkingTranscript struct {
 	SegmentMs int `yaml:"segment_ms"`
 	OverlapMs int `yaml:"overlap_ms"`
@@ -99,12 +101,14 @@ type STT struct {
 	ElevenLabs STTElevenLabs `yaml:"elevenlabs"`
 }
 
+// STTMistral holds Mistral STT model and options.
 type STTMistral struct {
 	APIKey     string `yaml:"api_key"`
 	Model      string `yaml:"model"`
 	Timestamps bool   `yaml:"timestamps"`
 }
 
+// STTElevenLabs holds ElevenLabs STT model and options.
 type STTElevenLabs struct {
 	APIKey     string `yaml:"api_key"`
 	Model      string `yaml:"model"`
@@ -121,10 +125,12 @@ type X402 struct {
 	Bazaar          X402Bazaar     `yaml:"bazaar"`
 }
 
+// X402RoutePolicy holds per-route payment settings.
 type X402RoutePolicy struct {
 	ToolsCall X402ToolsCall `yaml:"tools_call"`
 }
 
+// X402ToolsCall holds tool-call payment settings.
 type X402ToolsCall struct {
 	Enabled bool   `yaml:"enabled"`
 	Price   string `yaml:"price"`
@@ -134,10 +140,12 @@ type X402ToolsCall struct {
 	PayTo   string `yaml:"pay_to"`
 }
 
+// X402BazaarMetadata holds bazaar listing metadata.
 type X402BazaarMetadata struct {
 	Description string `yaml:"description"`
 }
 
+// X402Bazaar holds bazaar configuration.
 type X402Bazaar struct {
 	Enabled  bool              `yaml:"enabled"`
 	Metadata X402BazaarMetadata `yaml:"metadata"`
@@ -153,6 +161,7 @@ type Server struct {
 	Auth            string    `yaml:"-"` // set from CLI/state; not in YAML
 }
 
+// ServerTLS holds TLS certificate paths.
 type ServerTLS struct {
 	Enabled  bool   `yaml:"enabled"`
 	CertFile string `yaml:"cert_file"`
@@ -166,11 +175,13 @@ type Secrets struct {
 	File      SecretsFile   `yaml:"file"`
 }
 
+// SecretsKeychain holds keychain provider settings.
 type SecretsKeychain struct {
 	Service string `yaml:"service"`
 	Account string `yaml:"account"`
 }
 
+// SecretsFile holds file-based secret storage settings.
 type SecretsFile struct {
 	Path string `yaml:"path"`
 	Mode string `yaml:"mode"`
@@ -184,6 +195,7 @@ type Security struct {
 	SecretPatterns  []string    `yaml:"secret_patterns"`
 }
 
+// SecurityAuth holds auth mode and token env name.
 type SecurityAuth struct {
 	Mode     string `yaml:"mode"`      // auto | none | file
 	TokenFile string `yaml:"token_file"`

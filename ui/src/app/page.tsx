@@ -56,10 +56,18 @@ export default function Home() {
 
   useEffect(() => {
     const controller = new AbortController();
-    fetchCorpus(controller.signal);
-    const id = setInterval(() => {
-      fetchCorpus(controller.signal);
-    }, POLL_INTERVAL_MS);
+    let inFlight = false;
+    const tick = async () => {
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        await fetchCorpus(controller.signal);
+      } finally {
+        inFlight = false;
+      }
+    };
+    void tick();
+    const id = setInterval(() => void tick(), POLL_INTERVAL_MS);
     return () => {
       clearInterval(id);
       controller.abort();
@@ -75,6 +83,7 @@ export default function Home() {
       : idx && idx.scanned > 0 && idx.indexed >= 0
         ? Math.min(99, Math.round((idx.indexed / idx.scanned) * 100))
         : 0;
+  const clampedProgress = Math.max(0, Math.min(100, progress));
 
   return (
     <div className="min-h-screen bg-zinc-50 dark:bg-zinc-950 text-zinc-900 dark:text-zinc-100">
@@ -107,7 +116,7 @@ export default function Home() {
                 <div className="mt-2 h-2 w-full rounded-full bg-zinc-200 dark:bg-zinc-800 overflow-hidden">
                   <div
                     className="h-full bg-blue-500 dark:bg-blue-600 transition-all duration-300"
-                    style={{ width: `${progress}%` }}
+                    style={{ width: `${clampedProgress}%` }}
                   />
                 </div>
                 <p className="mt-1 text-zinc-500 dark:text-zinc-400">

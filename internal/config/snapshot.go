@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 
@@ -9,8 +10,10 @@ import (
 
 // SnapshotConfig returns a copy of config safe to persist: secrets replaced with
 // source metadata only (SPEC: snapshot MUST NOT contain plaintext secrets).
-// SnapshotConfig returns a copy of cfg with secrets redacted for safe logging.
 func SnapshotConfig(cfg *Config) *Config {
+	if cfg == nil {
+		return nil
+	}
 	c := *cfg
 	c.Mistral.APIKey = redactSecret(cfg.Mistral.APIKey, "MISTRAL_API_KEY")
 	c.STT.Mistral.APIKey = redactSecret(cfg.STT.Mistral.APIKey, "MISTRAL_API_KEY")
@@ -25,10 +28,12 @@ func redactSecret(value, envName string) string {
 	return "<from env " + envName + ">"
 }
 
-// WriteSnapshot writes the snapshot YAML to stateDir/.dir2mcp.yaml.snapshot.
-// WriteSnapshot writes the redacted config snapshot to stateDir.
+// WriteSnapshot writes the redacted config snapshot to stateDir/.dir2mcp.yaml.snapshot.
 func WriteSnapshot(stateDir string, cfg *Config) error {
 	snap := SnapshotConfig(cfg)
+	if snap == nil {
+		return fmt.Errorf("config is nil")
+	}
 	data, err := yaml.Marshal(snap)
 	if err != nil {
 		return err
