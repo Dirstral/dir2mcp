@@ -50,8 +50,9 @@ export default function SearchPage() {
   }, []);
 
   useEffect(() => {
+    if (!sourceModal) return;
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && sourceModal) setSourceModal(null);
+      if (e.key === "Escape") setSourceModal(null);
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);

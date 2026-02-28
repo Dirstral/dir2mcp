@@ -57,6 +57,14 @@ export function formatCitation(relPath: string, span: Span | undefined): string 
     case "page":
       return `${relPath}#p=${span.page}`;
     case "time": {
+      if (
+        typeof span.start_ms !== "number" ||
+        typeof span.end_ms !== "number" ||
+        !Number.isFinite(span.start_ms) ||
+        !Number.isFinite(span.end_ms)
+      ) {
+        return relPath;
+      }
       const fmt = (ms: number) => {
         const m = Math.floor(ms / 60000);
         const s = Math.floor((ms % 60000) / 1000);

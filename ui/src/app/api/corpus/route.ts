@@ -15,7 +15,7 @@ export async function GET() {
   }
   if (!token) {
     return NextResponse.json(
-      { error: "API_TOKEN not configured (set in .env.local for corpus/stats)" },
+      { error: "API_TOKEN not configured" },
       { status: 503 }
     );
   }

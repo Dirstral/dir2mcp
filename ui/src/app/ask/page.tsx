@@ -109,7 +109,7 @@ export default function AskPage() {
                       const ref = m[1];
                       return (
                         <span
-                          key={i}
+                          key={`cite-${i}`}
                           className="inline rounded bg-blue-100 dark:bg-blue-900/40 px-1 py-0.5 text-blue-800 dark:text-blue-200 text-sm font-medium"
                           title={ref}
                         >
@@ -117,7 +117,7 @@ export default function AskPage() {
                         </span>
                       );
                     }
-                    return <span key={i}>{part}</span>;
+                    return <span key={`text-${i}`}>{part}</span>;
                   })}
                 </div>
               </div>

@@ -14,7 +14,7 @@ type Corpus = {
     stt_model?: string;
     chat?: string;
   };
-  indexing: {
+  indexing?: {
     job_id: string;
     running: boolean;
     mode: string;
@@ -72,7 +72,7 @@ export default function Home() {
   const progress =
     idx && idx.chunks_total > 0
       ? Math.round((idx.embedded_ok / idx.chunks_total) * 100)
-      : idx && idx.scanned > 0
+      : idx && idx.scanned > 0 && idx.indexed >= 0
         ? Math.min(99, Math.round((idx.indexed / idx.scanned) * 100))
         : 0;
 
