@@ -110,26 +110,22 @@ func TestSQLiteStoreDocumentCRUDAndListFilters(t *testing.T) {
 		t.Fatalf("unexpected prefix result count: got=%d want=2", len(srcDocs))
 	}
 
+	// deleted documents must not appear in ListFiles results
 	mdDocs, mdTotal, err := st.ListFiles(ctx, "", "docs/*.md", 100, 0)
 	if err != nil {
 		t.Fatalf("ListFiles(glob) failed: %v", err)
 	}
-	if mdTotal != 1 || len(mdDocs) != 1 {
-		t.Fatalf("unexpected md listing: total=%d len=%d", mdTotal, len(mdDocs))
-	}
-	if !mdDocs[0].Deleted {
-		t.Fatal("expected deleted document flag")
-	}
-	if mdDocs[0].Status != "skipped" {
-		t.Fatalf("unexpected md status: got=%q want=%q", mdDocs[0].Status, "skipped")
+	if mdTotal != 0 || len(mdDocs) != 0 {
+		t.Fatalf("deleted doc must be excluded: total=%d len=%d", mdTotal, len(mdDocs))
 	}
 
+	// total across all docs excludes the deleted entry (3 upserted, 1 deleted = 2 live)
 	pageOne, totalWithPaging, err := st.ListFiles(ctx, "", "", 1, 1)
 	if err != nil {
 		t.Fatalf("ListFiles(paging) failed: %v", err)
 	}
-	if totalWithPaging != 3 {
-		t.Fatalf("unexpected total with paging: got=%d want=3", totalWithPaging)
+	if totalWithPaging != 2 {
+		t.Fatalf("unexpected total with paging: got=%d want=2", totalWithPaging)
 	}
 	if len(pageOne) != 1 {
 		t.Fatalf("unexpected page size: got=%d want=1", len(pageOne))
