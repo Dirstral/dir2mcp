@@ -241,9 +241,12 @@ func (s *Server) allowOrigin(w http.ResponseWriter, r *http.Request) bool {
 func parseRequest(body io.ReadCloser) (rpcRequest, error) {
 	defer body.Close()
 
-	raw, err := io.ReadAll(io.LimitReader(body, maxRequestBody))
+	raw, err := io.ReadAll(io.LimitReader(body, maxRequestBody+1))
 	if err != nil {
 		return rpcRequest{}, err
+	}
+	if len(raw) > maxRequestBody {
+		return rpcRequest{}, errors.New("request body too large")
 	}
 
 	trimmed := strings.TrimSpace(string(raw))
