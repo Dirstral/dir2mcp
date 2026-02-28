@@ -114,7 +114,7 @@ func NewServer(cfg config.Config, retriever model.Retriever, opts ...ServerOptio
 		s.indexing = appstate.NewIndexingState(appstate.ModeIncremental)
 	}
 	if cfg.Public && cfg.RateLimitRPS > 0 && cfg.RateLimitBurst > 0 {
-		s.rateLimiter = newIPRateLimiter(float64(cfg.RateLimitRPS), cfg.RateLimitBurst)
+		s.rateLimiter = newIPRateLimiter(float64(cfg.RateLimitRPS), cfg.RateLimitBurst, cfg.TrustedProxies)
 	}
 	s.tools = s.buildToolRegistry()
 	return s
@@ -177,7 +177,7 @@ func (s *Server) RunOnListener(ctx context.Context, ln net.Listener) error {
 
 func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 	if s.rateLimiter != nil {
-		if !s.rateLimiter.allow(realIP(r)) {
+		if !s.rateLimiter.allow(realIP(r, s.rateLimiter)) {
 			w.Header().Set("Retry-After", "1")
 			writeError(w, http.StatusTooManyRequests, nil, -32000, "rate limit exceeded", "RATE_LIMIT_EXCEEDED", true)
 			return
