@@ -3,11 +3,13 @@ package tests
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"dir2mcp/internal/config"
@@ -51,6 +53,7 @@ func TestMCPToolsList_RegistersDayOneToolsWithSchemas(t *testing.T) {
 	expected := map[string]bool{
 		"dir2mcp.search":     false,
 		"dir2mcp.ask":        false,
+		"dir2mcp.ask_audio":  false,
 		"dir2mcp.open_file":  false,
 		"dir2mcp.list_files": false,
 		"dir2mcp.stats":      false,
@@ -73,6 +76,195 @@ func TestMCPToolsList_RegistersDayOneToolsWithSchemas(t *testing.T) {
 		if !seen {
 			t.Fatalf("missing expected tool registration: %s", name)
 		}
+	}
+}
+
+func TestMCPToolsCallAskAudio_NilRetrieverReturnsIndexNotReady(t *testing.T) {
+	cfg := config.Default()
+	cfg.AuthMode = "none"
+
+	server := httptest.NewServer(mcp.NewServer(cfg, nil).Handler())
+	defer server.Close()
+
+	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
+	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":20,"method":"tools/call","params":{"name":"dir2mcp.ask_audio","arguments":{"question":"What is indexed?"}}}`)
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+
+	assertToolCallErrorCode(t, resp, "INDEX_NOT_READY")
+}
+
+func TestMCPToolsCallAskAudio_AskNotImplementedReturnsGracefulSuccess(t *testing.T) {
+	cfg := config.Default()
+	cfg.AuthMode = "none"
+
+	retriever := &askAudioRetrieverStub{
+		askErr: model.ErrNotImplemented,
+	}
+	server := httptest.NewServer(mcp.NewServer(cfg, retriever).Handler())
+	defer server.Close()
+
+	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
+	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":21,"method":"tools/call","params":{"name":"dir2mcp.ask_audio","arguments":{"question":"What is indexed?"}}}`)
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+	if resp.StatusCode != http.StatusOK {
+		payload, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status=%d want=%d body=%s", resp.StatusCode, http.StatusOK, string(payload))
+	}
+
+	var envelope struct {
+		Result struct {
+			IsError bool `json:"isError"`
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"result"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	if envelope.Result.IsError {
+		t.Fatal("expected graceful success for not-implemented ask")
+	}
+	if len(envelope.Result.Content) == 0 {
+		t.Fatal("expected at least one content item")
+	}
+	if !strings.Contains(strings.ToLower(envelope.Result.Content[0].Text), "dir2mcp.search") {
+		t.Fatalf("expected fallback guidance to dir2mcp.search, got %q", envelope.Result.Content[0].Text)
+	}
+}
+
+func TestMCPToolsCallAskAudio_WithoutTTSReturnsTextOnly(t *testing.T) {
+	cfg := config.Default()
+	cfg.AuthMode = "none"
+
+	retriever := &askAudioRetrieverStub{
+		askResult: model.AskResult{
+			Question:         "What is indexed?",
+			Answer:           "Indexed content is available.",
+			Citations:        []model.Citation{},
+			Hits:             []model.SearchHit{},
+			IndexingComplete: true,
+		},
+	}
+	server := httptest.NewServer(mcp.NewServer(cfg, retriever).Handler())
+	defer server.Close()
+
+	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
+	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":22,"method":"tools/call","params":{"name":"dir2mcp.ask_audio","arguments":{"question":"What is indexed?"}}}`)
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+	if resp.StatusCode != http.StatusOK {
+		payload, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status=%d want=%d body=%s", resp.StatusCode, http.StatusOK, string(payload))
+	}
+
+	var envelope struct {
+		Result struct {
+			IsError bool `json:"isError"`
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"result"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	if envelope.Result.IsError {
+		t.Fatal("expected non-error response")
+	}
+	if len(envelope.Result.Content) != 1 {
+		t.Fatalf("expected one text content item, got %#v", envelope.Result.Content)
+	}
+	if envelope.Result.Content[0].Type != "text" {
+		t.Fatalf("expected text content item, got %#v", envelope.Result.Content[0])
+	}
+	if !strings.Contains(envelope.Result.Content[0].Text, "ELEVENLABS_API_KEY") {
+		t.Fatalf("expected configuration hint for ELEVENLABS_API_KEY, got %q", envelope.Result.Content[0].Text)
+	}
+}
+
+func TestMCPToolsCallAskAudio_WithTTSReturnsTextAndAudio(t *testing.T) {
+	cfg := config.Default()
+	cfg.AuthMode = "none"
+
+	retriever := &askAudioRetrieverStub{
+		askResult: model.AskResult{
+			Question:         "What is indexed?",
+			Answer:           "Indexed content is available.",
+			Citations:        []model.Citation{},
+			Hits:             []model.SearchHit{},
+			IndexingComplete: true,
+		},
+	}
+	tts := &fakeTTSSynthesizer{
+		audio: []byte("fake-mp3-bytes"),
+	}
+	server := httptest.NewServer(mcp.NewServer(cfg, retriever, mcp.WithTTS(tts)).Handler())
+	defer server.Close()
+
+	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
+	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":23,"method":"tools/call","params":{"name":"dir2mcp.ask_audio","arguments":{"question":"What is indexed?"}}}`)
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+	if resp.StatusCode != http.StatusOK {
+		payload, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status=%d want=%d body=%s", resp.StatusCode, http.StatusOK, string(payload))
+	}
+
+	var envelope struct {
+		Result struct {
+			IsError           bool                   `json:"isError"`
+			Content           []toolContentEnvelope  `json:"content"`
+			StructuredContent map[string]interface{} `json:"structuredContent"`
+		} `json:"result"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	if envelope.Result.IsError {
+		t.Fatal("expected successful ask_audio response")
+	}
+	if len(envelope.Result.Content) != 2 {
+		t.Fatalf("expected text + audio content items, got %#v", envelope.Result.Content)
+	}
+
+	textItem := envelope.Result.Content[0]
+	audioItem := envelope.Result.Content[1]
+	if textItem.Type != "text" {
+		t.Fatalf("unexpected text item: %#v", textItem)
+	}
+	if audioItem.Type != "audio" {
+		t.Fatalf("unexpected audio item type: %#v", audioItem)
+	}
+	if audioItem.MIMEType != "audio/mpeg" {
+		t.Fatalf("unexpected mime type: %q", audioItem.MIMEType)
+	}
+
+	wantEncoded := base64.StdEncoding.EncodeToString([]byte("fake-mp3-bytes"))
+	if audioItem.Data != wantEncoded {
+		t.Fatalf("unexpected audio data payload: got=%q want=%q", audioItem.Data, wantEncoded)
+	}
+
+	audioRaw, ok := envelope.Result.StructuredContent["audio"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected structuredContent.audio object, got %#v", envelope.Result.StructuredContent["audio"])
+	}
+	if gotMime, _ := audioRaw["mime_type"].(string); gotMime != "audio/mpeg" {
+		t.Fatalf("unexpected structured audio mime_type: %#v", audioRaw["mime_type"])
+	}
+	if gotData, _ := audioRaw["data"].(string); gotData != wantEncoded {
+		t.Fatalf("unexpected structured audio data: %#v", audioRaw["data"])
 	}
 }
 
@@ -519,4 +711,47 @@ func postRPC(t *testing.T, url, sessionID, body string) *http.Response {
 		t.Fatalf("do request: %v", err)
 	}
 	return resp
+}
+
+type askAudioRetrieverStub struct {
+	askResult model.AskResult
+	askErr    error
+}
+
+func (s *askAudioRetrieverStub) Search(_ context.Context, _ model.SearchQuery) ([]model.SearchHit, error) {
+	return nil, model.ErrNotImplemented
+}
+
+func (s *askAudioRetrieverStub) Ask(_ context.Context, _ string, _ model.SearchQuery) (model.AskResult, error) {
+	if s.askErr != nil {
+		return model.AskResult{}, s.askErr
+	}
+	return s.askResult, nil
+}
+
+func (s *askAudioRetrieverStub) OpenFile(_ context.Context, _ string, _ model.Span, _ int) (string, error) {
+	return "", model.ErrNotImplemented
+}
+
+func (s *askAudioRetrieverStub) Stats(_ context.Context) (model.Stats, error) {
+	return model.Stats{}, model.ErrNotImplemented
+}
+
+type fakeTTSSynthesizer struct {
+	audio []byte
+	err   error
+}
+
+func (f *fakeTTSSynthesizer) Synthesize(_ context.Context, _ string) ([]byte, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.audio, nil
+}
+
+type toolContentEnvelope struct {
+	Type     string `json:"type"`
+	Text     string `json:"text,omitempty"`
+	Data     string `json:"data,omitempty"`
+	MIMEType string `json:"mimeType,omitempty"`
 }

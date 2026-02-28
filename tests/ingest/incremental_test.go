@@ -1,4 +1,4 @@
-package ingest
+package tests
 
 import (
 	"context"
@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"dir2mcp/internal/config"
+	"dir2mcp/internal/ingest"
 	"dir2mcp/internal/model"
 )
 
@@ -79,7 +80,7 @@ func TestProcessDocument_IncrementalSkipsUnchangedRepresentation(t *testing.T) {
 	if err := os.WriteFile(absPath, []byte("same-content"), 0o644); err != nil {
 		t.Fatalf("write file: %v", err)
 	}
-	hash := computeContentHash([]byte("same-content"))
+	hash := ingest.ComputeContentHash([]byte("same-content"))
 
 	st := &fakeIncrementalStore{
 		existingDoc: model.Document{
@@ -88,13 +89,13 @@ func TestProcessDocument_IncrementalSkipsUnchangedRepresentation(t *testing.T) {
 			ContentHash: hash,
 		},
 	}
-	svc := NewService(config.Config{RootDir: root}, st)
-	df := DiscoveredFile{
+	svc := ingest.NewService(config.Config{RootDir: root}, st)
+	df := ingest.DiscoveredFile{
 		AbsPath:   absPath,
 		RelPath:   "a.txt",
 		SizeBytes: int64(len("same-content")),
 	}
-	if err := svc.processDocument(context.Background(), df, nil, false); err != nil {
+	if err := svc.ProcessDocument(context.Background(), df, nil, false); err != nil {
 		t.Fatalf("processDocument failed: %v", err)
 	}
 
@@ -113,7 +114,7 @@ func TestProcessDocument_ForceReindexRegeneratesRepresentation(t *testing.T) {
 	if err := os.WriteFile(absPath, []byte(content), 0o644); err != nil {
 		t.Fatalf("write file: %v", err)
 	}
-	hash := computeContentHash([]byte(content))
+	hash := ingest.ComputeContentHash([]byte(content))
 
 	st := &fakeIncrementalStore{
 		existingDoc: model.Document{
@@ -122,13 +123,13 @@ func TestProcessDocument_ForceReindexRegeneratesRepresentation(t *testing.T) {
 			ContentHash: hash,
 		},
 	}
-	svc := NewService(config.Config{RootDir: root}, st)
-	df := DiscoveredFile{
+	svc := ingest.NewService(config.Config{RootDir: root}, st)
+	df := ingest.DiscoveredFile{
 		AbsPath:   absPath,
 		RelPath:   "main.go",
 		SizeBytes: int64(len(content)),
 	}
-	if err := svc.processDocument(context.Background(), df, nil, true); err != nil {
+	if err := svc.ProcessDocument(context.Background(), df, nil, true); err != nil {
 		t.Fatalf("processDocument failed: %v", err)
 	}
 

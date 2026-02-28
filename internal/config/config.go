@@ -22,15 +22,23 @@ type Config struct {
 	ProtocolVersion string
 	Public          bool
 	AuthMode        string
-	PathExcludes    []string
-	SecretPatterns  []string
+	// RateLimitRPS and RateLimitBurst define per-IP token bucket limits
+	// used by the MCP server when running in public mode.
+	RateLimitRPS   int
+	RateLimitBurst int
+	// TrustedProxies controls when X-Forwarded-For may be used to derive
+	// client identity. Values can be IPs or CIDRs.
+	TrustedProxies []string
+	PathExcludes   []string
+	SecretPatterns []string
 	// ResolvedAuthToken is a runtime-only token value injected by CLI wiring.
 	// It is not loaded from disk and should not be persisted.
-	ResolvedAuthToken string
-	MistralAPIKey     string
-	MistralBaseURL    string
-	ElevenLabsAPIKey  string
-	ElevenLabsBaseURL string
+	ResolvedAuthToken    string
+	MistralAPIKey        string
+	MistralBaseURL       string
+	ElevenLabsAPIKey     string
+	ElevenLabsBaseURL    string
+	ElevenLabsTTSVoiceID string
 	// AllowedOrigins is always initialized with local defaults and then extended
 	// via env/CLI comma-separated origin lists.
 	AllowedOrigins []string
@@ -45,6 +53,12 @@ func Default() Config {
 		ProtocolVersion: DefaultProtocolVersion,
 		Public:          false,
 		AuthMode:        "auto",
+		RateLimitRPS:    60,
+		RateLimitBurst:  20,
+		TrustedProxies: []string{
+			"127.0.0.1/32",
+			"::1/128",
+		},
 		PathExcludes: []string{
 			"**/.git/**",
 			"**/.dir2mcp/**",
@@ -63,10 +77,11 @@ func Default() Config {
 			`(?i)token\s*[:=]\s*[A-Za-z0-9_.-]{20,}`,
 			`sk_[a-z0-9]{32}|api_[A-Za-z0-9]{32}`,
 		},
-		MistralAPIKey:     "",
-		MistralBaseURL:    "",
-		ElevenLabsAPIKey:  "",
-		ElevenLabsBaseURL: "",
+		MistralAPIKey:        "",
+		MistralBaseURL:       "",
+		ElevenLabsAPIKey:     "",
+		ElevenLabsBaseURL:    "",
+		ElevenLabsTTSVoiceID: "JBFqnCBsd6RMkjVDRZzb",
 		AllowedOrigins: []string{
 			"http://localhost",
 			"http://127.0.0.1",
@@ -117,8 +132,24 @@ func applyEnvOverrides(cfg *Config, overrideEnv map[string]string) {
 	if baseURL, ok := envLookup("ELEVENLABS_BASE_URL", overrideEnv); ok && strings.TrimSpace(baseURL) != "" {
 		cfg.ElevenLabsBaseURL = baseURL
 	}
+	if voiceID, ok := envLookup("ELEVENLABS_VOICE_ID", overrideEnv); ok && strings.TrimSpace(voiceID) != "" {
+		cfg.ElevenLabsTTSVoiceID = strings.TrimSpace(voiceID)
+	}
 	if allowedOrigins, ok := envLookup("DIR2MCP_ALLOWED_ORIGINS", overrideEnv); ok {
 		cfg.AllowedOrigins = MergeAllowedOrigins(cfg.AllowedOrigins, allowedOrigins)
+	}
+	if rawRPS, ok := envLookup("DIR2MCP_RATE_LIMIT_RPS", overrideEnv); ok {
+		if rps, err := strconv.Atoi(strings.TrimSpace(rawRPS)); err == nil && rps >= 0 {
+			cfg.RateLimitRPS = rps
+		}
+	}
+	if rawBurst, ok := envLookup("DIR2MCP_RATE_LIMIT_BURST", overrideEnv); ok {
+		if burst, err := strconv.Atoi(strings.TrimSpace(rawBurst)); err == nil && burst >= 0 {
+			cfg.RateLimitBurst = burst
+		}
+	}
+	if trustedProxies, ok := envLookup("DIR2MCP_TRUSTED_PROXIES", overrideEnv); ok {
+		cfg.TrustedProxies = MergeTrustedProxies(cfg.TrustedProxies, trustedProxies)
 	}
 }
 
@@ -182,6 +213,57 @@ func normalizeOriginKey(origin string) string {
 	}
 
 	return strings.ToLower(origin)
+}
+
+// MergeTrustedProxies appends comma-separated trusted proxies to an existing
+// list while preserving first-seen, normalized CIDR entries.
+func MergeTrustedProxies(existing []string, csv string) []string {
+	merged := make([]string, 0, len(existing))
+	seen := make(map[string]struct{}, len(existing))
+
+	add := func(value string) {
+		key := normalizeTrustedProxyKey(value)
+		if key == "" {
+			return
+		}
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		merged = append(merged, key)
+	}
+
+	for _, value := range existing {
+		add(value)
+	}
+	for _, value := range strings.Split(csv, ",") {
+		add(value)
+	}
+	return merged
+}
+
+func normalizeTrustedProxyKey(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+
+	if strings.Contains(value, "/") {
+		_, network, err := net.ParseCIDR(value)
+		if err != nil {
+			return ""
+		}
+		return network.String()
+	}
+
+	ip := net.ParseIP(value)
+	if ip == nil {
+		return ""
+	}
+	if v4 := ip.To4(); v4 != nil {
+		return (&net.IPNet{IP: v4, Mask: net.CIDRMask(32, 32)}).String()
+	}
+	return (&net.IPNet{IP: ip, Mask: net.CIDRMask(128, 128)}).String()
 }
 
 func loadDotEnvFiles(paths []string, overrideEnv map[string]string) error {

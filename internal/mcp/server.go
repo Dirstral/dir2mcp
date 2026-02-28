@@ -28,6 +28,8 @@ const (
 	maxRequestBody         = 1 << 20
 	sessionTTL             = 24 * time.Hour
 	sessionCleanupInterval = time.Hour
+	rateLimitCleanupEvery  = 5 * time.Minute
+	rateLimitBucketMaxAge  = 10 * time.Minute
 )
 
 // DefaultSearchK is used when tools/call search arguments omit k or provide
@@ -40,10 +42,13 @@ type Server struct {
 	retriever model.Retriever
 	store     model.Store
 	indexing  *appstate.IndexingState
+	tts       TTSSynthesizer
 	tools     map[string]toolDefinition
 
 	sessionMu sync.RWMutex
 	sessions  map[string]time.Time
+
+	rateLimiter *ipRateLimiter
 }
 
 type rpcRequest struct {
@@ -82,6 +87,10 @@ func (e validationError) Error() string {
 
 type ServerOption func(*Server)
 
+type TTSSynthesizer interface {
+	Synthesize(ctx context.Context, text string) ([]byte, error)
+}
+
 func WithStore(store model.Store) ServerOption {
 	return func(s *Server) {
 		s.store = store
@@ -91,6 +100,12 @@ func WithStore(store model.Store) ServerOption {
 func WithIndexingState(state *appstate.IndexingState) ServerOption {
 	return func(s *Server) {
 		s.indexing = state
+	}
+}
+
+func WithTTS(tts TTSSynthesizer) ServerOption {
+	return func(s *Server) {
+		s.tts = tts
 	}
 }
 
@@ -109,6 +124,9 @@ func NewServer(cfg config.Config, retriever model.Retriever, opts ...ServerOptio
 	if s.indexing == nil {
 		s.indexing = appstate.NewIndexingState(appstate.ModeIncremental)
 	}
+	if cfg.Public && cfg.RateLimitRPS > 0 && cfg.RateLimitBurst > 0 {
+		s.rateLimiter = newIPRateLimiter(float64(cfg.RateLimitRPS), cfg.RateLimitBurst, cfg.TrustedProxies)
+	}
 	s.tools = s.buildToolRegistry()
 	return s
 }
@@ -116,7 +134,36 @@ func NewServer(cfg config.Config, retriever model.Retriever, opts ...ServerOptio
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc(s.cfg.MCPPath, s.handleMCP)
-	return mux
+	return s.corsMiddleware(mux)
+}
+
+// corsMiddleware wraps the handler to support CORS preflight (OPTIONS) and
+// response headers for the MCP endpoint. Required for browser-based MCP
+// clients such as ElevenLabs Conversational AI.
+func (s *Server) corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		origin := strings.TrimSpace(r.Header.Get("Origin"))
+		if origin != "" && isOriginAllowed(origin, s.cfg.AllowedOrigins) {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, MCP-Protocol-Version, MCP-Session-Id")
+			w.Header().Set("Access-Control-Expose-Headers", "MCP-Session-Id")
+			w.Header().Set("Access-Control-Max-Age", "86400")
+			w.Header().Set("Vary", "Origin")
+		}
+
+		accessControlRequestMethod := strings.TrimSpace(r.Header.Get("Access-Control-Request-Method"))
+		accessControlRequestHeaders := strings.TrimSpace(r.Header.Get("Access-Control-Request-Headers"))
+		isPreflight := r.Method == http.MethodOptions &&
+			origin != "" &&
+			(accessControlRequestMethod != "" || accessControlRequestHeaders != "")
+		if isPreflight {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) Run(ctx context.Context) error {
@@ -136,6 +183,9 @@ func (s *Server) RunOnListener(ctx context.Context, ln net.Listener) error {
 	defer cancel()
 
 	go s.runSessionCleanup(runCtx)
+	if s.rateLimiter != nil {
+		go s.runRateLimitCleanup(runCtx)
+	}
 
 	server := &http.Server{
 		Handler:           s.Handler(),
@@ -166,6 +216,14 @@ func (s *Server) RunOnListener(ctx context.Context, ln net.Listener) error {
 }
 
 func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
+	if s.rateLimiter != nil {
+		if !s.rateLimiter.allow(realIP(r, s.rateLimiter)) {
+			w.Header().Set("Retry-After", "1")
+			writeError(w, http.StatusTooManyRequests, nil, -32000, "rate limit exceeded", "RATE_LIMIT_EXCEEDED", true)
+			return
+		}
+	}
+
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -437,6 +495,20 @@ func (s *Server) runSessionCleanup(ctx context.Context) {
 			return
 		case now := <-ticker.C:
 			s.cleanupExpiredSessions(now)
+		}
+	}
+}
+
+func (s *Server) runRateLimitCleanup(ctx context.Context) {
+	ticker := time.NewTicker(rateLimitCleanupEvery)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.rateLimiter.cleanup(rateLimitBucketMaxAge)
 		}
 	}
 }

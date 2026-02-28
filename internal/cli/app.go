@@ -20,6 +20,7 @@ import (
 
 	"dir2mcp/internal/appstate"
 	"dir2mcp/internal/config"
+	"dir2mcp/internal/elevenlabs"
 	"dir2mcp/internal/index"
 	"dir2mcp/internal/ingest"
 	"dir2mcp/internal/mcp"
@@ -361,7 +362,20 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	if preloadedChunks > 0 {
 		indexingState.AddEmbeddedOK(int64(preloadedChunks))
 	}
-	mcpServer := mcp.NewServer(cfg, ret, mcp.WithStore(st), mcp.WithIndexingState(indexingState))
+
+	serverOptions := []mcp.ServerOption{
+		mcp.WithStore(st),
+		mcp.WithIndexingState(indexingState),
+	}
+	if strings.TrimSpace(cfg.ElevenLabsAPIKey) != "" {
+		ttsClient := elevenlabs.NewClient(cfg.ElevenLabsAPIKey, cfg.ElevenLabsTTSVoiceID)
+		if strings.TrimSpace(cfg.ElevenLabsBaseURL) != "" {
+			ttsClient.BaseURL = strings.TrimRight(strings.TrimSpace(cfg.ElevenLabsBaseURL), "/")
+		}
+		serverOptions = append(serverOptions, mcp.WithTTS(ttsClient))
+	}
+
+	mcpServer := mcp.NewServer(cfg, ret, serverOptions...)
 	ing := a.newIngestor(cfg, st)
 	if stateAware, ok := ing.(indexingStateAware); ok {
 		stateAware.SetIndexingState(indexingState)
@@ -896,6 +910,12 @@ func buildMCPURL(addr, path string) string {
 	return "http://" + addr + path
 }
 
+// PublicURLAddress derives the public-facing address using the configured
+// listen host and the resolved runtime port.
+func PublicURLAddress(configuredListenAddr, resolvedListenAddr string) string {
+	return publicURLAddress(configuredListenAddr, resolvedListenAddr)
+}
+
 func publicURLAddress(configuredListenAddr, resolvedListenAddr string) string {
 	configuredListenAddr = strings.TrimSpace(configuredListenAddr)
 	resolvedListenAddr = strings.TrimSpace(resolvedListenAddr)
@@ -913,6 +933,12 @@ func publicURLAddress(configuredListenAddr, resolvedListenAddr string) string {
 	}
 
 	return net.JoinHostPort(host, "0")
+}
+
+// ExtractPortFromAddress extracts a numeric trailing port token from a
+// host:port address or malformed best-effort address string.
+func ExtractPortFromAddress(addr string) string {
+	return extractPortFromAddress(addr)
 }
 
 func extractPortFromAddress(addr string) string {

@@ -14,6 +14,11 @@
 - We are shelving custom Web UI scope for now (previous issue tracks: `#11`, `#18`).
 - Demo path is now hosted ElevenLabs Agent + remote MCP integration into `dir2mcp`.
 
+**Issue #39 alignment note (2026-02-28):**
+- `main` currently has no `docs/` directory, so hosted talk-to operational docs live in existing markdown files.
+- Runbook + smoke checklist + final 3–5 minute hosted demo script are maintained in `README.md` under `Hosted Talk-To Runbook (Issue #39)`.
+- Demo execution should rely on currently stable read-only MCP tools (`search`, `open_file`, `list_files`, `stats`) and include a no-result fallback path.
+
 **Key Mistral integrations:**
 - `mistral-embed` + `codestral-embed` — embeddings
 - `mistral-ocr-latest` — PDFs/images

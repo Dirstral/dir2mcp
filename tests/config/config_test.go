@@ -6,13 +6,14 @@ import (
 	"testing"
 
 	"dir2mcp/internal/config"
+	"dir2mcp/tests/testutil"
 )
 
 func TestLoad_UsesDotEnvWhenEnvIsMissing(t *testing.T) {
 	tmp := t.TempDir()
 	writeFile(t, filepath.Join(tmp, ".env"), "MISTRAL_API_KEY=from_dotenv\nMISTRAL_BASE_URL=https://dotenv.local\n")
 
-	withWorkingDir(t, tmp, func() {
+	testutil.WithWorkingDir(t, tmp, func() {
 		t.Setenv("MISTRAL_API_KEY", "")
 		t.Setenv("MISTRAL_BASE_URL", "")
 		cfg, err := config.Load("")
@@ -32,7 +33,7 @@ func TestLoad_EnvOverridesDotEnv(t *testing.T) {
 	tmp := t.TempDir()
 	writeFile(t, filepath.Join(tmp, ".env"), "MISTRAL_API_KEY=from_dotenv\nMISTRAL_BASE_URL=https://dotenv.local\n")
 
-	withWorkingDir(t, tmp, func() {
+	testutil.WithWorkingDir(t, tmp, func() {
 		t.Setenv("MISTRAL_API_KEY", "from_env")
 		t.Setenv("MISTRAL_BASE_URL", "https://env.local")
 		cfg, err := config.Load("")
@@ -53,7 +54,7 @@ func TestLoad_DotEnvLocalOverridesDotEnv(t *testing.T) {
 	writeFile(t, filepath.Join(tmp, ".env"), "MISTRAL_API_KEY=from_env_file\nMISTRAL_BASE_URL=https://env-file.local\n")
 	writeFile(t, filepath.Join(tmp, ".env.local"), "MISTRAL_API_KEY=from_env_local\nMISTRAL_BASE_URL=https://env-local.local\n")
 
-	withWorkingDir(t, tmp, func() {
+	testutil.WithWorkingDir(t, tmp, func() {
 		t.Setenv("MISTRAL_API_KEY", "")
 		t.Setenv("MISTRAL_BASE_URL", "")
 		cfg, err := config.Load("")
@@ -71,11 +72,12 @@ func TestLoad_DotEnvLocalOverridesDotEnv(t *testing.T) {
 
 func TestLoad_UsesDotEnvWhenEnvIsMissing_ElevenLabs(t *testing.T) {
 	tmp := t.TempDir()
-	writeFile(t, filepath.Join(tmp, ".env"), "ELEVENLABS_API_KEY=el_from_dotenv\nELEVENLABS_BASE_URL=https://el-dotenv.local\n")
+	writeFile(t, filepath.Join(tmp, ".env"), "ELEVENLABS_API_KEY=el_from_dotenv\nELEVENLABS_BASE_URL=https://el-dotenv.local\nELEVENLABS_VOICE_ID=voice-from-dotenv\n")
 
-	withWorkingDir(t, tmp, func() {
+	testutil.WithWorkingDir(t, tmp, func() {
 		t.Setenv("ELEVENLABS_API_KEY", "")
 		t.Setenv("ELEVENLABS_BASE_URL", "")
+		t.Setenv("ELEVENLABS_VOICE_ID", "")
 		cfg, err := config.Load("")
 		if err != nil {
 			t.Fatalf("Load failed: %v", err)
@@ -86,16 +88,20 @@ func TestLoad_UsesDotEnvWhenEnvIsMissing_ElevenLabs(t *testing.T) {
 		if cfg.ElevenLabsBaseURL != "https://el-dotenv.local" {
 			t.Fatalf("unexpected elevenlabs base URL: %q", cfg.ElevenLabsBaseURL)
 		}
+		if cfg.ElevenLabsTTSVoiceID != "voice-from-dotenv" {
+			t.Fatalf("unexpected elevenlabs voice id: %q", cfg.ElevenLabsTTSVoiceID)
+		}
 	})
 }
 
 func TestLoad_EnvOverridesDotEnv_ElevenLabs(t *testing.T) {
 	tmp := t.TempDir()
-	writeFile(t, filepath.Join(tmp, ".env"), "ELEVENLABS_API_KEY=el_from_dotenv\nELEVENLABS_BASE_URL=https://el-dotenv.local\n")
+	writeFile(t, filepath.Join(tmp, ".env"), "ELEVENLABS_API_KEY=el_from_dotenv\nELEVENLABS_BASE_URL=https://el-dotenv.local\nELEVENLABS_VOICE_ID=voice-from-dotenv\n")
 
-	withWorkingDir(t, tmp, func() {
+	testutil.WithWorkingDir(t, tmp, func() {
 		t.Setenv("ELEVENLABS_API_KEY", "el_from_env")
 		t.Setenv("ELEVENLABS_BASE_URL", "https://el-env.local")
+		t.Setenv("ELEVENLABS_VOICE_ID", "voice-from-env")
 		cfg, err := config.Load("")
 		if err != nil {
 			t.Fatalf("Load failed: %v", err)
@@ -106,17 +112,21 @@ func TestLoad_EnvOverridesDotEnv_ElevenLabs(t *testing.T) {
 		if cfg.ElevenLabsBaseURL != "https://el-env.local" {
 			t.Fatalf("unexpected elevenlabs base URL: %q", cfg.ElevenLabsBaseURL)
 		}
+		if cfg.ElevenLabsTTSVoiceID != "voice-from-env" {
+			t.Fatalf("unexpected elevenlabs voice id: %q", cfg.ElevenLabsTTSVoiceID)
+		}
 	})
 }
 
 func TestLoad_DotEnvLocalOverridesDotEnv_ElevenLabs(t *testing.T) {
 	tmp := t.TempDir()
-	writeFile(t, filepath.Join(tmp, ".env"), "ELEVENLABS_API_KEY=el_env_file\nELEVENLABS_BASE_URL=https://el-env-file.local\n")
-	writeFile(t, filepath.Join(tmp, ".env.local"), "ELEVENLABS_API_KEY=el_env_local\nELEVENLABS_BASE_URL=https://el-env-local.local\n")
+	writeFile(t, filepath.Join(tmp, ".env"), "ELEVENLABS_API_KEY=el_env_file\nELEVENLABS_BASE_URL=https://el-env-file.local\nELEVENLABS_VOICE_ID=voice-env-file\n")
+	writeFile(t, filepath.Join(tmp, ".env.local"), "ELEVENLABS_API_KEY=el_env_local\nELEVENLABS_BASE_URL=https://el-env-local.local\nELEVENLABS_VOICE_ID=voice-env-local\n")
 
-	withWorkingDir(t, tmp, func() {
+	testutil.WithWorkingDir(t, tmp, func() {
 		t.Setenv("ELEVENLABS_API_KEY", "")
 		t.Setenv("ELEVENLABS_BASE_URL", "")
+		t.Setenv("ELEVENLABS_VOICE_ID", "")
 		cfg, err := config.Load("")
 		if err != nil {
 			t.Fatalf("Load failed: %v", err)
@@ -127,13 +137,31 @@ func TestLoad_DotEnvLocalOverridesDotEnv_ElevenLabs(t *testing.T) {
 		if cfg.ElevenLabsBaseURL != "https://el-env-local.local" {
 			t.Fatalf("unexpected elevenlabs base URL: %q", cfg.ElevenLabsBaseURL)
 		}
+		if cfg.ElevenLabsTTSVoiceID != "voice-env-local" {
+			t.Fatalf("unexpected elevenlabs voice id: %q", cfg.ElevenLabsTTSVoiceID)
+		}
+	})
+}
+
+func TestLoad_DefaultElevenLabsVoiceID(t *testing.T) {
+	tmp := t.TempDir()
+
+	testutil.WithWorkingDir(t, tmp, func() {
+		t.Setenv("ELEVENLABS_VOICE_ID", "")
+		cfg, err := config.Load("")
+		if err != nil {
+			t.Fatalf("Load failed: %v", err)
+		}
+		if cfg.ElevenLabsTTSVoiceID != "JBFqnCBsd6RMkjVDRZzb" {
+			t.Fatalf("unexpected default elevenlabs voice id: %q", cfg.ElevenLabsTTSVoiceID)
+		}
 	})
 }
 
 func TestLoad_AllowedOriginsEnvAppendsToDefaults(t *testing.T) {
 	tmp := t.TempDir()
 
-	withWorkingDir(t, tmp, func() {
+	testutil.WithWorkingDir(t, tmp, func() {
 		t.Setenv("DIR2MCP_ALLOWED_ORIGINS", "https://elevenlabs.io,https://my-app.example.com")
 		cfg, err := config.Load("")
 		if err != nil {
@@ -150,7 +178,7 @@ func TestLoad_AllowedOriginsEnvAppendsToDefaults(t *testing.T) {
 func TestLoad_AllowedOriginsEnvDeduplicatesHostCase(t *testing.T) {
 	tmp := t.TempDir()
 
-	withWorkingDir(t, tmp, func() {
+	testutil.WithWorkingDir(t, tmp, func() {
 		t.Setenv("DIR2MCP_ALLOWED_ORIGINS", "HTTP://LOCALHOST,https://elevenlabs.io")
 		cfg, err := config.Load("")
 		if err != nil {
@@ -173,7 +201,7 @@ func TestLoad_AllowedOriginsEnvDeduplicatesHostCase(t *testing.T) {
 func TestLoad_AllowedOriginsEnvSkipsMalformedOrigins(t *testing.T) {
 	tmp := t.TempDir()
 
-	withWorkingDir(t, tmp, func() {
+	testutil.WithWorkingDir(t, tmp, func() {
 		t.Setenv("DIR2MCP_ALLOWED_ORIGINS", "://bad-origin,https://elevenlabs.io")
 		cfg, err := config.Load("")
 		if err != nil {
@@ -189,7 +217,7 @@ func TestLoad_AllowedOriginsEnvSkipsMalformedOrigins(t *testing.T) {
 func TestLoad_AllowedOriginsEnvSkipsPathLikeToken(t *testing.T) {
 	tmp := t.TempDir()
 
-	withWorkingDir(t, tmp, func() {
+	testutil.WithWorkingDir(t, tmp, func() {
 		t.Setenv("DIR2MCP_ALLOWED_ORIGINS", "bad/path,https://elevenlabs.io")
 		cfg, err := config.Load("")
 		if err != nil {
@@ -204,7 +232,7 @@ func TestLoad_AllowedOriginsEnvSkipsPathLikeToken(t *testing.T) {
 func TestLoad_AllowedOriginsEnvSkipsBackslashToken(t *testing.T) {
 	tmp := t.TempDir()
 
-	withWorkingDir(t, tmp, func() {
+	testutil.WithWorkingDir(t, tmp, func() {
 		t.Setenv("DIR2MCP_ALLOWED_ORIGINS", "bad\\path,https://elevenlabs.io")
 		cfg, err := config.Load("")
 		if err != nil {
@@ -219,7 +247,7 @@ func TestLoad_AllowedOriginsEnvSkipsBackslashToken(t *testing.T) {
 func TestLoad_AllowedOriginsEnvSkipsWhitespaceToken(t *testing.T) {
 	tmp := t.TempDir()
 
-	withWorkingDir(t, tmp, func() {
+	testutil.WithWorkingDir(t, tmp, func() {
 		t.Setenv("DIR2MCP_ALLOWED_ORIGINS", "bad origin,https://elevenlabs.io")
 		cfg, err := config.Load("")
 		if err != nil {
@@ -234,7 +262,7 @@ func TestLoad_AllowedOriginsEnvSkipsWhitespaceToken(t *testing.T) {
 func TestLoad_AllowedOriginsEnvDeduplicatesHTTPSDefaultPort(t *testing.T) {
 	tmp := t.TempDir()
 
-	withWorkingDir(t, tmp, func() {
+	testutil.WithWorkingDir(t, tmp, func() {
 		t.Setenv("DIR2MCP_ALLOWED_ORIGINS", "https://example.com,https://example.com:443")
 		cfg, err := config.Load("")
 		if err != nil {
@@ -257,7 +285,7 @@ func TestLoad_AllowedOriginsEnvDeduplicatesHTTPSDefaultPort(t *testing.T) {
 func TestLoad_AllowedOriginsEnvDeduplicatesHTTPDefaultPort(t *testing.T) {
 	tmp := t.TempDir()
 
-	withWorkingDir(t, tmp, func() {
+	testutil.WithWorkingDir(t, tmp, func() {
 		t.Setenv("DIR2MCP_ALLOWED_ORIGINS", "http://example.com,http://example.com:80")
 		cfg, err := config.Load("")
 		if err != nil {
@@ -280,7 +308,7 @@ func TestLoad_AllowedOriginsEnvDeduplicatesHTTPDefaultPort(t *testing.T) {
 func TestLoad_AllowedOriginsEnvKeepsNonDefaultPortDistinct(t *testing.T) {
 	tmp := t.TempDir()
 
-	withWorkingDir(t, tmp, func() {
+	testutil.WithWorkingDir(t, tmp, func() {
 		t.Setenv("DIR2MCP_ALLOWED_ORIGINS", "https://example.com,https://example.com:444")
 		cfg, err := config.Load("")
 		if err != nil {
@@ -289,6 +317,118 @@ func TestLoad_AllowedOriginsEnvKeepsNonDefaultPortDistinct(t *testing.T) {
 
 		assertContains(t, cfg.AllowedOrigins, "https://example.com")
 		assertContains(t, cfg.AllowedOrigins, "https://example.com:444")
+	})
+}
+
+func TestDefault_RateLimitValues(t *testing.T) {
+	cfg := config.Default()
+	if cfg.RateLimitRPS != 60 {
+		t.Fatalf("RateLimitRPS=%d want=%d", cfg.RateLimitRPS, 60)
+	}
+	if cfg.RateLimitBurst != 20 {
+		t.Fatalf("RateLimitBurst=%d want=%d", cfg.RateLimitBurst, 20)
+	}
+}
+
+func TestLoad_RateLimitEnvOverrides(t *testing.T) {
+	tmp := t.TempDir()
+
+	testutil.WithWorkingDir(t, tmp, func() {
+		t.Setenv("DIR2MCP_RATE_LIMIT_RPS", "75")
+		t.Setenv("DIR2MCP_RATE_LIMIT_BURST", "25")
+
+		cfg, err := config.Load("")
+		if err != nil {
+			t.Fatalf("Load failed: %v", err)
+		}
+
+		if cfg.RateLimitRPS != 75 {
+			t.Fatalf("RateLimitRPS=%d want=%d", cfg.RateLimitRPS, 75)
+		}
+		if cfg.RateLimitBurst != 25 {
+			t.Fatalf("RateLimitBurst=%d want=%d", cfg.RateLimitBurst, 25)
+		}
+	})
+}
+
+func TestLoad_RateLimitEnvInvalidValuesIgnored(t *testing.T) {
+	tmp := t.TempDir()
+
+	testutil.WithWorkingDir(t, tmp, func() {
+		t.Setenv("DIR2MCP_RATE_LIMIT_RPS", "not-a-number")
+		t.Setenv("DIR2MCP_RATE_LIMIT_BURST", "-1")
+
+		cfg, err := config.Load("")
+		if err != nil {
+			t.Fatalf("Load failed: %v", err)
+		}
+
+		if cfg.RateLimitRPS != 60 {
+			t.Fatalf("RateLimitRPS=%d want default %d", cfg.RateLimitRPS, 60)
+		}
+		if cfg.RateLimitBurst != 20 {
+			t.Fatalf("RateLimitBurst=%d want default %d", cfg.RateLimitBurst, 20)
+		}
+	})
+}
+
+func TestLoad_RateLimitEnvAllowsZeroToDisable(t *testing.T) {
+	tmp := t.TempDir()
+
+	testutil.WithWorkingDir(t, tmp, func() {
+		t.Setenv("DIR2MCP_RATE_LIMIT_RPS", "0")
+		t.Setenv("DIR2MCP_RATE_LIMIT_BURST", "0")
+
+		cfg, err := config.Load("")
+		if err != nil {
+			t.Fatalf("Load failed: %v", err)
+		}
+
+		if cfg.RateLimitRPS != 0 {
+			t.Fatalf("RateLimitRPS=%d want=%d", cfg.RateLimitRPS, 0)
+		}
+		if cfg.RateLimitBurst != 0 {
+			t.Fatalf("RateLimitBurst=%d want=%d", cfg.RateLimitBurst, 0)
+		}
+	})
+}
+
+func TestDefault_TrustedProxies(t *testing.T) {
+	cfg := config.Default()
+	assertContains(t, cfg.TrustedProxies, "127.0.0.1/32")
+	assertContains(t, cfg.TrustedProxies, "::1/128")
+}
+
+func TestLoad_TrustedProxiesEnvAppendsAndNormalizes(t *testing.T) {
+	tmp := t.TempDir()
+
+	testutil.WithWorkingDir(t, tmp, func() {
+		t.Setenv("DIR2MCP_TRUSTED_PROXIES", "10.0.0.0/8,203.0.113.7")
+		cfg, err := config.Load("")
+		if err != nil {
+			t.Fatalf("Load failed: %v", err)
+		}
+
+		assertContains(t, cfg.TrustedProxies, "127.0.0.1/32")
+		assertContains(t, cfg.TrustedProxies, "::1/128")
+		assertContains(t, cfg.TrustedProxies, "10.0.0.0/8")
+		assertContains(t, cfg.TrustedProxies, "203.0.113.7/32")
+	})
+}
+
+func TestLoad_TrustedProxiesEnvSkipsMalformedValues(t *testing.T) {
+	tmp := t.TempDir()
+
+	testutil.WithWorkingDir(t, tmp, func() {
+		t.Setenv("DIR2MCP_TRUSTED_PROXIES", "bad-value,10.0.0.0/8,300.1.1.1")
+		cfg, err := config.Load("")
+		if err != nil {
+			t.Fatalf("Load failed: %v", err)
+		}
+
+		assertContains(t, cfg.TrustedProxies, "10.0.0.0/8")
+		assertNotContains(t, cfg.TrustedProxies, "bad-value")
+		assertNotContains(t, cfg.TrustedProxies, "300.1.1.1")
 	})
 }
 

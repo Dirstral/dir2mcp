@@ -1,4 +1,4 @@
-package ingest
+package tests
 
 import (
 	"bytes"
@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"dir2mcp/internal/ingest"
 	"dir2mcp/internal/model"
 )
 
@@ -21,7 +22,7 @@ func TestNewRepresentationGeneratorNil(t *testing.T) {
 			t.Fatalf("unexpected panic message: %v", r)
 		}
 	}()
-	_ = NewRepresentationGenerator(nil)
+	_ = ingest.NewRepresentationGenerator(nil)
 }
 
 func TestNormalizeUTF8(t *testing.T) {
@@ -72,9 +73,9 @@ func TestNormalizeUTF8(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := normalizeUTF8(tt.input)
+			result := ingest.NormalizeUTF8(tt.input)
 			if !bytes.Equal(result, tt.expected) {
-				t.Errorf("normalizeUTF8() = %q, want %q", result, tt.expected)
+				t.Errorf("ingest.NormalizeUTF8() = %q, want %q", result, tt.expected)
 			}
 		})
 	}
@@ -104,9 +105,9 @@ func TestShouldGenerateRawText(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := ShouldGenerateRawText(tt.docType)
+			result := ingest.ShouldGenerateRawText(tt.docType)
 			if result != tt.expected {
-				t.Errorf("ShouldGenerateRawText(%q) = %v, want %v", tt.docType, result, tt.expected)
+				t.Errorf("ingest.ShouldGenerateRawText(%q) = %v, want %v", tt.docType, result, tt.expected)
 			}
 		})
 	}
@@ -119,11 +120,11 @@ func TestRepTypeConstants(t *testing.T) {
 		constant string
 		expected string
 	}{
-		{"raw_text", RepTypeRawText, "raw_text"},
-		{"ocr_markdown", RepTypeOCRMarkdown, "ocr_markdown"},
-		{"transcript", RepTypeTranscript, "transcript"},
-		{"annotation_json", RepTypeAnnotationJSON, "annotation_json"},
-		{"annotation_text", RepTypeAnnotationText, "annotation_text"},
+		{"raw_text", ingest.RepTypeRawText, "raw_text"},
+		{"ocr_markdown", ingest.RepTypeOCRMarkdown, "ocr_markdown"},
+		{"transcript", ingest.RepTypeTranscript, "transcript"},
+		{"annotation_json", ingest.RepTypeAnnotationJSON, "annotation_json"},
+		{"annotation_text", ingest.RepTypeAnnotationText, "annotation_text"},
 	}
 
 	for _, tt := range tests {
@@ -138,7 +139,7 @@ func TestRepTypeConstants(t *testing.T) {
 // Example integration test structure (implementation would be in a separate file)
 func TestRepresentationGeneratorIntegration(t *testing.T) {
 	st := &fakeRepStore{failAfter: -1}
-	rg := NewRepresentationGenerator(st)
+	rg := ingest.NewRepresentationGenerator(st)
 	doc := model.Document{
 		DocID:   1,
 		RelPath: "main.go",
@@ -167,7 +168,7 @@ func TestRepresentationGeneratorIntegration(t *testing.T) {
 
 func TestGenerateRawTextFromContentPrefersGivenBytes(t *testing.T) {
 	st := &fakeRepStore{failAfter: -1}
-	rg := NewRepresentationGenerator(st)
+	rg := ingest.NewRepresentationGenerator(st)
 	doc := model.Document{DocID: 1, RelPath: "foo.txt", DocType: "text"}
 
 	provided := []byte("provided content")
@@ -178,7 +179,7 @@ func TestGenerateRawTextFromContentPrefersGivenBytes(t *testing.T) {
 		t.Fatalf("expected 1 representation upsert, got %d", st.upsertCount)
 	}
 	// compute hash of provided content to ensure it was used
-	hash := computeRepHash(normalizeUTF8(provided))
+	hash := ingest.ComputeRepHash(ingest.NormalizeUTF8(provided))
 	if len(st.reps) == 0 {
 		t.Fatalf("no representation recorded, expected at least one")
 	}
@@ -192,7 +193,7 @@ func TestGenerateRawTextTooLarge(t *testing.T) {
 	// this test, which only verifies oversized-file rejection before any
 	// chunks are inserted.
 	st := &fakeRepStore{failAfter: -1}
-	rg := NewRepresentationGenerator(st)
+	rg := ingest.NewRepresentationGenerator(st)
 	doc := model.Document{DocID: 1, RelPath: "large.txt", DocType: "text"}
 
 	// create a file just above the defaultMaxFileSizeBytes limit
@@ -201,7 +202,7 @@ func TestGenerateRawTextTooLarge(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create temp file: %v", err)
 	}
-	if err := f.Truncate(defaultMaxFileSizeBytes + 1); err != nil {
+	if err := f.Truncate(ingest.DefaultMaxFileSizeBytes() + 1); err != nil {
 		if closeErr := f.Close(); closeErr != nil {
 			t.Fatalf("close temp file after truncate failure: %v", closeErr)
 		}
@@ -222,7 +223,7 @@ func TestGenerateRawTextTooLarge(t *testing.T) {
 
 func TestChunkCodeByLines(t *testing.T) {
 	content := strings.Repeat("line\n", 260)
-	chunks := chunkCodeByLines(content, 200, 30)
+	chunks := ingest.ChunkCodeByLines(content, 200, 30)
 	if len(chunks) < 2 {
 		t.Fatalf("expected at least 2 chunks, got %d", len(chunks))
 	}
@@ -239,7 +240,7 @@ func TestChunkCodeByLines(t *testing.T) {
 
 func TestChunkTextByChars(t *testing.T) {
 	content := strings.Repeat("abcdefghijklmnopqrstuvwxyz", 200)
-	chunks := chunkTextByChars(content, 250, 25, 50)
+	chunks := ingest.ChunkTextByChars(content, 250, 25, 50)
 	if len(chunks) < 2 {
 		t.Fatalf("expected multiple chunks, got %d", len(chunks))
 	}
@@ -341,11 +342,10 @@ func (s *fakeRepStore) WithTx(ctx context.Context, fn func(tx model.Representati
 
 func TestUpsertChunksForRepresentationTransaction(t *testing.T) {
 	st := &fakeRepStore{failAfter: 1}
-	rg := NewRepresentationGenerator(st)
-	err := rg.upsertChunksForRepresentation(context.Background(), 42, "text", []chunkSegment{
-		{Text: "one", Span: model.Span{Kind: "lines", StartLine: 1, EndLine: 1}},
-		{Text: "two", Span: model.Span{Kind: "lines", StartLine: 2, EndLine: 2}},
-	})
+	rg := ingest.NewRepresentationGenerator(st)
+	doc := model.Document{DocID: 42, RelPath: "main.go", DocType: "code"}
+	content := []byte(strings.Repeat("line\n", 260))
+	err := rg.GenerateRawTextFromContent(context.Background(), doc, content)
 	if err == nil {
 		t.Fatal("expected error from failing chunk insert")
 	}

@@ -1,4 +1,4 @@
-package ingest
+package tests
 
 import (
 	"bytes"
@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"dir2mcp/internal/config"
+	"dir2mcp/internal/ingest"
 	"dir2mcp/internal/model"
 )
 
@@ -82,11 +83,8 @@ func (s *fakeIngestStore) WithTx(ctx context.Context, fn func(tx model.Represent
 func TestGenerateOCRMarkdownRepresentation_PersistsPagedChunks(t *testing.T) {
 	stateDir := t.TempDir()
 	st := &fakeIngestStore{}
-	svc := &Service{
-		cfg:    config.Config{StateDir: stateDir},
-		repGen: NewRepresentationGenerator(st),
-		ocr:    &fakeOCR{text: "page-1 text\fpage-2 text"},
-	}
+	svc := ingest.NewService(config.Config{StateDir: stateDir}, st)
+	svc.SetOCR(&fakeOCR{text: "page-1 text\fpage-2 text"})
 
 	doc := model.Document{
 		DocID:   42,
@@ -95,15 +93,15 @@ func TestGenerateOCRMarkdownRepresentation_PersistsPagedChunks(t *testing.T) {
 	}
 	content := []byte("pdf bytes")
 
-	if err := svc.generateOCRMarkdownRepresentation(context.Background(), doc, content); err != nil {
+	if err := svc.GenerateOCRMarkdownRepresentation(context.Background(), doc, content); err != nil {
 		t.Fatalf("generateOCRMarkdownRepresentation failed: %v", err)
 	}
 
 	if len(st.reps) != 1 {
 		t.Fatalf("expected one representation, got %d", len(st.reps))
 	}
-	if st.reps[0].RepType != RepTypeOCRMarkdown {
-		t.Fatalf("expected rep type %q, got %q", RepTypeOCRMarkdown, st.reps[0].RepType)
+	if st.reps[0].RepType != ingest.RepTypeOCRMarkdown {
+		t.Fatalf("expected rep type %q, got %q", ingest.RepTypeOCRMarkdown, st.reps[0].RepType)
 	}
 	if len(st.chunks) != 2 {
 		t.Fatalf("expected two OCR chunks, got %d", len(st.chunks))
@@ -118,7 +116,7 @@ func TestGenerateOCRMarkdownRepresentation_PersistsPagedChunks(t *testing.T) {
 		t.Fatalf("expected stale chunk cleanup call")
 	}
 
-	cachePath := filepath.Join(stateDir, "cache", "ocr", computeContentHash(content)+".md")
+	cachePath := filepath.Join(stateDir, "cache", "ocr", ingest.ComputeContentHash(content)+".md")
 	if _, err := os.Stat(cachePath); err != nil {
 		t.Fatalf("expected OCR cache file at %s: %v", cachePath, err)
 	}
@@ -127,7 +125,7 @@ func TestGenerateOCRMarkdownRepresentation_PersistsPagedChunks(t *testing.T) {
 func TestReadOrComputeOCR_UsesCache(t *testing.T) {
 	stateDir := t.TempDir()
 	content := []byte("same bytes")
-	cachePath := filepath.Join(stateDir, "cache", "ocr", computeContentHash(content)+".md")
+	cachePath := filepath.Join(stateDir, "cache", "ocr", ingest.ComputeContentHash(content)+".md")
 	if err := os.MkdirAll(filepath.Dir(cachePath), 0o755); err != nil {
 		t.Fatalf("mkdir cache dir: %v", err)
 	}
@@ -136,13 +134,11 @@ func TestReadOrComputeOCR_UsesCache(t *testing.T) {
 	}
 
 	ocr := &fakeOCR{text: "fresh ocr"}
-	svc := &Service{
-		cfg: config.Config{StateDir: stateDir},
-		ocr: ocr,
-	}
+	svc := ingest.NewService(config.Config{StateDir: stateDir}, nil)
+	svc.SetOCR(ocr)
 	doc := model.Document{RelPath: "docs/spec.pdf"}
 
-	got, err := svc.readOrComputeOCR(context.Background(), doc, content)
+	got, err := svc.ReadOrComputeOCR(context.Background(), doc, content)
 	if err != nil {
 		t.Fatalf("readOrComputeOCR failed: %v", err)
 	}
@@ -156,7 +152,7 @@ func TestReadOrComputeOCR_UsesCache(t *testing.T) {
 
 func TestReadOrComputeOCR_PrunesCacheByMaxBytes(t *testing.T) {
 	stateDir := t.TempDir()
-	svc := &Service{cfg: config.Config{StateDir: stateDir}}
+	svc := ingest.NewService(config.Config{StateDir: stateDir}, nil)
 	svc.SetOCRCacheLimits(10, 0)
 
 	// create two cache entries, one old and one newer.  the combined size (11
@@ -164,8 +160,8 @@ func TestReadOrComputeOCR_PrunesCacheByMaxBytes(t *testing.T) {
 	// we call readOrComputeOCR.
 	contentA := []byte("aaaaa")
 	contentB := []byte("bbbbbb")
-	pathA := filepath.Join(stateDir, "cache", "ocr", computeContentHash(contentA)+".md")
-	pathB := filepath.Join(stateDir, "cache", "ocr", computeContentHash(contentB)+".md")
+	pathA := filepath.Join(stateDir, "cache", "ocr", ingest.ComputeContentHash(contentA)+".md")
+	pathB := filepath.Join(stateDir, "cache", "ocr", ingest.ComputeContentHash(contentB)+".md")
 	if err := os.MkdirAll(filepath.Dir(pathA), 0o755); err != nil {
 		t.Fatalf("mkdir cache dir: %v", err)
 	}
@@ -181,9 +177,9 @@ func TestReadOrComputeOCR_PrunesCacheByMaxBytes(t *testing.T) {
 	}
 
 	fake := &fakeOCR{text: "foo"}
-	svc.ocr = fake
+	svc.SetOCR(fake)
 	doc := model.Document{RelPath: "docs/foo.pdf"}
-	if _, err := svc.readOrComputeOCR(context.Background(), doc, []byte("ccc")); err != nil {
+	if _, err := svc.ReadOrComputeOCR(context.Background(), doc, []byte("ccc")); err != nil {
 		t.Fatalf("readOrComputeOCR failed: %v", err)
 	}
 
@@ -197,11 +193,11 @@ func TestReadOrComputeOCR_PrunesCacheByMaxBytes(t *testing.T) {
 
 func TestReadOrComputeOCR_PrunesCacheByTTL(t *testing.T) {
 	stateDir := t.TempDir()
-	svc := &Service{cfg: config.Config{StateDir: stateDir}}
+	svc := ingest.NewService(config.Config{StateDir: stateDir}, nil)
 	svc.SetOCRCacheLimits(0, time.Second)
 
 	contentOld := []byte("old")
-	pathOld := filepath.Join(stateDir, "cache", "ocr", computeContentHash(contentOld)+".md")
+	pathOld := filepath.Join(stateDir, "cache", "ocr", ingest.ComputeContentHash(contentOld)+".md")
 	if err := os.MkdirAll(filepath.Dir(pathOld), 0o755); err != nil {
 		t.Fatalf("mkdir cache dir: %v", err)
 	}
@@ -214,15 +210,15 @@ func TestReadOrComputeOCR_PrunesCacheByTTL(t *testing.T) {
 	}
 
 	contentNew := []byte("new")
-	pathNew := filepath.Join(stateDir, "cache", "ocr", computeContentHash(contentNew)+".md")
+	pathNew := filepath.Join(stateDir, "cache", "ocr", ingest.ComputeContentHash(contentNew)+".md")
 	if err := os.WriteFile(pathNew, []byte("new"), 0o644); err != nil {
 		t.Fatalf("write new file: %v", err)
 	}
 
 	fake := &fakeOCR{text: "bar"}
-	svc.ocr = fake
+	svc.SetOCR(fake)
 	doc := model.Document{RelPath: "docs/foo.pdf"}
-	if _, err := svc.readOrComputeOCR(context.Background(), doc, []byte("ccc")); err != nil {
+	if _, err := svc.ReadOrComputeOCR(context.Background(), doc, []byte("ccc")); err != nil {
 		t.Fatalf("readOrComputeOCR failed: %v", err)
 	}
 
@@ -236,7 +232,7 @@ func TestReadOrComputeOCR_PrunesCacheByTTL(t *testing.T) {
 
 func TestReadOrComputeOCR_PrunesCacheByTTLThenSize(t *testing.T) {
 	stateDir := t.TempDir()
-	svc := &Service{cfg: config.Config{StateDir: stateDir}}
+	svc := ingest.NewService(config.Config{StateDir: stateDir}, nil)
 	svc.SetOCRCacheLimits(10, time.Second)
 
 	cacheDir := filepath.Join(stateDir, "cache", "ocr")
@@ -248,10 +244,10 @@ func TestReadOrComputeOCR_PrunesCacheByTTLThenSize(t *testing.T) {
 	contentOldB := []byte("old-B")
 	contentNewA := []byte("new-A")
 	contentNewB := []byte("new-B")
-	pathOldA := filepath.Join(cacheDir, computeContentHash(contentOldA)+".md")
-	pathOldB := filepath.Join(cacheDir, computeContentHash(contentOldB)+".md")
-	pathNewA := filepath.Join(cacheDir, computeContentHash(contentNewA)+".md")
-	pathNewB := filepath.Join(cacheDir, computeContentHash(contentNewB)+".md")
+	pathOldA := filepath.Join(cacheDir, ingest.ComputeContentHash(contentOldA)+".md")
+	pathOldB := filepath.Join(cacheDir, ingest.ComputeContentHash(contentOldB)+".md")
+	pathNewA := filepath.Join(cacheDir, ingest.ComputeContentHash(contentNewA)+".md")
+	pathNewB := filepath.Join(cacheDir, ingest.ComputeContentHash(contentNewB)+".md")
 
 	for _, tc := range []struct {
 		path string
@@ -286,9 +282,9 @@ func TestReadOrComputeOCR_PrunesCacheByTTLThenSize(t *testing.T) {
 	// Trigger a cache miss write so pruning runs on write-based policy.
 	contentMiss := []byte("miss")
 	fake := &fakeOCR{text: "zz"}
-	svc.ocr = fake
+	svc.SetOCR(fake)
 	doc := model.Document{RelPath: "docs/foo.pdf"}
-	got, err := svc.readOrComputeOCR(context.Background(), doc, contentMiss)
+	got, err := svc.ReadOrComputeOCR(context.Background(), doc, contentMiss)
 	if err != nil {
 		t.Fatalf("readOrComputeOCR failed: %v", err)
 	}
@@ -329,7 +325,7 @@ func TestReadOrComputeOCR_PrunesCacheByTTLThenSize(t *testing.T) {
 func TestReadOrComputeOCR_PruneInterval(t *testing.T) {
 	// set up a cache with two entries that would exceed a tiny maxBytes limit
 	stateDir := t.TempDir()
-	svc := &Service{cfg: config.Config{StateDir: stateDir}}
+	svc := ingest.NewService(config.Config{StateDir: stateDir}, nil)
 	svc.SetOCRCacheLimits(5, 0)  // total limit only 5 bytes
 	svc.SetOCRCachePruneEvery(2) // only enforce every two writes
 
@@ -341,8 +337,8 @@ func TestReadOrComputeOCR_PruneInterval(t *testing.T) {
 	// create two files already in cache that together are 6 bytes (>5)
 	contentA := []byte("aaa")
 	contentB := []byte("bbb")
-	pathA := filepath.Join(cacheDir, computeContentHash(contentA)+".md")
-	pathB := filepath.Join(cacheDir, computeContentHash(contentB)+".md")
+	pathA := filepath.Join(cacheDir, ingest.ComputeContentHash(contentA)+".md")
+	pathB := filepath.Join(cacheDir, ingest.ComputeContentHash(contentB)+".md")
 	if err := os.WriteFile(pathA, contentA, 0o644); err != nil {
 		t.Fatalf("write file A: %v", err)
 	}
@@ -352,9 +348,9 @@ func TestReadOrComputeOCR_PruneInterval(t *testing.T) {
 
 	// first call should NOT prune because interval=2 and this is first write
 	fake := &fakeOCR{text: "foo"}
-	svc.ocr = fake
+	svc.SetOCR(fake)
 	doc := model.Document{RelPath: "doc"}
-	if _, err := svc.readOrComputeOCR(context.Background(), doc, []byte("x")); err != nil {
+	if _, err := svc.ReadOrComputeOCR(context.Background(), doc, []byte("x")); err != nil {
 		t.Fatalf("readOrComputeOCR failed: %v", err)
 	}
 	if _, err := os.Stat(pathA); err != nil {
@@ -365,7 +361,7 @@ func TestReadOrComputeOCR_PruneInterval(t *testing.T) {
 	}
 
 	// second call should trigger pruning; one of the old files should be removed
-	if _, err := svc.readOrComputeOCR(context.Background(), doc, []byte("y")); err != nil {
+	if _, err := svc.ReadOrComputeOCR(context.Background(), doc, []byte("y")); err != nil {
 		t.Fatalf("second readOrComputeOCR failed: %v", err)
 	}
 	// cache state after second write (debug)
@@ -391,7 +387,7 @@ func TestReadOrComputeOCR_PruneInterval(t *testing.T) {
 
 func TestClearOCRCache(t *testing.T) {
 	stateDir := t.TempDir()
-	svc := &Service{cfg: config.Config{StateDir: stateDir}}
+	svc := ingest.NewService(config.Config{StateDir: stateDir}, nil)
 	// seed one file
 	if err := os.MkdirAll(filepath.Join(stateDir, "cache", "ocr"), 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
@@ -414,7 +410,7 @@ func TestEnforceOCRCachePolicy_SkipsStatError(t *testing.T) {
 	// eviction of unrelated files. this regression test ensures we no
 	// longer remove good data in that scenario.
 	stateDir := t.TempDir()
-	svc := &Service{cfg: config.Config{StateDir: stateDir}}
+	svc := ingest.NewService(config.Config{StateDir: stateDir}, nil)
 	svc.SetOCRCacheLimits(5, 0) // very small size limit so evictions are easy
 
 	cacheDir := filepath.Join(stateDir, "cache", "ocr")
@@ -435,14 +431,14 @@ func TestEnforceOCRCachePolicy_SkipsStatError(t *testing.T) {
 		t.Fatalf("write bad file: %v", err)
 	}
 	// override the stat function so that this particular entry fails
-	svc.ocrCacheStat = func(e os.DirEntry) (os.FileInfo, error) {
+	svc.SetOCRCacheStatHook(func(e os.DirEntry) (os.FileInfo, error) {
 		if e.Name() == badName {
 			return nil, fmt.Errorf("simulated stat failure")
 		}
 		return e.Info()
-	}
+	})
 
-	if err := svc.enforceOCRCachePolicy(cacheDir); err != nil {
+	if err := svc.EnforceOCRCachePolicy(cacheDir); err != nil {
 		t.Fatalf("enforceOCRCachePolicy returned error: %v", err)
 	}
 
@@ -462,10 +458,10 @@ func TestEnforceOCRCachePolicy_SkipsStatError(t *testing.T) {
 
 func TestReadOrComputeOCR_EnforceErrorIgnored(t *testing.T) {
 	stateDir := t.TempDir()
-	svc := &Service{cfg: config.Config{StateDir: stateDir}}
+	svc := ingest.NewService(config.Config{StateDir: stateDir}, nil)
 	svc.SetOCRCacheLimits(1024, 0)
 	// make enforcement fail
-	svc.ocrCacheEnforce = func(dir string) error { return fmt.Errorf("simulated failure") }
+	svc.SetOCRCacheEnforceHook(func(dir string) error { return fmt.Errorf("simulated failure") })
 
 	// capture log output via a scoped logger so we don't mutate global state
 	var buf bytes.Buffer
@@ -474,9 +470,9 @@ func TestReadOrComputeOCR_EnforceErrorIgnored(t *testing.T) {
 
 	// use a simple fake OCR implementation
 	fake := &fakeOCR{text: "XYZ"}
-	svc.ocr = fake
+	svc.SetOCR(fake)
 	doc := model.Document{RelPath: "doc"}
-	res, err := svc.readOrComputeOCR(context.Background(), doc, []byte("data"))
+	res, err := svc.ReadOrComputeOCR(context.Background(), doc, []byte("data"))
 	if err != nil {
 		t.Fatalf("readOrComputeOCR returned error: %v", err)
 	}

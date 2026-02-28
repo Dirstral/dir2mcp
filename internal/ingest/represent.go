@@ -159,6 +159,11 @@ func (rg *RepresentationGenerator) upsertChunksForRepresentationWithStore(ctx co
 // error that was never produced; simplifying to a single return value makes
 // callers easier to work with.
 func normalizeUTF8(content []byte) []byte {
+	return NormalizeUTF8(content)
+}
+
+// NormalizeUTF8 ensures content is valid UTF-8 and uses LF line endings.
+func NormalizeUTF8(content []byte) []byte {
 	// Salvage any invalid UTF-8 by replacing with U+FFFD.
 	if !utf8.Valid(content) {
 		out := strings.ToValidUTF8(string(content), "\uFFFD")
@@ -189,6 +194,12 @@ func ShouldGenerateRawText(docType string) bool {
 }
 
 type chunkSegment struct {
+	Text string
+	Span model.Span
+}
+
+// ChunkSegment is a public test-friendly representation of a chunk span pair.
+type ChunkSegment struct {
 	Text string
 	Span model.Span
 }
@@ -276,6 +287,16 @@ func chunkCodeByLines(content string, maxLines, overlapLines int) []chunkSegment
 	return out
 }
 
+// ChunkCodeByLines splits code content using the same policy as ingestion.
+func ChunkCodeByLines(content string, maxLines, overlapLines int) []ChunkSegment {
+	raw := chunkCodeByLines(content, maxLines, overlapLines)
+	out := make([]ChunkSegment, 0, len(raw))
+	for _, seg := range raw {
+		out = append(out, ChunkSegment(seg))
+	}
+	return out
+}
+
 func chunkTextByChars(content string, maxChars, overlapChars, minChars int) []chunkSegment {
 	if maxChars <= 0 {
 		maxChars = 2500
@@ -340,6 +361,16 @@ func chunkTextByChars(content string, maxChars, overlapChars, minChars int) []ch
 		if end == len(runes) {
 			break
 		}
+	}
+	return out
+}
+
+// ChunkTextByChars splits text content using the same policy as ingestion.
+func ChunkTextByChars(content string, maxChars, overlapChars, minChars int) []ChunkSegment {
+	raw := chunkTextByChars(content, maxChars, overlapChars, minChars)
+	out := make([]ChunkSegment, 0, len(raw))
+	for _, seg := range raw {
+		out = append(out, ChunkSegment(seg))
 	}
 	return out
 }

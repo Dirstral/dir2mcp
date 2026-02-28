@@ -115,6 +115,11 @@ func (s *Service) SetOCR(ocr model.OCR) {
 	s.ocr = ocr
 }
 
+// ProcessDocument exposes single-document processing for external tests.
+func (s *Service) ProcessDocument(ctx context.Context, f DiscoveredFile, secretPatterns []*regexp.Regexp, forceReindex bool) error {
+	return s.processDocument(ctx, f, secretPatterns, forceReindex, nil)
+}
+
 // SetOCRCacheLimits configures in‑memory limits that the service will enforce
 // when writing to the OCR cache. A maxBytes value of zero disables size
 // pruning; a ttl value of zero disables age‑based pruning. Both limits can be
@@ -135,6 +140,20 @@ func (s *Service) SetOCRCachePruneEvery(n int) {
 	s.ocrCacheMu.Lock()
 	defer s.ocrCacheMu.Unlock()
 	s.ocrCachePruneEvery = n
+}
+
+// SetOCRCacheStatHook sets a stat hook for cache enforcement.
+func (s *Service) SetOCRCacheStatHook(fn func(os.DirEntry) (os.FileInfo, error)) {
+	s.ocrCacheMu.Lock()
+	defer s.ocrCacheMu.Unlock()
+	s.ocrCacheStat = fn
+}
+
+// SetOCRCacheEnforceHook sets a cache policy enforcement hook.
+func (s *Service) SetOCRCacheEnforceHook(fn func(string) error) {
+	s.ocrCacheMu.Lock()
+	defer s.ocrCacheMu.Unlock()
+	s.ocrCacheEnforce = fn
 }
 
 // markOCRCacheWrite increments the write counter and reports whether policy
@@ -210,7 +229,7 @@ func (s *Service) runScan(ctx context.Context) error {
 			continue
 		}
 
-		if err := s.processDocument(ctx, f, compiledSecrets, forceReindex); err != nil {
+		if err := s.processDocument(ctx, f, compiledSecrets, forceReindex, seen); err != nil {
 			s.addErrors(1)
 			// record that we saw the file even if processing failed so
 			// markMissingAsDeleted does not treat it as removed
@@ -223,7 +242,7 @@ func (s *Service) runScan(ctx context.Context) error {
 	return s.markMissingAsDeleted(ctx, existing, seen)
 }
 
-func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretPatterns []*regexp.Regexp, forceReindex bool) error {
+func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretPatterns []*regexp.Regexp, forceReindex bool, seen map[string]struct{}) error {
 	doc, content, buildErr := s.buildDocumentWithContent(f, secretPatterns)
 	if buildErr != nil {
 		doc = model.Document{
@@ -279,10 +298,140 @@ func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretP
 		return nil
 	}
 
+	// Archive containers: extract and ingest each member as its own document.
+	// The archive document itself remains "skipped" (no direct text content).
+	if doc.DocType == "archive" {
+		if needsProcessing {
+			if err := s.processArchiveMembers(ctx, f, secretPatterns, forceReindex, seen); err != nil {
+				return fmt.Errorf("process archive members: %w", err)
+			}
+		} else if seen != nil {
+			// Archive content unchanged: retain existing members in seen.
+			s.retainArchiveMembers(ctx, f.RelPath, seen)
+		}
+		return nil
+	}
+
 	if !needsProcessing || doc.Status != "ok" {
 		return nil
 	}
 
+	if err := s.generateRepresentations(ctx, doc, content); err != nil {
+		return fmt.Errorf("generate representations: %w", err)
+	}
+	return nil
+}
+
+// processArchiveMembers extracts members from an archive and ingests each one
+// as an independent document. One bad member is logged and skipped without
+// aborting the rest.
+func (s *Service) processArchiveMembers(ctx context.Context, f DiscoveredFile, secretPatterns []*regexp.Regexp, forceReindex bool, seen map[string]struct{}) error {
+	members, err := extractArchiveMembers(f.AbsPath, f.RelPath)
+	if err != nil {
+		s.getLogger().Printf("archive extract %s: %v", f.RelPath, err)
+		return nil // extraction failure is non-fatal; archive stays "skipped"
+	}
+	for _, m := range members {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := s.processDocumentFromContent(ctx, m.RelPath, m.Content, f.MTimeUnix, secretPatterns, forceReindex); err != nil {
+			s.getLogger().Printf("archive member %s: %v", m.RelPath, err)
+			// continue with next member
+		}
+		if seen != nil {
+			seen[m.RelPath] = struct{}{}
+		}
+	}
+	return nil
+}
+
+// retainArchiveMembers adds all existing members of an unchanged archive to
+// the seen map so that markMissingAsDeleted does not tombstone them.
+func (s *Service) retainArchiveMembers(ctx context.Context, archiveRelPath string, seen map[string]struct{}) {
+	prefix := archiveRelPath + "/"
+	const pageSize = 500
+	offset := 0
+	for {
+		docs, total, err := s.store.ListFiles(ctx, prefix, "", pageSize, offset)
+		if err != nil {
+			s.getLogger().Printf("retainArchiveMembers(%s): %v", archiveRelPath, err)
+			return
+		}
+		for _, doc := range docs {
+			seen[doc.RelPath] = struct{}{}
+		}
+		pageLen := len(docs)
+		offset += pageLen
+		if pageLen == 0 {
+			break
+		}
+		if pageLen < pageSize {
+			if int64(offset) < total {
+				s.getLogger().Printf(
+					"retainArchiveMembers(%s): pagination inconsistency (offset=%d page=%d total=%d); stopping on short page",
+					archiveRelPath,
+					offset-pageLen,
+					pageLen,
+					total,
+				)
+			}
+			break
+		}
+		if int64(offset) >= total {
+			break
+		}
+	}
+}
+
+// processDocumentFromContent ingests a document whose content is already in
+// memory (e.g. an archive member). relPath is the virtual path stored in the
+// documents table; mtimeUnix is inherited from the parent archive.
+func (s *Service) processDocumentFromContent(ctx context.Context, relPath string, content []byte, mtimeUnix int64, secretPatterns []*regexp.Regexp, forceReindex bool) error {
+	docType := ClassifyDocType(relPath)
+	// Never ingest binary or ignored artifacts from inside archives.
+	if docType == "binary_ignored" || docType == "ignore" {
+		return nil
+	}
+	// Nested archive files are persisted as skipped document rows, but are not
+	// recursively extracted.
+	skipExtraction := docType == "archive"
+
+	doc := model.Document{
+		RelPath:     relPath,
+		DocType:     docType,
+		SourceType:  "archive_member",
+		SizeBytes:   int64(len(content)),
+		MTimeUnix:   mtimeUnix,
+		ContentHash: computeContentHash(content),
+		Status:      "ok",
+	}
+	if skipExtraction {
+		doc.Status = "skipped"
+	}
+
+	if !skipExtraction && hasSecretMatch(contentSample(content), secretPatterns) {
+		doc.Status = "secret_excluded"
+	}
+
+	existingDoc, err := s.store.GetDocumentByPath(ctx, relPath)
+	if err != nil && !isNotFoundError(err) {
+		return fmt.Errorf("get existing document: %w", err)
+	}
+	needsProcessing := needsReprocessing(existingDoc.ContentHash, doc.ContentHash, forceReindex)
+
+	if err := s.store.UpsertDocument(ctx, doc); err != nil {
+		return fmt.Errorf("upsert document: %w", err)
+	}
+	if updated, err := s.store.GetDocumentByPath(ctx, relPath); err == nil {
+		doc.DocID = updated.DocID
+	} else if !isNotFoundError(err) {
+		return fmt.Errorf("fetch document after upsert: %w", err)
+	}
+
+	if !needsProcessing || doc.Status != "ok" {
+		return nil
+	}
 	if err := s.generateRepresentations(ctx, doc, content); err != nil {
 		return fmt.Errorf("generate representations: %w", err)
 	}
@@ -504,6 +653,11 @@ func (s *Service) generateOCRMarkdownRepresentation(ctx context.Context, doc mod
 	return nil
 }
 
+// GenerateOCRMarkdownRepresentation exposes OCR representation generation for tests.
+func (s *Service) GenerateOCRMarkdownRepresentation(ctx context.Context, doc model.Document, content []byte) error {
+	return s.generateOCRMarkdownRepresentation(ctx, doc, content)
+}
+
 // enforceOCRCachePolicy scans cacheDir and removes entries that violate
 // the configured size or age limits.  It's safe to call even if neither
 // policy is enabled; in that case it is a no-op.
@@ -605,6 +759,11 @@ func (s *Service) enforceOCRCachePolicy(cacheDir string) error {
 	return nil
 }
 
+// EnforceOCRCachePolicy exposes cache policy enforcement for tests.
+func (s *Service) EnforceOCRCachePolicy(cacheDir string) error {
+	return s.enforceOCRCachePolicy(cacheDir)
+}
+
 func (s *Service) readOrComputeOCR(ctx context.Context, doc model.Document, content []byte) (string, error) {
 	cacheDir := filepath.Join(s.cfg.StateDir, "cache", "ocr")
 	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
@@ -650,4 +809,9 @@ func (s *Service) readOrComputeOCR(ctx context.Context, doc model.Document, cont
 		}
 	}
 	return string(ocrBytes), nil
+}
+
+// ReadOrComputeOCR exposes OCR cache lookup/computation for tests.
+func (s *Service) ReadOrComputeOCR(ctx context.Context, doc model.Document, content []byte) (string, error) {
+	return s.readOrComputeOCR(ctx, doc, content)
 }

@@ -11,6 +11,11 @@ import (
 const secretScanSampleBytes int64 = 64 * 1024
 
 func compileSecretPatterns(patterns []string) ([]*regexp.Regexp, error) {
+	return CompileSecretPatterns(patterns)
+}
+
+// CompileSecretPatterns compiles secret-detection regexes from config.
+func CompileSecretPatterns(patterns []string) ([]*regexp.Regexp, error) {
 	compiled := make([]*regexp.Regexp, 0, len(patterns))
 	for _, pattern := range patterns {
 		pattern = strings.TrimSpace(pattern)
@@ -27,6 +32,11 @@ func compileSecretPatterns(patterns []string) ([]*regexp.Regexp, error) {
 }
 
 func hasSecretMatch(sample []byte, patterns []*regexp.Regexp) bool {
+	return HasSecretMatch(sample, patterns)
+}
+
+// HasSecretMatch reports whether any compiled secret regex matches sample.
+func HasSecretMatch(sample []byte, patterns []*regexp.Regexp) bool {
 	for _, rx := range patterns {
 		if rx.Match(sample) {
 			return true
@@ -36,6 +46,11 @@ func hasSecretMatch(sample []byte, patterns []*regexp.Regexp) bool {
 }
 
 func matchesAnyPathExclude(relPath string, globs []string) bool {
+	return MatchesAnyPathExclude(relPath, globs)
+}
+
+// MatchesAnyPathExclude reports whether relPath matches any configured glob.
+func MatchesAnyPathExclude(relPath string, globs []string) bool {
 	normalizedPath := normalizeForGlob(relPath)
 	if normalizedPath == "" {
 		return false
@@ -59,9 +74,8 @@ func matchPathExclude(glob, relPath string) bool {
 	return matchGlobSegments(strings.Split(pattern, "/"), strings.Split(relPath, "/"))
 }
 
-// matchesGlobPattern checks if filePath matches pattern using the same semantics
-// as exclusion matching. It is kept for test ergonomics.
-func matchesGlobPattern(filePath, pattern string) bool {
+// MatchesGlobPattern checks whether filePath matches pattern.
+func MatchesGlobPattern(filePath, pattern string) bool {
 	return matchPathExclude(pattern, filePath)
 }
 
