@@ -3,7 +3,7 @@ package retrieval
 import (
 	"fmt"
 
-	"github.com/dir2mcp/dir2mcp/internal/config"
+	"github.com/Dirstral/dir2mcp/internal/config"
 )
 
 // Engine for RAG search/ask (stub until Ark implements).

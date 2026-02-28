@@ -9,9 +9,9 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/dir2mcp/dir2mcp/internal/config"
-	"github.com/dir2mcp/dir2mcp/internal/mcp"
-	"github.com/dir2mcp/dir2mcp/internal/state"
+	"github.com/Dirstral/dir2mcp/internal/config"
+	"github.com/Dirstral/dir2mcp/internal/mcp"
+	"github.com/Dirstral/dir2mcp/internal/state"
 	"github.com/spf13/cobra"
 )
 

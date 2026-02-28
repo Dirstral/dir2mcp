@@ -5,7 +5,7 @@ import (
 	"net"
 	"net/http"
 
-	"github.com/dir2mcp/dir2mcp/internal/config"
+	"github.com/Dirstral/dir2mcp/internal/config"
 )
 
 // ServerOptions for running the MCP server.
