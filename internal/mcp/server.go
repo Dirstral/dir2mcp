@@ -260,7 +260,7 @@ func (s *Server) allowOrigin(w http.ResponseWriter, r *http.Request) bool {
 }
 
 func parseRequest(body io.ReadCloser) (rpcRequest, error) {
-	defer body.Close()
+	defer func() { _ = body.Close() }()
 
 	raw, err := io.ReadAll(io.LimitReader(body, maxRequestBody+1))
 	if err != nil {
