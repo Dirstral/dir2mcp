@@ -189,7 +189,7 @@ make benchmark
 
 The `benchmark` target is preferred for consistency with other checks like
 `make fmt`/`make vet`/`make lint` and ensures the correct `go test`
-invocation (`-bench BenchmarkSearchBothLargeCorpus -run ^$$ ./internal/retrieval`).
+invocation (`-bench BenchmarkSearchBothLargeCorpus -run '^$' ./internal/retrieval`).
 
 Notes:
 - `make lint` requires `golangci-lint` installed locally.
