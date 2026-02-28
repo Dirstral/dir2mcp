@@ -117,7 +117,7 @@ func (s *Service) SetOCR(ocr model.OCR) {
 
 // ProcessDocument exposes single-document processing for external tests.
 func (s *Service) ProcessDocument(ctx context.Context, f DiscoveredFile, secretPatterns []*regexp.Regexp, forceReindex bool) error {
-	return s.processDocument(ctx, f, secretPatterns, forceReindex)
+	return s.processDocument(ctx, f, secretPatterns, forceReindex, nil)
 }
 
 // SetOCRCacheLimits configures in‑memory limits that the service will enforce
@@ -229,7 +229,7 @@ func (s *Service) runScan(ctx context.Context) error {
 			continue
 		}
 
-		if err := s.processDocument(ctx, f, compiledSecrets, forceReindex); err != nil {
+		if err := s.processDocument(ctx, f, compiledSecrets, forceReindex, seen); err != nil {
 			s.addErrors(1)
 			// record that we saw the file even if processing failed so
 			// markMissingAsDeleted does not treat it as removed
@@ -242,7 +242,7 @@ func (s *Service) runScan(ctx context.Context) error {
 	return s.markMissingAsDeleted(ctx, existing, seen)
 }
 
-func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretPatterns []*regexp.Regexp, forceReindex bool) error {
+func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretPatterns []*regexp.Regexp, forceReindex bool, seen map[string]struct{}) error {
 	doc, content, buildErr := s.buildDocumentWithContent(f, secretPatterns)
 	if buildErr != nil {
 		doc = model.Document{
@@ -300,9 +300,14 @@ func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretP
 
 	// Archive containers: extract and ingest each member as its own document.
 	// The archive document itself remains "skipped" (no direct text content).
-	if doc.DocType == "archive" && needsProcessing {
-		if err := s.processArchiveMembers(ctx, f, secretPatterns, forceReindex); err != nil {
-			return fmt.Errorf("process archive members: %w", err)
+	if doc.DocType == "archive" {
+		if needsProcessing {
+			if err := s.processArchiveMembers(ctx, f, secretPatterns, forceReindex, seen); err != nil {
+				return fmt.Errorf("process archive members: %w", err)
+			}
+		} else if seen != nil {
+			// Archive content unchanged: retain existing members in seen.
+			s.retainArchiveMembers(ctx, f.RelPath, seen)
 		}
 		return nil
 	}
@@ -320,7 +325,7 @@ func (s *Service) processDocument(ctx context.Context, f DiscoveredFile, secretP
 // processArchiveMembers extracts members from an archive and ingests each one
 // as an independent document. One bad member is logged and skipped without
 // aborting the rest.
-func (s *Service) processArchiveMembers(ctx context.Context, f DiscoveredFile, secretPatterns []*regexp.Regexp, forceReindex bool) error {
+func (s *Service) processArchiveMembers(ctx context.Context, f DiscoveredFile, secretPatterns []*regexp.Regexp, forceReindex bool, seen map[string]struct{}) error {
 	members, err := extractArchiveMembers(f.AbsPath, f.RelPath)
 	if err != nil {
 		s.getLogger().Printf("archive extract %s: %v", f.RelPath, err)
@@ -334,8 +339,33 @@ func (s *Service) processArchiveMembers(ctx context.Context, f DiscoveredFile, s
 			s.getLogger().Printf("archive member %s: %v", m.RelPath, err)
 			// continue with next member
 		}
+		if seen != nil {
+			seen[m.RelPath] = struct{}{}
+		}
 	}
 	return nil
+}
+
+// retainArchiveMembers adds all existing members of an unchanged archive to
+// the seen map so that markMissingAsDeleted does not tombstone them.
+func (s *Service) retainArchiveMembers(ctx context.Context, archiveRelPath string, seen map[string]struct{}) {
+	prefix := archiveRelPath + "/"
+	const pageSize = 500
+	offset := 0
+	for {
+		docs, total, err := s.store.ListFiles(ctx, prefix, "", pageSize, offset)
+		if err != nil {
+			s.getLogger().Printf("retainArchiveMembers(%s): %v", archiveRelPath, err)
+			return
+		}
+		for _, doc := range docs {
+			seen[doc.RelPath] = struct{}{}
+		}
+		offset += len(docs)
+		if len(docs) == 0 || int64(offset) >= total {
+			break
+		}
+	}
 }
 
 // processDocumentFromContent ingests a document whose content is already in
