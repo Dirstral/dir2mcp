@@ -82,8 +82,12 @@ func (s *Server) Run(ctx context.Context) error {
 	go s.runSessionCleanup(runCtx)
 
 	server := &http.Server{
-		Addr:    s.cfg.ListenAddr,
-		Handler: s.Handler(),
+		Addr:              s.cfg.ListenAddr,
+		Handler:           s.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       2 * time.Minute,
 	}
 
 	errCh := make(chan error, 1)
