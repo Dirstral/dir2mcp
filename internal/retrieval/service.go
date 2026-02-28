@@ -3,6 +3,7 @@ package retrieval
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"os"
 	"path"
@@ -37,7 +38,8 @@ var defaultPathExcludes = []string{
 
 var defaultSecretPatternLiterals = []string{
 	`AKIA[0-9A-Z]{16}`,
-	`(?i)aws(.{0,20})?secret|([0-9a-zA-Z/+=]{40})`,
+	`(?i)(?:aws(?:.{0,20})?secret|(?:secret|aws|token|key)\s*[:=]\s*[0-9a-zA-Z/+=]{40})`,
+
 	`(?i)(?:authorization\s*[:=]\s*bearer\s+|(?:access|id|refresh)_token\s*[:=]\s*)[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}`,
 	`(?i)token\s*[:=]\s*[A-Za-z0-9_.-]{20,}`,
 	`sk_[a-z0-9]{32}|api_[A-Za-z0-9]{32}`,
@@ -78,16 +80,19 @@ type Service struct {
 	chunkByIndex        map[string]map[uint64]model.SearchHit
 	rootDir             string
 	pathExcludes        []string
-	secretPatterns      []*regexp.Regexp
+	// cached compiled regexps for exclude patterns; keys are normalized patterns
+	excludeRegexps map[string]*regexp.Regexp
+	secretPatterns []*regexp.Regexp
 }
 
 func NewService(store model.Store, index model.Index, embedder model.Embedder, gen model.Generator) *Service {
 	compiledPatterns := make([]*regexp.Regexp, 0, len(defaultSecretPatternLiterals))
 	for _, pattern := range defaultSecretPatternLiterals {
 		re, err := regexp.Compile(pattern)
-		if err == nil {
-			compiledPatterns = append(compiledPatterns, re)
+		if err != nil {
+			panic(fmt.Errorf("invalid default secret pattern %q: %w", pattern, err))
 		}
+		compiledPatterns = append(compiledPatterns, re)
 	}
 	// overfetchMultiplier defaults to 5; callers may override it with
 	// SetOverfetchMultiplier to tune for their workload.  Values less than
@@ -107,6 +112,7 @@ func NewService(store model.Store, index model.Index, embedder model.Embedder, g
 			"code": make(map[uint64]model.SearchHit),
 		},
 		rootDir:        ".",
+		excludeRegexps: make(map[string]*regexp.Regexp),
 		pathExcludes:   append([]string(nil), defaultPathExcludes...),
 		secretPatterns: compiledPatterns,
 	}
@@ -151,8 +157,25 @@ func (s *Service) SetRootDir(root string) {
 
 func (s *Service) SetPathExcludes(patterns []string) {
 	copied := append([]string(nil), patterns...)
+	compiled := make(map[string]*regexp.Regexp, len(copied))
+	for _, pat := range copied {
+		norm := strings.TrimSpace(filepath.ToSlash(pat))
+		if norm == "" {
+			continue
+		}
+		re, err := regexp.Compile(globToRegexp(norm))
+		if err != nil {
+			// ignore invalid pattern, it'll simply never match
+			continue
+		}
+		compiled[norm] = re
+	}
+
 	s.metaMu.Lock()
+	// store normalized list so callers reading pathExcludes see the same
+	// values used as keys in the regexp cache.
 	s.pathExcludes = copied
+	s.excludeRegexps = compiled
 	s.metaMu.Unlock()
 }
 
@@ -281,7 +304,7 @@ func (s *Service) OpenFile(ctx context.Context, relPath string, span model.Span,
 		return "", model.ErrPathOutsideRoot
 	}
 	for _, pattern := range pathExcludes {
-		if matchExcludePattern(pattern, normalizedRel) {
+		if s.matchExcludePattern(pattern, normalizedRel) {
 			return "", model.ErrForbidden
 		}
 	}
@@ -326,7 +349,7 @@ func (s *Service) OpenFile(ctx context.Context, relPath string, span model.Span,
 		return "", model.ErrPathOutsideRoot
 	}
 
-	info, err := os.Stat(targetAbs)
+	info, err := os.Stat(resolvedAbs)
 	if err != nil {
 		return "", err
 	}
@@ -334,7 +357,7 @@ func (s *Service) OpenFile(ctx context.Context, relPath string, span model.Span,
 		return "", model.ErrDocTypeUnsupported
 	}
 
-	raw, err := os.ReadFile(targetAbs)
+	raw, err := os.ReadFile(resolvedAbs)
 	if err != nil {
 		return "", err
 	}
@@ -357,11 +380,7 @@ func (s *Service) OpenFile(ctx context.Context, relPath string, span model.Span,
 		if page <= 0 {
 			page = 1
 		}
-		// Prefer metadata-backed OCR snippets when available.
-		if fromMeta, ok := s.sliceFromMetadata(normalizedRel, model.Span{Kind: "page", Page: page}); ok {
-			selected = fromMeta
-			break
-		}
+		// metadata-backed OCR handled above; fall back to slicing pages directly
 		paged, ok := slicePage(content, page)
 		if !ok {
 			return "", model.ErrDocTypeUnsupported
@@ -379,11 +398,7 @@ func (s *Service) OpenFile(ctx context.Context, relPath string, span model.Span,
 		if endMS > 0 && endMS < startMS {
 			endMS = startMS
 		}
-		// Prefer metadata-backed transcript snippets when available.
-		if fromMeta, ok := s.sliceFromMetadata(normalizedRel, model.Span{Kind: "time", StartMS: startMS, EndMS: endMS}); ok {
-			selected = fromMeta
-			break
-		}
+		// metadata-backed slices for time spans are handled earlier; just extract
 		timeSlice, ok := sliceTime(content, startMS, endMS)
 		if !ok {
 			return "", model.ErrDocTypeUnsupported
@@ -639,15 +654,30 @@ func matchFilters(hit model.SearchHit, query model.SearchQuery) bool {
 	return true
 }
 
-func matchExcludePattern(pattern, relPath string) bool {
+func (s *Service) matchExcludePattern(pattern, relPath string) bool {
 	pattern = strings.TrimSpace(filepath.ToSlash(pattern))
 	relPath = strings.TrimSpace(filepath.ToSlash(relPath))
 	if pattern == "" || relPath == "" {
 		return false
 	}
-	re, err := regexp.Compile(globToRegexp(pattern))
-	if err != nil {
-		return false
+
+	// look up precompiled regexp
+	s.metaMu.RLock()
+	re := s.excludeRegexps[pattern]
+	s.metaMu.RUnlock()
+	if re == nil {
+		// compile lazily in case cache was missed; store for future
+		var err error
+		re, err = regexp.Compile(globToRegexp(pattern))
+		if err != nil {
+			return false
+		}
+		s.metaMu.Lock()
+		if s.excludeRegexps == nil {
+			s.excludeRegexps = make(map[string]*regexp.Regexp)
+		}
+		s.excludeRegexps[pattern] = re
+		s.metaMu.Unlock()
 	}
 	return re.MatchString(relPath)
 }

@@ -1,4 +1,4 @@
-package tests
+package index
 
 import (
 	"bytes"
@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"dir2mcp/internal/index"
 	"dir2mcp/internal/model"
 )
 
@@ -81,7 +80,7 @@ func TestEmbeddingWorker_RunOnce_Success(t *testing.T) {
 		},
 	}
 
-	idx := index.NewHNSWIndex("")
+	idx := NewHNSWIndex("")
 	embedder := &fakeEmbedder{
 		vectors: [][]float32{
 			{1, 0},
@@ -90,7 +89,7 @@ func TestEmbeddingWorker_RunOnce_Success(t *testing.T) {
 	}
 
 	indexed := make(map[int64]model.ChunkMetadata)
-	worker := &index.EmbeddingWorker{
+	worker := &EmbeddingWorker{
 		Source:       source,
 		Index:        idx,
 		Embedder:     embedder,
@@ -123,9 +122,9 @@ func TestEmbeddingWorker_RunOnce_EmbeddingFailure(t *testing.T) {
 		},
 	}
 
-	worker := &index.EmbeddingWorker{
+	worker := &EmbeddingWorker{
 		Source:    source,
-		Index:     index.NewHNSWIndex(""),
+		Index:     NewHNSWIndex(""),
 		Embedder:  &fakeEmbedder{err: errors.New("upstream failed")},
 		BatchSize: 1, // explicitly ensure batching occurs
 	}
@@ -149,57 +148,48 @@ func TestEmbeddingWorker_RunOnce_EmbeddingFailure(t *testing.T) {
 // failed; RunOnce still returns the underlying error so the run loop can
 // apply its retry/backoff policy.
 func TestEmbeddingWorker_RunOnce_EmbeddingTransient(t *testing.T) {
-	// split into two independent subtests to avoid shared source state
-	// causing confusing failures or hidden dependencies.
+	source := &fakeChunkSource{
+		tasks: []model.ChunkTask{model.NewChunkTask(42, "maybe", "", model.ChunkMetadata{ChunkID: 42})},
+	}
 
-	t.Run("rate-limit", func(t *testing.T) {
-		source := &fakeChunkSource{
-			tasks: []model.ChunkTask{model.NewChunkTask(42, "maybe", "", model.ChunkMetadata{ChunkID: 42})},
-		}
+	// a simple rate-limit style message should be treated as transient
+	rateErr := errors.New("rate limit exceeded")
+	worker := &EmbeddingWorker{
+		Source:    source,
+		Index:     NewHNSWIndex(""),
+		Embedder:  &fakeEmbedder{err: rateErr},
+		BatchSize: 1,
+	}
+	n, err := worker.RunOnce(context.Background(), "text")
+	if err != rateErr {
+		t.Fatalf("expected same error back, got %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("expected 0 indexed tasks, got %d", n)
+	}
+	if len(source.failedLabels) != 0 {
+		t.Fatalf("transient error should not mark failed, got %v", source.failedLabels)
+	}
 
-		// a simple rate-limit style message should be treated as transient
-		rateErr := errors.New("rate limit exceeded")
-		worker := &index.EmbeddingWorker{
-			Source:    source,
-			Index:     index.NewHNSWIndex(""),
-			Embedder:  &fakeEmbedder{err: rateErr},
-			BatchSize: 1,
-		}
-		n, err := worker.RunOnce(context.Background(), "text")
-		if err != rateErr {
-			t.Fatalf("expected same error back, got %v", err)
-		}
-		if n != 0 {
-			t.Fatalf("expected 0 indexed tasks, got %d", n)
-		}
-		if len(source.failedLabels) != 0 {
-			t.Fatalf("transient error should not mark failed, got %v", source.failedLabels)
-		}
-	})
-
-	t.Run("net-temporary", func(t *testing.T) {
-		// net.Error with Temporary() true is also transient
-		source := &fakeChunkSource{
-			tasks: []model.ChunkTask{model.NewChunkTask(43, "again", "", model.ChunkMetadata{ChunkID: 43})},
-		}
-		tmpErr := &net.DNSError{IsTimeout: true}
-		worker := &index.EmbeddingWorker{
-			Source:    source,
-			Index:     index.NewHNSWIndex(""),
-			Embedder:  &fakeEmbedder{err: tmpErr},
-			BatchSize: 1,
-		}
-		n, err := worker.RunOnce(context.Background(), "text")
-		if err != tmpErr {
-			t.Fatalf("expected temp error back, got %v", err)
-		}
-		if n != 0 {
-			t.Fatalf("expected 0 indexed tasks, got %d", n)
-		}
-		if len(source.failedLabels) != 0 {
-			t.Fatalf("net temporary error should not mark failed, got %v", source.failedLabels)
-		}
-	})
+	// net.Error with Temporary() true is also transient
+	source.tasks = []model.ChunkTask{model.NewChunkTask(43, "again", "", model.ChunkMetadata{ChunkID: 43})}
+	tmpErr := &net.DNSError{IsTimeout: true}
+	retryWorker := &EmbeddingWorker{
+		Source:    source,
+		Index:     NewHNSWIndex(""),
+		Embedder:  &fakeEmbedder{err: tmpErr},
+		BatchSize: 1,
+	}
+	n2, err2 := retryWorker.RunOnce(context.Background(), "text")
+	if err2 != tmpErr {
+		t.Fatalf("expected temp error back, got %v", err2)
+	}
+	if n2 != 0 {
+		t.Fatalf("expected 0 indexed tasks, got %d", n2)
+	}
+	if len(source.failedLabels) != 0 {
+		t.Fatalf("net temporary error should not mark failed, got %v", source.failedLabels)
+	}
 }
 
 // panicEmbedder is used to ensure that Embed is never called when a
@@ -217,9 +207,9 @@ func TestEmbeddingWorker_RunOnce_NegativeLabel(t *testing.T) {
 			tasks: []model.ChunkTask{model.NewChunkTask(-5, "oops", "", model.ChunkMetadata{})},
 		}
 
-		worker := &index.EmbeddingWorker{
+		worker := &EmbeddingWorker{
 			Source:    source,
-			Index:     index.NewHNSWIndex(""),
+			Index:     NewHNSWIndex(""),
 			Embedder:  &panicEmbedder{},
 			BatchSize: 1,
 		}
@@ -228,7 +218,7 @@ func TestEmbeddingWorker_RunOnce_NegativeLabel(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected error for negative label")
 		}
-		if !errors.Is(err, index.ErrFatal) {
+		if !errors.Is(err, ErrFatal) {
 			t.Fatalf("expected fatal error, got %v", err)
 		}
 		if n != 0 {
@@ -253,9 +243,9 @@ func TestEmbeddingWorker_RunOnce_NegativeLabel(t *testing.T) {
 			},
 		}
 
-		worker := &index.EmbeddingWorker{
+		worker := &EmbeddingWorker{
 			Source:    source,
-			Index:     index.NewHNSWIndex(""),
+			Index:     NewHNSWIndex(""),
 			Embedder:  &panicEmbedder{},
 			BatchSize: 1,
 		}
@@ -264,7 +254,7 @@ func TestEmbeddingWorker_RunOnce_NegativeLabel(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected error for negative label in mixed batch")
 		}
-		if !errors.Is(err, index.ErrFatal) {
+		if !errors.Is(err, ErrFatal) {
 			t.Fatalf("expected fatal error for mixed batch, got %v", err)
 		}
 		if n != 0 {
@@ -283,7 +273,7 @@ func TestEmbeddingWorker_Run_RetryableErrors(t *testing.T) {
 	// first two invocations return retryable errors; Run should keep looping
 	// until the context expires and we should see at least three calls.
 	tw := &testWorker{errs: []error{errors.New("transient1"), errors.New("transient2")}}
-	ew := &index.EmbeddingWorker{RunOnceFunc: tw.RunOnce}
+	ew := &EmbeddingWorker{RunOnceFunc: tw.RunOnce}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
@@ -305,9 +295,9 @@ func TestEmbeddingWorker_RunOnce_MarkFailedLogging(t *testing.T) {
 
 	// embedder returns error to trigger MarkFailed
 	embErr := errors.New("embed fail")
-	worker := &index.EmbeddingWorker{
+	worker := &EmbeddingWorker{
 		Source:    source,
-		Index:     index.NewHNSWIndex(""),
+		Index:     NewHNSWIndex(""),
 		Embedder:  &fakeEmbedder{err: embErr},
 		BatchSize: 1,
 	}
@@ -330,9 +320,9 @@ func TestEmbeddingWorker_RunOnce_MarkFailedLogging(t *testing.T) {
 }
 
 func TestEmbeddingWorker_Run_FatalErrorStops(t *testing.T) {
-	fatal := index.ErrFatal
+	fatal := ErrFatal
 	tw := &testWorker{errs: []error{fatal}}
-	ew := &index.EmbeddingWorker{RunOnceFunc: tw.RunOnce, ErrCh: make(chan error, 1)}
+	ew := &EmbeddingWorker{RunOnceFunc: tw.RunOnce, ErrCh: make(chan error, 1)}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()

@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -498,7 +500,7 @@ func (s *Server) handleAskTool(_ context.Context, args map[string]interface{}) (
 	}, nil
 }
 
-func (s *Server) handleOpenFileTool(_ context.Context, args map[string]interface{}) (toolCallResult, *toolExecutionError) {
+func (s *Server) handleOpenFileTool(ctx context.Context, args map[string]interface{}) (toolCallResult, *toolExecutionError) {
 	if err := assertNoUnknownArguments(args, map[string]struct{}{
 		"rel_path":   {},
 		"start_line": {},
@@ -519,16 +521,88 @@ func (s *Server) handleOpenFileTool(_ context.Context, args map[string]interface
 		return toolCallResult{}, &toolExecutionError{Code: "MISSING_FIELD", Message: "rel_path is required", Retryable: false}
 	}
 
+	if s.retriever == nil {
+		return toolCallResult{}, &toolExecutionError{Code: "INDEX_NOT_READY", Message: "retriever not configured", Retryable: false}
+	}
+
+	maxChars := 20000
+	if raw, ok := args["max_chars"]; ok {
+		parsed, parseErr := parseInteger(raw, "max_chars")
+		if parseErr != nil {
+			return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: parseErr.Error(), Retryable: false}
+		}
+		maxChars = parsed
+	}
+	if maxChars <= 0 {
+		maxChars = 20000
+	}
+	if maxChars < 200 {
+		maxChars = 200
+	}
+
+	span := model.Span{}
+	if raw, ok := args["page"]; ok {
+		page, parseErr := parseInteger(raw, "page")
+		if parseErr != nil {
+			return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: parseErr.Error(), Retryable: false}
+		}
+		if page > 0 {
+			span = model.Span{Kind: "page", Page: page}
+		}
+	} else {
+		startMS, err := parseOptionalInteger(args, "start_ms")
+		if err != nil {
+			return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
+		}
+		endMS, err := parseOptionalInteger(args, "end_ms")
+		if err != nil {
+			return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
+		}
+		if startMS > 0 || endMS > 0 {
+			span = model.Span{Kind: "time", StartMS: startMS, EndMS: endMS}
+		} else {
+			startLine, err := parseOptionalInteger(args, "start_line")
+			if err != nil {
+				return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
+			}
+			endLine, err := parseOptionalInteger(args, "end_line")
+			if err != nil {
+				return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
+			}
+			if startLine > 0 || endLine > 0 {
+				span = model.Span{Kind: "lines", StartLine: startLine, EndLine: endLine}
+			}
+		}
+	}
+
+	content, openErr := s.retriever.OpenFile(ctx, relPath, span, maxChars)
+	if openErr != nil {
+		switch {
+		case errors.Is(openErr, model.ErrForbidden):
+			return toolCallResult{}, &toolExecutionError{Code: "FORBIDDEN", Message: "forbidden", Retryable: false}
+		case errors.Is(openErr, model.ErrPathOutsideRoot):
+			return toolCallResult{}, &toolExecutionError{Code: "PATH_OUTSIDE_ROOT", Message: "path outside root", Retryable: false}
+		case errors.Is(openErr, model.ErrDocTypeUnsupported):
+			return toolCallResult{}, &toolExecutionError{Code: "DOC_TYPE_UNSUPPORTED", Message: "doc type unsupported", Retryable: false}
+		case errors.Is(openErr, os.ErrNotExist):
+			return toolCallResult{}, &toolExecutionError{Code: "NOT_FOUND", Message: "file not found", Retryable: false}
+		default:
+			return toolCallResult{}, &toolExecutionError{Code: "INTERNAL_ERROR", Message: "internal server error", Retryable: true}
+		}
+	}
+
+	truncated := len([]rune(content)) >= maxChars
 	structured := map[string]interface{}{
 		"rel_path":  relPath,
-		"doc_type":  "unknown",
-		"content":   "open_file stub is registered; file slicing is not wired yet",
-		"truncated": false,
+		"doc_type":  inferDocType(relPath),
+		"span":      span,
+		"content":   content,
+		"truncated": truncated,
 	}
 
 	return toolCallResult{
 		Content: []toolContentItem{
-			{Type: "text", Text: "open_file stub is registered; file access is not wired yet"},
+			{Type: "text", Text: content},
 		},
 		StructuredContent: structured,
 	}, nil
@@ -571,6 +645,34 @@ func parseOptionalString(args map[string]interface{}, key string) (string, error
 	return strings.TrimSpace(value), nil
 }
 
+func inferDocType(relPath string) string {
+	ext := strings.ToLower(filepath.Ext(strings.TrimSpace(relPath)))
+	switch ext {
+	case ".go", ".js", ".jsx", ".ts", ".tsx",
+		".py", ".java", ".rb", ".cpp", ".c", ".cs",
+		".kt", ".kts", ".swift", ".php", ".scala", ".rs",
+		".h", ".hpp", ".hh", ".m", ".mm", ".dart",
+		".pl", ".pm", ".lua", ".r", ".jl", ".hs",
+		".erl", ".ex", ".exs", ".sql", ".sh", ".zsh",
+		".fish":
+		return "code"
+	case ".html", ".htm", ".css":
+		return "html"
+	case ".md":
+		return "md"
+	case ".txt", ".rst":
+		return "text"
+	case ".pdf":
+		return "pdf"
+	case ".mp3", ".wav", ".m4a", ".flac":
+		return "audio"
+	case ".png", ".jpg", ".jpeg", ".gif", ".webp":
+		return "image"
+	default:
+		return "unknown"
+	}
+}
+
 func parseInteger(value interface{}, field string) (int, error) {
 	switch v := value.(type) {
 	case float64:
@@ -591,6 +693,14 @@ func parseInteger(value interface{}, field string) (int, error) {
 	default:
 		return 0, fmt.Errorf("%s must be an integer", field)
 	}
+}
+
+func parseOptionalInteger(args map[string]interface{}, key string) (int, error) {
+	raw, ok := args[key]
+	if !ok {
+		return 0, nil
+	}
+	return parseInteger(raw, key)
 }
 
 func parseOptionalStringSlice(args map[string]interface{}, key string) ([]string, error) {

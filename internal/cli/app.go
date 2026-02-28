@@ -340,12 +340,11 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 
 	ingestErrCh := make(chan error, 1)
 	if opts.readOnly {
-		indexingState.SetRunning(false)
 		close(ingestErrCh)
 	} else {
 		go func() {
 			defer close(ingestErrCh)
-			indexingState.SetMode(appstate.ModeIncremental)
+			// mode is already set at creation time; just mark running state
 			indexingState.SetRunning(true)
 			defer indexingState.SetRunning(false)
 			runErr := ing.Run(runCtx)

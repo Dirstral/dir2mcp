@@ -5,10 +5,11 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
-	"github.com/Dirstral/dir2mcp/internal/model"
-	"github.com/Dirstral/dir2mcp/internal/retrieval"
+	"dir2mcp/internal/model"
+	"dir2mcp/internal/retrieval"
 )
 
 func TestOpenFile_SecretsBlocked(t *testing.T) {
@@ -26,6 +27,32 @@ func TestOpenFile_SecretsBlocked(t *testing.T) {
 	_, err := svc.OpenFile(context.Background(), "docs/secret.txt", model.Span{}, 200)
 	if !errors.Is(err, model.ErrForbidden) {
 		t.Fatalf("expected forbidden on secret content, got %v", err)
+	}
+}
+
+// TestOpenFile_NonSecretsAllowed confirms that non-secret content is not
+// blocked by the service.  It mirrors the setup in
+// TestOpenFile_SecretsBlocked but writes a benign file and asserts the
+// retrieval succeeds and returns the expected data.
+func TestOpenFile_NonSecretsAllowed(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "docs", "readme.txt")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir failed: %v", err)
+	}
+	content := "hello world"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+
+	svc := retrieval.NewService(nil, nil, nil, nil)
+	svc.SetRootDir(root)
+	out, err := svc.OpenFile(context.Background(), "docs/readme.txt", model.Span{}, 200)
+	if err != nil {
+		t.Fatalf("expected no error on benign content, got %v", err)
+	}
+	if !strings.Contains(out, content) {
+		t.Fatalf("returned content did not contain expected text, got %q", out)
 	}
 }
 

@@ -25,6 +25,9 @@ require (
 // results would be equivalent.  We keep the indirect modules here to match
 // the modernc.org/sqlite dependency surface.
 //
-// To limit exposure, we also pin the bigfft dependency explicitly below.
+// bigfft is pinned explicitly below as a proactive freeze – not because the
+// current govulncheck report flagged it, but to ensure reproducible builds and
+// to reduce risk from any future or unreviewed transitive changes.  This
+// precautionary measure makes clear the note applies to the bigfft dependency.
 
 replace github.com/remyoudompheng/bigfft => github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec

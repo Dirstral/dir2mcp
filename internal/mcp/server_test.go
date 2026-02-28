@@ -18,6 +18,7 @@ type fakeRetriever struct {
 	hits            []model.SearchHit
 	openFileContent string
 	openFileErr     error
+	lastMaxChars    int // record value passed to OpenFile
 }
 
 func (f *fakeRetriever) Search(_ context.Context, _ model.SearchQuery) ([]model.SearchHit, error) {
@@ -28,7 +29,8 @@ func (f *fakeRetriever) Ask(_ context.Context, _ string, _ model.SearchQuery) (m
 	return model.AskResult{}, nil
 }
 
-func (f *fakeRetriever) OpenFile(_ context.Context, _ string, _ model.Span, _ int) (string, error) {
+func (f *fakeRetriever) OpenFile(_ context.Context, _ string, _ model.Span, maxChars int) (string, error) {
+	f.lastMaxChars = maxChars
 	return f.openFileContent, f.openFileErr
 }
 
@@ -66,6 +68,7 @@ func TestServer_ToolsList(t *testing.T) {
 	}
 	names := map[string]struct{}{}
 	var searchTool map[string]any
+	var openFileTool map[string]any
 	for idx, toolVal := range tools {
 		tool, ok := toolVal.(map[string]any)
 		if !ok {
@@ -82,6 +85,9 @@ func TestServer_ToolsList(t *testing.T) {
 		if name == "dir2mcp.search" {
 			searchTool = tool
 		}
+		if name == "dir2mcp.open_file" {
+			openFileTool = tool
+		}
 	}
 	if len(tools) == 0 {
 		t.Fatal("expected at least one tool")
@@ -93,6 +99,7 @@ func TestServer_ToolsList(t *testing.T) {
 		t.Fatalf("expected to capture dir2mcp.search tool payload")
 	}
 
+	// validate search schema
 	inputSchema, ok := searchTool["inputSchema"].(map[string]any)
 	if !ok {
 		t.Fatalf("expected dir2mcp.search.inputSchema object, got %#v", searchTool["inputSchema"])
@@ -123,8 +130,43 @@ func TestServer_ToolsList(t *testing.T) {
 			t.Fatalf("expected dir2mcp.search.inputSchema.properties to include %q", key)
 		}
 	}
+
+	// ensure open_file tool exists and has sensible schema
 	if _, ok := names["dir2mcp.open_file"]; !ok {
 		t.Fatalf("expected dir2mcp.open_file in tools/list")
+	}
+	if openFileTool == nil {
+		t.Fatalf("expected to capture dir2mcp.open_file tool payload")
+	}
+	openSchema, ok := openFileTool["inputSchema"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected dir2mcp.open_file.inputSchema object, got %#v", openFileTool["inputSchema"])
+	}
+	if schemaType, _ := openSchema["type"].(string); schemaType != "object" {
+		t.Fatalf("expected dir2mcp.open_file.inputSchema.type=object, got %#v", openSchema["type"])
+	}
+	required, ok = openSchema["required"].([]any)
+	if !ok {
+		t.Fatalf("expected dir2mcp.open_file.inputSchema.required array, got %#v", openSchema["required"])
+	}
+	foundRelPath := false
+	for _, item := range required {
+		if v, ok := item.(string); ok && v == "rel_path" {
+			foundRelPath = true
+			break
+		}
+	}
+	if !foundRelPath {
+		t.Fatalf("expected dir2mcp.open_file.inputSchema.required to include rel_path, got %#v", required)
+	}
+	properties, ok = openSchema["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected dir2mcp.open_file.inputSchema.properties object, got %#v", openSchema["properties"])
+	}
+	for _, key := range []string{"rel_path", "start_line", "end_line", "max_chars"} {
+		if _, ok := properties[key]; !ok {
+			t.Fatalf("expected dir2mcp.open_file.inputSchema.properties to include %q", key)
+		}
 	}
 }
 
@@ -238,6 +280,21 @@ func TestServer_ToolsCall_OpenFile(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected result object, got: %#v", resp["result"])
 	}
+	// legacy content field for backward compatibility
+	contentArr, ok := result["content"].([]any)
+	if !ok {
+		t.Fatalf("expected content array, got: %#v", result["content"])
+	}
+	if len(contentArr) != 1 {
+		t.Fatalf("expected 1 legacy content item, got %d (%#v)", len(contentArr), contentArr)
+	}
+	itemMap, ok := contentArr[0].(map[string]any)
+	if !ok {
+		t.Fatalf("expected legacy content item to be object, got %#v", contentArr[0])
+	}
+	if itemMap["text"] != "line two" || itemMap["type"] != "text" {
+		t.Fatalf("unexpected legacy content item fields: %#v", itemMap)
+	}
 	structured, ok := result["structuredContent"].(map[string]any)
 	if !ok {
 		t.Fatalf("expected structuredContent object, got: %#v", result["structuredContent"])
@@ -250,6 +307,46 @@ func TestServer_ToolsCall_OpenFile(t *testing.T) {
 	}
 	if structured["content"] != "line two" {
 		t.Fatalf("unexpected content: %v", structured["content"])
+	}
+}
+
+func Test_inferDocType_VariousExtensions(t *testing.T) {
+	cases := map[string]string{
+		"file.jsx":   "code",
+		"module.tsx": "code",
+		"script.sh":  "code",
+		"style.css":  "html",
+		"index.html": "html",
+		"notes.txt":  "text",
+		"image.png":  "image",
+		"doc.md":     "md",
+	}
+	for path, want := range cases {
+		if got := inferDocType(path); got != want {
+			t.Errorf("inferDocType(%q) = %q, want %q", path, got, want)
+		}
+	}
+}
+
+func TestServer_ToolsCall_OpenFile_EnforceMinChars(t *testing.T) {
+	cfg := config.Default()
+	cfg.AuthMode = "none"
+	fr := &fakeRetriever{openFileContent: "hello"}
+	srv := NewServer(cfg, fr)
+	sessionID := initializeSession(t, srv)
+	// send a request with a too-small max_chars; handler should bump to 200
+	reqBody := `{"jsonrpc":"2.0","id":"open-min","method":"tools/call","params":{"name":"dir2mcp.open_file","arguments":{"rel_path":"docs/a.md","max_chars":10}}}`
+	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("MCP-Session-Id", sessionID)
+	rr := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", rr.Code, rr.Body.String())
+	}
+	if fr.lastMaxChars != 200 {
+		t.Fatalf("expected maxChars to be set to 200; got %d", fr.lastMaxChars)
 	}
 }
 
@@ -272,16 +369,24 @@ func TestServer_ToolsCall_OpenFile_Forbidden(t *testing.T) {
 	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("unmarshal response: %v", err)
 	}
-	errObj, ok := resp["error"].(map[string]any)
+	resultObj, ok := resp["result"].(map[string]any)
 	if !ok {
-		t.Fatalf("expected error object, got %#v", resp["error"])
+		t.Fatalf("expected result object, got %#v", resp["result"])
 	}
-	data, ok := errObj["data"].(map[string]any)
+	isError, _ := resultObj["isError"].(bool)
+	if !isError {
+		t.Fatalf("expected tool error response, got %#v", resultObj)
+	}
+	structured, ok := resultObj["structuredContent"].(map[string]any)
 	if !ok {
-		t.Fatalf("expected error data object, got %#v", errObj["data"])
+		t.Fatalf("expected structuredContent object, got %#v", resultObj["structuredContent"])
 	}
-	if data["code"] != "FORBIDDEN" {
-		t.Fatalf("expected FORBIDDEN code, got %v", data["code"])
+	errEnvelope, ok := structured["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected structuredContent.error object, got %#v", structured["error"])
+	}
+	if errEnvelope["code"] != "FORBIDDEN" {
+		t.Fatalf("expected FORBIDDEN code, got %v", errEnvelope["code"])
 	}
 }
 
