@@ -597,6 +597,10 @@ func (s *Server) handleOpenFileTool(ctx context.Context, args map[string]interfa
 	if hasPage {
 		span = model.Span{Kind: "page", Page: page}
 	} else if hasStartMS || hasEndMS {
+		// require both parameters when specifying a time span
+		if hasStartMS != hasEndMS {
+			return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: "both start_ms and end_ms must be provided", Retryable: false}
+		}
 		if (hasStartMS && startMS < 0) || (hasEndMS && endMS < 0) {
 			return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: "start_ms/end_ms must be >= 0", Retryable: false}
 		}
@@ -607,6 +611,9 @@ func (s *Server) handleOpenFileTool(ctx context.Context, args map[string]interfa
 	} else if hasStartLine || hasEndLine {
 		// runtime validation mirrors openFileInputSchema which requires
 		// positive line numbers; do not allow zero or negative values.
+		if hasStartLine != hasEndLine {
+			return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: "both start_line and end_line must be provided", Retryable: false}
+		}
 		if (hasStartLine && startLine <= 0) || (hasEndLine && endLine <= 0) {
 			return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: "start_line/end_line must be > 0", Retryable: false}
 		}

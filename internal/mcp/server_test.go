@@ -335,18 +335,23 @@ func TestServer_ToolsCall_OpenFile(t *testing.T) {
 func TestServer_ToolsCall_OpenFile_InvalidLines(t *testing.T) {
 	cfg := config.Default()
 	cfg.AuthMode = "none"
-	srv := NewServer(cfg, &fakeRetriever{})
-	sessionID := initializeSession(t, srv)
 
 	cases := []struct {
 		args    map[string]interface{}
 		message string
 	}{
 		{map[string]interface{}{"rel_path": "docs/a.md", "start_line": 0}, "start_line"},
-		{map[string]interface{}{"rel_path": "docs/a.md", "end_line": 0}, "start_line"},
+		{map[string]interface{}{"rel_path": "docs/a.md", "end_line": 0}, "end_line"},
+		// negative values should also be rejected
+		{map[string]interface{}{"rel_path": "docs/a.md", "start_line": -1}, "start_line"},
+		{map[string]interface{}{"rel_path": "docs/a.md", "end_line": -1}, "end_line"},
 	}
 
 	for _, c := range cases {
+		// create fresh retriever/server so wasOpenFileCalled starts false
+		fr := &fakeRetriever{}
+		srv := NewServer(cfg, fr)
+		sessionID := initializeSession(t, srv)
 		// build the JSON body using Go structs to avoid quoting errors
 		body := map[string]interface{}{
 			"jsonrpc": "2.0",
@@ -394,6 +399,9 @@ func TestServer_ToolsCall_OpenFile_InvalidLines(t *testing.T) {
 		msg, _ := errEnvelope["message"].(string)
 		if !strings.Contains(msg, c.message) {
 			t.Fatalf("unexpected error message: %v", msg)
+		}
+		if fr.wasOpenFileCalled {
+			t.Fatalf("retriever should not have been called for invalid args %v", c.args)
 		}
 	}
 }
@@ -456,6 +464,69 @@ func TestServer_ToolsCall_OpenFile_ConflictingSpanParameters(t *testing.T) {
 		}
 		if errEnvelope["code"] != "INVALID_FIELD" {
 			t.Fatalf("expected INVALID_FIELD code, got %v", errEnvelope["code"])
+		}
+		msg, _ := errEnvelope["message"].(string)
+		if !strings.Contains(msg, c.message) {
+			t.Fatalf("unexpected error message: %v", msg)
+		}
+	}
+}
+
+func TestServer_ToolsCall_OpenFile_PartialSpanParameters(t *testing.T) {
+	cfg := config.Default()
+	cfg.AuthMode = "none"
+	srv := NewServer(cfg, &fakeRetriever{})
+	sessionID := initializeSession(t, srv)
+
+	cases := []struct {
+		args    map[string]interface{}
+		message string
+	}{
+		{map[string]interface{}{"rel_path": "docs/a.md", "start_ms": 1000}, "start_ms"},
+		{map[string]interface{}{"rel_path": "docs/a.md", "end_ms": 2000}, "end_ms"},
+		{map[string]interface{}{"rel_path": "docs/a.md", "start_line": 1}, "start_line"},
+		{map[string]interface{}{"rel_path": "docs/a.md", "end_line": 2}, "end_line"},
+	}
+
+	for _, c := range cases {
+		body := map[string]interface{}{
+			"jsonrpc": "2.0",
+			"id":      "bad",
+			"method":  "tools/call",
+			"params": map[string]interface{}{
+				"name":      "dir2mcp.open_file",
+				"arguments": c.args,
+			},
+		}
+		reqBytes, _ := json.Marshal(body)
+		req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBuffer(reqBytes))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("MCP-Session-Id", sessionID)
+		rr := httptest.NewRecorder()
+
+		srv.Handler().ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("unexpected status: %d body=%s", rr.Code, rr.Body.String())
+		}
+		var resp map[string]any
+		if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("unmarshal response: %v", err)
+		}
+		resultObj, ok := resp["result"].(map[string]any)
+		if !ok {
+			t.Fatalf("expected result object, got %#v", resp["result"])
+		}
+		isError, _ := resultObj["isError"].(bool)
+		if !isError {
+			t.Fatalf("expected tool error for %v; response body=%s", c.args, rr.Body.String())
+		}
+		structured, ok := resultObj["structuredContent"].(map[string]any)
+		if !ok {
+			t.Fatalf("expected structuredContent object, got %#v", resultObj["structuredContent"])
+		}
+		errEnvelope, ok := structured["error"].(map[string]any)
+		if !ok {
+			t.Fatalf("expected structuredContent.error object, got %#v", structured["error"])
 		}
 		msg, _ := errEnvelope["message"].(string)
 		if !strings.Contains(msg, c.message) {
