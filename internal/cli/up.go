@@ -286,7 +286,14 @@ func proxyToMCP(w http.ResponseWriter, r *http.Request, mcpURL, token string) {
 		return
 	}
 	req.Header.Set("Content-Type", r.Header.Get("Content-Type"))
-	req.Header.Set("MCP-Protocol-Version", "2025-11-25")
+	if v := r.Header.Get("MCP-Protocol-Version"); v != "" {
+		req.Header.Set("MCP-Protocol-Version", v)
+	} else {
+		req.Header.Set("MCP-Protocol-Version", "2025-11-25")
+	}
+	if sid := r.Header.Get("MCP-Session-Id"); sid != "" {
+		req.Header.Set("MCP-Session-Id", sid)
+	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err := proxyHTTPClient.Do(req)
 	if err != nil {

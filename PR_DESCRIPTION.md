@@ -1,7 +1,5 @@
 # Add Web UI with search, ask, and dashboard pages
 
-**Suggested PR title** (update on GitHub): `Add Web UI with search, ask, and dashboard pages`
-
 ## Summary
 
 Adds a Web UI with Search, Ask, and Dashboard pages that connect to the `dir2mcp up` MCP server. Users can search the corpus, ask questions with inline citations, and view indexing progress.
@@ -24,9 +22,12 @@ Adds a Web UI with Search, Ask, and Dashboard pages that connect to the `dir2mcp
 - Uses `/api/corpus` proxy (server-side, requires `API_TOKEN`)
 
 ### API & Auth
-- **`/api/corpus`** — Next.js proxy to dir2mcp with Bearer token
-- **`/api/mcp`** — Next.js proxy to dir2mcp; client calls relative URL; server adds token
-- dir2mcp `/api/mcp` and `/api/corpus` require Bearer
+- **`/api/corpus`** — Next.js server-side proxy that forwards requests to dir2mcp and injects the Bearer token from the `API_TOKEN` env var
+- **`/api/mcp`** — Next.js client-callable API route; the Next.js server adds the Bearer token before forwarding to dir2mcp
+
+## Prerequisites
+
+- Node.js 18+ and npm or yarn
 
 ## Setup
 
@@ -34,3 +35,14 @@ Adds a Web UI with Search, Ask, and Dashboard pages that connect to the `dir2mcp
 2. Copy `ui/.env.example` → `ui/.env.local`
 3. Set `NEXT_PUBLIC_API_URL` and `API_TOKEN`
 4. Run `npm run dev` in `ui/`
+
+## Verification
+
+Visit http://localhost:3000. The dashboard should load; check the browser Network tab for successful `/api/corpus` calls (200) and that requests include the `Authorization: Bearer` header.
+
+## Troubleshooting
+
+- **Dashboard shows "Failed to load"** — Ensure `dir2mcp up` is running and `NEXT_PUBLIC_API_URL` matches the printed URL
+- **401 on API calls** — Verify `API_TOKEN` in `.env.local` matches the Bearer token from `dir2mcp up`
+- **Search/Ask fail** — Same as above; both use the Next.js proxy which requires `API_TOKEN`
+- Restart the Next.js dev server after changing env vars

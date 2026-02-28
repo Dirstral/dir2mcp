@@ -5,6 +5,17 @@ import (
 	"testing"
 )
 
+// TestValidate_NilConfigYieldsActionableOutput verifies nil config returns error, not panic.
+func TestValidate_NilConfigYieldsActionableOutput(t *testing.T) {
+	err := Validate(nil, true)
+	if err == nil {
+		t.Fatal("expected error when config is nil")
+	}
+	if !strings.Contains(err.Error(), "CONFIG_INVALID") {
+		t.Errorf("error should contain CONFIG_INVALID, got: %s", err.Error())
+	}
+}
+
 // TestValidate_MissingConfigYieldsActionableOutput verifies missing required config
 // returns error with CONFIG_INVALID and remediation (issue #10).
 func TestValidate_MissingConfigYieldsActionableOutput(t *testing.T) {

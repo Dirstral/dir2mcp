@@ -8,6 +8,9 @@ import (
 // Validate checks required fields and enum constraints. For non-interactive mode,
 // returns an error with actionable message (e.g. "Set env: MISTRAL_API_KEY=...") so caller can exit 2.
 func Validate(cfg *Config, nonInteractive bool) error {
+	if cfg == nil {
+		return fmt.Errorf("CONFIG_INVALID: nil config")
+	}
 	// Embeddings require Mistral API key (or later: local embed connector)
 	if cfg.Mistral.APIKey == "" || cfg.Mistral.APIKey == "${MISTRAL_API_KEY}" {
 		return fmt.Errorf("CONFIG_INVALID: Missing MISTRAL_API_KEY\nSet env: MISTRAL_API_KEY=...\nOr run: dir2mcp config init")

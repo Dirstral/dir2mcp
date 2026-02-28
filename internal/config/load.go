@@ -41,10 +41,12 @@ func Load(opts Options) (*Config, error) {
 		configPath = filepath.Join(opts.RootDir, configPath)
 	}
 	data, err := os.ReadFile(configPath)
-	if err == nil {
-		if err := yaml.Unmarshal(data, &cfg); err != nil {
-			return nil, fmt.Errorf("CONFIG_INVALID: malformed YAML in %s: %w", configPath, err)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return nil, fmt.Errorf("CONFIG_INVALID: cannot read %s: %w", configPath, err)
 		}
+	} else if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return nil, fmt.Errorf("CONFIG_INVALID: malformed YAML in %s: %w", configPath, err)
 	}
 
 	// Env overlay (SPEC §16.1.1)
@@ -54,7 +56,7 @@ func Load(opts Options) (*Config, error) {
 	if v := os.Getenv("ELEVENLABS_API_KEY"); v != "" {
 		cfg.STT.ElevenLabs.APIKey = v
 	}
-	if v := os.Getenv("DIR2MCP_AUTH_TOKEN"); v != "" {
+	if v := os.Getenv("DIR2MCP_AUTH_TOKEN"); v != "" && cfg.Security.Auth.TokenEnv == "" {
 		cfg.Security.Auth.TokenEnv = "DIR2MCP_AUTH_TOKEN"
 	}
 
