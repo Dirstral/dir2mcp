@@ -30,6 +30,10 @@ const (
 	sessionCleanupInterval = time.Hour
 )
 
+// DefaultSearchK is used when tools/call search arguments omit k or provide
+// a non-positive value.
+const DefaultSearchK = 10
+
 type Server struct {
 	cfg       config.Config
 	authToken string

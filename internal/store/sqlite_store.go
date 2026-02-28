@@ -2,71 +2,140 @@ package store
 
 import (
 	"context"
-	"encoding/json"
+	"database/sql"
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	_ "modernc.org/sqlite"
+
 	"github.com/Dirstral/dir2mcp/internal/model"
 )
+
+const relPathErrorMessage = "rel_path must be a non-empty relative path without parent-traversal or absolute paths"
 
 type SQLiteStore struct {
 	path string
 
-	mu          sync.RWMutex
-	sqlite3Path string
-	initialized bool
+	mu sync.Mutex
+	db *sql.DB
+
+	activeOps int
+	closing   bool
+	cond      *sync.Cond
 }
 
 func NewSQLiteStore(path string) *SQLiteStore {
-	return &SQLiteStore{path: path}
+	s := &SQLiteStore{path: path}
+	s.cond = sync.NewCond(&s.mu)
+	return s
+}
+
+// initLocked performs the same initialization work as Init but assumes
+// the caller already holds s.mu. This helper allows ensureDB to set up the
+// database under lock, closing a small race window against Close().
+func (s *SQLiteStore) initLocked(ctx context.Context) error {
+	if s.db != nil {
+		return nil
+	}
+
+	db, err := sql.Open("sqlite", s.path)
+	if err != nil {
+		return err
+	}
+
+	if _, err := db.ExecContext(ctx, `PRAGMA journal_mode=WAL;`); err != nil {
+		_ = db.Close()
+		return err
+	}
+
+	schema := `
+CREATE TABLE IF NOT EXISTS documents (
+  doc_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  rel_path TEXT NOT NULL UNIQUE,
+  doc_type TEXT NOT NULL,
+  size_bytes INTEGER NOT NULL DEFAULT 0,
+  mtime_unix INTEGER NOT NULL DEFAULT 0,
+  content_hash TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'ok',
+  deleted INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS representations (
+  rep_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  doc_id INTEGER NOT NULL,
+  rep_type TEXT NOT NULL,
+  rep_hash TEXT NOT NULL,
+  created_unix INTEGER NOT NULL,
+  deleted INTEGER NOT NULL DEFAULT 0,
+  UNIQUE(doc_id, rep_type),
+  FOREIGN KEY (doc_id) REFERENCES documents(doc_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS chunks (
+  chunk_id INTEGER PRIMARY KEY,
+  rep_id INTEGER,
+  ordinal INTEGER NOT NULL DEFAULT 0,
+  rel_path TEXT NOT NULL,
+  doc_type TEXT NOT NULL,
+  rep_type TEXT NOT NULL DEFAULT 'raw_text',
+  text TEXT NOT NULL,
+  text_hash TEXT NOT NULL DEFAULT '',
+  tokens_est INTEGER NOT NULL DEFAULT 0,
+  index_kind TEXT NOT NULL DEFAULT 'text',
+  embedding_status TEXT NOT NULL DEFAULT 'pending',
+  embedding_error TEXT NOT NULL DEFAULT '',
+  deleted INTEGER NOT NULL DEFAULT 0,
+  UNIQUE(rep_id, ordinal),
+  FOREIGN KEY (rep_id) REFERENCES representations(rep_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS spans (
+  span_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  chunk_id INTEGER NOT NULL,
+  span_kind TEXT NOT NULL,
+  start INTEGER NOT NULL,
+  end INTEGER NOT NULL,
+  extra_json TEXT,
+  FOREIGN KEY (chunk_id) REFERENCES chunks(chunk_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_documents_rel_path ON documents(rel_path);
+CREATE INDEX IF NOT EXISTS idx_documents_deleted ON documents(deleted);
+CREATE INDEX IF NOT EXISTS idx_representations_doc_id ON representations(doc_id);
+CREATE INDEX IF NOT EXISTS idx_chunks_rep_id ON chunks(rep_id);
+CREATE INDEX IF NOT EXISTS idx_chunks_embedding_status ON chunks(embedding_status);
+CREATE INDEX IF NOT EXISTS idx_chunks_index_kind ON chunks(index_kind);
+CREATE INDEX IF NOT EXISTS idx_chunks_rel_path_deleted ON chunks(rel_path, deleted);
+CREATE INDEX IF NOT EXISTS idx_spans_chunk_id ON spans(chunk_id);
+`
+	if _, err := db.ExecContext(ctx, schema); err != nil {
+		_ = db.Close()
+		return err
+	}
+
+	if err := bootstrapSettingsLocked(ctx, db); err != nil {
+		_ = db.Close()
+		return err
+	}
+
+	s.db = db
+	return nil
 }
 
 func (s *SQLiteStore) Init(ctx context.Context) error {
-	if s == nil {
-		return errors.New("nil store")
-	}
-
-	dbPath := strings.TrimSpace(s.path)
-	if dbPath == "" {
-		return errors.New("sqlite path is required")
-	}
-
-	stateDir := filepath.Dir(dbPath)
-	if stateDir != "." {
-		if err := os.MkdirAll(stateDir, 0o755); err != nil {
-			return fmt.Errorf("create state dir: %w", err)
-		}
-	}
-
-	sqlite3Path, err := exec.LookPath("sqlite3")
-	if err != nil {
-		return fmt.Errorf("sqlite3 binary not found in PATH: %w", err)
-	}
-
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	s.sqlite3Path = sqlite3Path
-	s.initialized = true
-
-	if err := s.execScriptLocked(ctx, initScript()); err != nil {
-		s.initialized = false
-		return err
-	}
-
-	if err := s.bootstrapSettingsLocked(ctx); err != nil {
-		s.initialized = false
-		return err
-	}
-
-	return nil
+	return s.initLocked(ctx)
 }
 
 func (s *SQLiteStore) UpsertDocument(ctx context.Context, doc model.Document) error {
@@ -75,175 +144,81 @@ func (s *SQLiteStore) UpsertDocument(ctx context.Context, doc model.Document) er
 		return err
 	}
 
-	status := normalizeStatus(doc.Status)
-	docType := normalizeDocType(doc.DocType)
-	sourceType := "file"
-	contentHash := strings.TrimSpace(doc.ContentHash)
+	db, err := s.ensureDB(ctx)
+	if err != nil {
+		return err
+	}
+	defer s.ReleaseDB()
 
-	script := fmt.Sprintf(
-		`INSERT INTO documents (
-			rel_path, source_type, doc_type, size_bytes, mtime_unix, content_hash, status, error, deleted
-		) VALUES (%s, %s, %s, %d, %d, %s, %s, NULL, %d)
-		ON CONFLICT(rel_path) DO UPDATE SET
-			source_type = excluded.source_type,
-			doc_type = excluded.doc_type,
-			size_bytes = excluded.size_bytes,
-			mtime_unix = excluded.mtime_unix,
-			content_hash = excluded.content_hash,
-			status = excluded.status,
-			error = excluded.error,
-			deleted = excluded.deleted;`,
-		sqlQuote(relPath),
-		sqlQuote(sourceType),
-		sqlQuote(docType),
+	_, err = db.ExecContext(
+		ctx,
+		`INSERT INTO documents(rel_path, doc_type, size_bytes, mtime_unix, content_hash, status, deleted)
+		 VALUES(?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(rel_path) DO UPDATE SET
+		   doc_type=excluded.doc_type,
+		   size_bytes=excluded.size_bytes,
+		   mtime_unix=excluded.mtime_unix,
+		   content_hash=excluded.content_hash,
+		   status=excluded.status,
+		   deleted=excluded.deleted`,
+		relPath,
+		normalizeDocType(doc.DocType),
 		doc.SizeBytes,
 		doc.MTimeUnix,
-		sqlQuote(contentHash),
-		sqlQuote(status),
+		strings.TrimSpace(doc.ContentHash),
+		normalizeStatus(doc.Status),
 		boolToInt(doc.Deleted),
 	)
-
-	return s.execScript(ctx, script)
+	return err
 }
 
-func (s *SQLiteStore) GetDocumentByPath(ctx context.Context, relPath string) (model.Document, error) {
-	normalizedPath, err := normalizeRelPath(relPath)
-	if err != nil {
-		return model.Document{}, err
+func (s *SQLiteStore) UpsertChunkTask(ctx context.Context, task model.ChunkTask) error {
+	// Ensure the caller did not accidentally pass inconsistent IDs.
+	if err := task.Validate(); err != nil {
+		return err
+	}
+	if task.Label <= 0 {
+		return errors.New("task label must be a positive integer")
 	}
 
-	script := fmt.Sprintf(
-		`SELECT doc_id, rel_path, doc_type, size_bytes, mtime_unix, content_hash, status, deleted
-		FROM documents
-		WHERE rel_path = %s
-		LIMIT 1;`,
-		sqlQuote(normalizedPath),
+	relPath, err := normalizeRelPath(task.Metadata.RelPath)
+	if err != nil {
+		return err
+	}
+
+	db, err := s.ensureDB(ctx)
+	if err != nil {
+		return err
+	}
+	defer s.ReleaseDB()
+
+	_, err = db.ExecContext(
+		ctx,
+		`INSERT INTO chunks(chunk_id, rel_path, doc_type, rep_type, text, index_kind, embedding_status, embedding_error, deleted)
+		 VALUES(?, ?, ?, ?, ?, ?, 'pending', '', 0)
+		 ON CONFLICT(chunk_id) DO UPDATE SET
+		   rel_path=excluded.rel_path,
+		   doc_type=excluded.doc_type,
+		   rep_type=excluded.rep_type,
+		   text=excluded.text,
+		   index_kind=excluded.index_kind,
+		   deleted=0,
+		   embedding_status='pending',
+		   embedding_error=''`,
+		int64(task.Label),
+		relPath,
+		defaultIfEmpty(task.Metadata.DocType, "unknown"),
+		defaultIfEmpty(task.Metadata.RepType, "raw_text"),
+		task.Text,
+		normalizeIndexKind(task.IndexKind),
 	)
-
-	rows, err := s.queryRows(ctx, script)
-	if err != nil {
-		return model.Document{}, err
-	}
-	if len(rows) == 0 {
-		return model.Document{}, os.ErrNotExist
-	}
-
-	row := rows[0]
-	docID, err := rowInt64(row, "doc_id")
-	if err != nil {
-		return model.Document{}, err
-	}
-	sizeBytes, err := rowInt64(row, "size_bytes")
-	if err != nil {
-		return model.Document{}, err
-	}
-	mtimeUnix, err := rowInt64(row, "mtime_unix")
-	if err != nil {
-		return model.Document{}, err
-	}
-	deletedInt, err := rowInt64(row, "deleted")
-	if err != nil {
-		return model.Document{}, err
-	}
-
-	return model.Document{
-		DocID:       docID,
-		RelPath:     rowString(row, "rel_path"),
-		DocType:     rowString(row, "doc_type"),
-		SizeBytes:   sizeBytes,
-		MTimeUnix:   mtimeUnix,
-		ContentHash: rowString(row, "content_hash"),
-		Status:      rowString(row, "status"),
-		Deleted:     deletedInt != 0,
-	}, nil
-}
-
-func (s *SQLiteStore) ListFiles(ctx context.Context, prefix, glob string, limit, offset int) ([]model.Document, int64, error) {
-	if limit <= 0 {
-		limit = 200
-	}
-	if offset < 0 {
-		offset = 0
-	}
-
-	whereSQL := buildListWhereClause(prefix, glob)
-
-	countScript := "SELECT COUNT(*) AS total FROM documents" + whereSQL + ";"
-	countRows, err := s.queryRows(ctx, countScript)
-	if err != nil {
-		return nil, 0, err
-	}
-	var total int64
-	if len(countRows) > 0 {
-		total, err = rowInt64(countRows[0], "total")
-		if err != nil {
-			return nil, 0, err
-		}
-	}
-
-	listScript := fmt.Sprintf(
-		`SELECT doc_id, rel_path, doc_type, size_bytes, mtime_unix, content_hash, status, deleted
-		FROM documents%s
-		ORDER BY rel_path ASC
-		LIMIT %d OFFSET %d;`,
-		whereSQL,
-		limit,
-		offset,
-	)
-	rows, err := s.queryRows(ctx, listScript)
-	if err != nil {
-		return nil, 0, err
-	}
-
-	docs := make([]model.Document, 0, len(rows))
-	for _, row := range rows {
-		docID, docErr := rowInt64(row, "doc_id")
-		if docErr != nil {
-			return nil, 0, docErr
-		}
-		sizeBytes, docErr := rowInt64(row, "size_bytes")
-		if docErr != nil {
-			return nil, 0, docErr
-		}
-		mtimeUnix, docErr := rowInt64(row, "mtime_unix")
-		if docErr != nil {
-			return nil, 0, docErr
-		}
-		deletedInt, docErr := rowInt64(row, "deleted")
-		if docErr != nil {
-			return nil, 0, docErr
-		}
-
-		docs = append(docs, model.Document{
-			DocID:       docID,
-			RelPath:     rowString(row, "rel_path"),
-			DocType:     rowString(row, "doc_type"),
-			SizeBytes:   sizeBytes,
-			MTimeUnix:   mtimeUnix,
-			ContentHash: rowString(row, "content_hash"),
-			Status:      rowString(row, "status"),
-			Deleted:     deletedInt != 0,
-		})
-	}
-
-	return docs, total, nil
-}
-
-func (s *SQLiteStore) Close() error {
-	if s == nil {
-		return nil
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.initialized = false
-	return nil
+	return err
 }
 
 func (s *SQLiteStore) UpsertRepresentation(ctx context.Context, rep model.Representation) (int64, error) {
 	if rep.DocID <= 0 {
 		return 0, errors.New("doc_id must be > 0")
 	}
-
 	repType := strings.TrimSpace(rep.RepType)
 	if repType == "" {
 		repType = "raw_text"
@@ -257,37 +232,43 @@ func (s *SQLiteStore) UpsertRepresentation(ctx context.Context, rep model.Repres
 		createdUnix = time.Now().Unix()
 	}
 
-	script := fmt.Sprintf(
-		`INSERT INTO representations (doc_id, rep_type, rep_hash, created_unix, meta_json, deleted)
-		VALUES (%d, %s, %s, %d, '{}', %d)
-		ON CONFLICT(doc_id, rep_type) DO UPDATE SET
-			rep_hash = excluded.rep_hash,
-			created_unix = excluded.created_unix,
-			meta_json = excluded.meta_json,
-			deleted = excluded.deleted;`,
-		rep.DocID,
-		sqlQuote(repType),
-		sqlQuote(repHash),
-		createdUnix,
-		boolToInt(rep.Deleted),
-	)
-	if err := s.execScript(ctx, script); err != nil {
-		return 0, err
-	}
-
-	query := fmt.Sprintf(
-		`SELECT rep_id FROM representations WHERE doc_id = %d AND rep_type = %s LIMIT 1;`,
-		rep.DocID,
-		sqlQuote(repType),
-	)
-	rows, err := s.queryRows(ctx, query)
+	db, err := s.ensureDB(ctx)
 	if err != nil {
 		return 0, err
 	}
-	if len(rows) == 0 {
+	defer s.ReleaseDB()
+
+	_, err = db.ExecContext(
+		ctx,
+		`INSERT INTO representations(doc_id, rep_type, rep_hash, created_unix, deleted)
+		 VALUES(?, ?, ?, ?, ?)
+		 ON CONFLICT(doc_id, rep_type) DO UPDATE SET
+		   rep_hash=excluded.rep_hash,
+		   created_unix=excluded.created_unix,
+		   deleted=excluded.deleted`,
+		rep.DocID,
+		repType,
+		repHash,
+		createdUnix,
+		boolToInt(rep.Deleted),
+	)
+	if err != nil {
+		return 0, err
+	}
+
+	var repID int64
+	if err := db.QueryRowContext(
+		ctx,
+		`SELECT rep_id FROM representations WHERE doc_id = ? AND rep_type = ? LIMIT 1`,
+		rep.DocID,
+		repType,
+	).Scan(&repID); err != nil {
+		return 0, err
+	}
+	if repID <= 0 {
 		return 0, errors.New("representation upsert did not return a row")
 	}
-	return rowInt64(rows[0], "rep_id")
+	return repID, nil
 }
 
 func (s *SQLiteStore) InsertChunkWithSpans(ctx context.Context, chunk model.Chunk, spans []model.Span) (int64, error) {
@@ -298,69 +279,99 @@ func (s *SQLiteStore) InsertChunkWithSpans(ctx context.Context, chunk model.Chun
 		return 0, errors.New("chunk text must be non-empty")
 	}
 
-	indexKind := normalizeIndexKind(chunk.IndexKind)
-	embeddingStatus := normalizeEmbeddingStatus(chunk.EmbeddingStatus)
+	db, err := s.ensureDB(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer s.ReleaseDB()
 
-	upsertChunk := fmt.Sprintf(
-		`INSERT INTO chunks (rep_id, ordinal, text, text_hash, tokens_est, index_kind, embedding_status, embedding_error, deleted)
-		VALUES (%d, %d, %s, %s, %d, %s, %s, %s, %d)
-		ON CONFLICT(rep_id, ordinal) DO UPDATE SET
-			text = excluded.text,
-			text_hash = excluded.text_hash,
-			tokens_est = excluded.tokens_est,
-			index_kind = excluded.index_kind,
-			embedding_status = excluded.embedding_status,
-			embedding_error = excluded.embedding_error,
-			deleted = excluded.deleted;`,
+	var (
+		relPath string
+		docType string
+		repType string
+	)
+	if err := db.QueryRowContext(
+		ctx,
+		`SELECT d.rel_path, d.doc_type, r.rep_type
+		 FROM representations r
+		 JOIN documents d ON d.doc_id = r.doc_id
+		 WHERE r.rep_id = ?
+		 LIMIT 1`,
+		chunk.RepID,
+	).Scan(&relPath, &docType, &repType); err != nil {
+		return 0, err
+	}
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	_, err = tx.ExecContext(
+		ctx,
+		`INSERT INTO chunks(rep_id, ordinal, rel_path, doc_type, rep_type, text, text_hash, tokens_est, index_kind, embedding_status, embedding_error, deleted)
+		 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(rep_id, ordinal) DO UPDATE SET
+		   rel_path=excluded.rel_path,
+		   doc_type=excluded.doc_type,
+		   rep_type=excluded.rep_type,
+		   text=excluded.text,
+		   text_hash=excluded.text_hash,
+		   tokens_est=excluded.tokens_est,
+		   index_kind=excluded.index_kind,
+		   embedding_status=excluded.embedding_status,
+		   embedding_error=excluded.embedding_error,
+		   deleted=excluded.deleted`,
 		chunk.RepID,
 		chunk.Ordinal,
-		sqlQuote(chunk.Text),
-		sqlQuote(strings.TrimSpace(chunk.TextHash)),
+		relPath,
+		docType,
+		defaultIfEmpty(repType, "raw_text"),
+		chunk.Text,
+		strings.TrimSpace(chunk.TextHash),
 		0,
-		sqlQuote(indexKind),
-		sqlQuote(embeddingStatus),
-		sqlMaybeNull(strings.TrimSpace(chunk.EmbeddingError)),
+		normalizeIndexKind(chunk.IndexKind),
+		normalizeEmbeddingStatus(chunk.EmbeddingStatus),
+		strings.TrimSpace(chunk.EmbeddingError),
 		boolToInt(chunk.Deleted),
 	)
-	if err := s.execScript(ctx, upsertChunk); err != nil {
+	if err != nil {
 		return 0, err
 	}
 
-	chunkIDQuery := fmt.Sprintf(
-		`SELECT chunk_id FROM chunks WHERE rep_id = %d AND ordinal = %d LIMIT 1;`,
+	var chunkID int64
+	if err := tx.QueryRowContext(
+		ctx,
+		`SELECT chunk_id FROM chunks WHERE rep_id = ? AND ordinal = ? LIMIT 1`,
 		chunk.RepID,
 		chunk.Ordinal,
-	)
-	chunkRows, err := s.queryRows(ctx, chunkIDQuery)
-	if err != nil {
-		return 0, err
-	}
-	if len(chunkRows) == 0 {
-		return 0, errors.New("chunk upsert did not return a row")
-	}
-	chunkID, err := rowInt64(chunkRows[0], "chunk_id")
-	if err != nil {
+	).Scan(&chunkID); err != nil {
 		return 0, err
 	}
 
-	spanStatements := []string{fmt.Sprintf("DELETE FROM spans WHERE chunk_id = %d;", chunkID)}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM spans WHERE chunk_id = ?`, chunkID); err != nil {
+		return 0, err
+	}
+
 	for _, span := range spans {
 		spanKind, startValue, endValue, spanErr := spanToRow(span)
 		if spanErr != nil {
 			return 0, spanErr
 		}
-		spanStatements = append(
-			spanStatements,
-			fmt.Sprintf(
-				`INSERT INTO spans (chunk_id, span_kind, start, end, extra_json) VALUES (%d, %s, %d, %d, NULL);`,
-				chunkID,
-				sqlQuote(spanKind),
-				startValue,
-				endValue,
-			),
-		)
+		if _, err := tx.ExecContext(
+			ctx,
+			`INSERT INTO spans (chunk_id, span_kind, start, end, extra_json) VALUES (?, ?, ?, ?, NULL)`,
+			chunkID,
+			spanKind,
+			startValue,
+			endValue,
+		); err != nil {
+			return 0, err
+		}
 	}
-	if err := s.execTransaction(ctx, spanStatements); err != nil {
+
+	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
 
@@ -372,49 +383,49 @@ func (s *SQLiteStore) GetChunksByRepID(ctx context.Context, repID int64) ([]mode
 		return nil, errors.New("rep_id must be > 0")
 	}
 
-	script := fmt.Sprintf(
-		`SELECT chunk_id, rep_id, ordinal, text, text_hash, index_kind, embedding_status, embedding_error, deleted
-		FROM chunks
-		WHERE rep_id = %d
-		ORDER BY ordinal ASC;`,
-		repID,
-	)
-
-	rows, err := s.queryRows(ctx, script)
+	db, err := s.ensureDB(ctx)
 	if err != nil {
 		return nil, err
 	}
+	defer s.ReleaseDB()
 
-	out := make([]model.Chunk, 0, len(rows))
-	for _, row := range rows {
-		chunkID, scanErr := rowInt64(row, "chunk_id")
-		if scanErr != nil {
-			return nil, scanErr
-		}
-		parsedRepID, scanErr := rowInt64(row, "rep_id")
-		if scanErr != nil {
-			return nil, scanErr
-		}
-		ordinal, scanErr := rowInt64(row, "ordinal")
-		if scanErr != nil {
-			return nil, scanErr
-		}
-		deletedInt, scanErr := rowInt64(row, "deleted")
-		if scanErr != nil {
-			return nil, scanErr
-		}
+	rows, err := db.QueryContext(
+		ctx,
+		`SELECT chunk_id, rep_id, ordinal, text, text_hash, index_kind, embedding_status, embedding_error, deleted
+		 FROM chunks
+		 WHERE rep_id = ?
+		 ORDER BY ordinal ASC`,
+		repID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
 
-		out = append(out, model.Chunk{
-			ChunkID:         chunkID,
-			RepID:           parsedRepID,
-			Ordinal:         int(ordinal),
-			Text:            rowString(row, "text"),
-			TextHash:        rowString(row, "text_hash"),
-			IndexKind:       rowString(row, "index_kind"),
-			EmbeddingStatus: rowString(row, "embedding_status"),
-			EmbeddingError:  rowString(row, "embedding_error"),
-			Deleted:         deletedInt != 0,
-		})
+	out := make([]model.Chunk, 0)
+	for rows.Next() {
+		var (
+			chunk   model.Chunk
+			deleted int
+		)
+		if err := rows.Scan(
+			&chunk.ChunkID,
+			&chunk.RepID,
+			&chunk.Ordinal,
+			&chunk.Text,
+			&chunk.TextHash,
+			&chunk.IndexKind,
+			&chunk.EmbeddingStatus,
+			&chunk.EmbeddingError,
+			&deleted,
+		); err != nil {
+			return nil, err
+		}
+		chunk.Deleted = deleted == 1
+		out = append(out, chunk)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return out, nil
 }
@@ -425,24 +436,42 @@ func (s *SQLiteStore) MarkDocumentDeleted(ctx context.Context, relPath string) e
 		return err
 	}
 
-	statements := []string{
-		fmt.Sprintf(`UPDATE documents SET deleted = 1 WHERE rel_path = %s;`, sqlQuote(normalizedPath)),
-		fmt.Sprintf(
-			`UPDATE representations SET deleted = 1
-			WHERE doc_id IN (SELECT doc_id FROM documents WHERE rel_path = %s);`,
-			sqlQuote(normalizedPath),
-		),
-		fmt.Sprintf(
-			`UPDATE chunks SET deleted = 1
-			WHERE rep_id IN (
-				SELECT rep_id FROM representations
-				WHERE doc_id IN (SELECT doc_id FROM documents WHERE rel_path = %s)
-			);`,
-			sqlQuote(normalizedPath),
-		),
+	db, err := s.ensureDB(ctx)
+	if err != nil {
+		return err
+	}
+	defer s.ReleaseDB()
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx, `UPDATE documents SET deleted = 1 WHERE rel_path = ?`, normalizedPath); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(
+		ctx,
+		`UPDATE representations SET deleted = 1
+		 WHERE doc_id IN (SELECT doc_id FROM documents WHERE rel_path = ?)`,
+		normalizedPath,
+	); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(
+		ctx,
+		`UPDATE chunks SET deleted = 1
+		 WHERE rep_id IN (
+			SELECT rep_id FROM representations
+			WHERE doc_id IN (SELECT doc_id FROM documents WHERE rel_path = ?)
+		 )`,
+		normalizedPath,
+	); err != nil {
+		return err
 	}
 
-	return s.execTransaction(ctx, statements)
+	return tx.Commit()
 }
 
 func (s *SQLiteStore) SetSetting(ctx context.Context, key, value string) error {
@@ -450,13 +479,21 @@ func (s *SQLiteStore) SetSetting(ctx context.Context, key, value string) error {
 	if key == "" {
 		return errors.New("setting key is required")
 	}
-	script := fmt.Sprintf(
-		`INSERT INTO settings (key, value) VALUES (%s, %s)
-		ON CONFLICT(key) DO UPDATE SET value = excluded.value;`,
-		sqlQuote(key),
-		sqlQuote(value),
+
+	db, err := s.ensureDB(ctx)
+	if err != nil {
+		return err
+	}
+	defer s.ReleaseDB()
+
+	_, err = db.ExecContext(
+		ctx,
+		`INSERT INTO settings(key, value) VALUES(?, ?)
+		 ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+		key,
+		value,
 	)
-	return s.execScript(ctx, script)
+	return err
 }
 
 func (s *SQLiteStore) GetSetting(ctx context.Context, key string) (string, error) {
@@ -464,171 +501,348 @@ func (s *SQLiteStore) GetSetting(ctx context.Context, key string) (string, error
 	if key == "" {
 		return "", errors.New("setting key is required")
 	}
-	script := fmt.Sprintf(`SELECT value FROM settings WHERE key = %s LIMIT 1;`, sqlQuote(key))
-	rows, err := s.queryRows(ctx, script)
+
+	db, err := s.ensureDB(ctx)
 	if err != nil {
 		return "", err
 	}
-	if len(rows) == 0 {
-		return "", os.ErrNotExist
-	}
-	return rowString(rows[0], "value"), nil
-}
+	defer s.ReleaseDB()
 
-func (s *SQLiteStore) execScript(ctx context.Context, script string) error {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.execScriptLocked(ctx, script)
-}
-
-func (s *SQLiteStore) execScriptLocked(ctx context.Context, script string) error {
-	dbPath, sqlite3Path, err := s.ensureReadyLocked()
+	var value string
+	err = db.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = ? LIMIT 1`, key).Scan(&value)
 	if err != nil {
-		return err
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", os.ErrNotExist
+		}
+		return "", err
 	}
+	return value, nil
+}
 
-	fullScript := pragmaPrefix() + script
-	cmd := exec.CommandContext(ctx, sqlite3Path, "-cmd", ".timeout 5000", dbPath, fullScript)
-	output, err := cmd.CombinedOutput()
+func (s *SQLiteStore) GetDocumentByPath(ctx context.Context, relPath string) (model.Document, error) {
+	normalizedPath, err := normalizeRelPath(relPath)
 	if err != nil {
-		return fmt.Errorf("sqlite exec failed: %w (%s)", err, strings.TrimSpace(string(output)))
+		return model.Document{}, err
 	}
-	return nil
-}
 
-func (s *SQLiteStore) execTransaction(ctx context.Context, statements []string) error {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.execTransactionLocked(ctx, statements)
-}
-
-func (s *SQLiteStore) execTransactionLocked(ctx context.Context, statements []string) error {
-	if len(statements) == 0 {
-		return nil
+	db, err := s.ensureDB(ctx)
+	if err != nil {
+		return model.Document{}, err
 	}
-	var b strings.Builder
-	b.WriteString("BEGIN IMMEDIATE;")
-	for _, statement := range statements {
-		trimmed := strings.TrimSpace(statement)
-		if trimmed == "" {
-			continue
+	defer s.ReleaseDB()
+
+	var doc model.Document
+	var deleted int
+	row := db.QueryRowContext(
+		ctx,
+		`SELECT doc_id, rel_path, doc_type, size_bytes, mtime_unix, content_hash, status, deleted
+		 FROM documents WHERE rel_path = ?`,
+		normalizedPath,
+	)
+	if err := row.Scan(
+		&doc.DocID,
+		&doc.RelPath,
+		&doc.DocType,
+		&doc.SizeBytes,
+		&doc.MTimeUnix,
+		&doc.ContentHash,
+		&doc.Status,
+		&deleted,
+	); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return model.Document{}, os.ErrNotExist
 		}
-		b.WriteString(trimmed)
-		if !strings.HasSuffix(trimmed, ";") {
-			b.WriteString(";")
-		}
+		return model.Document{}, err
 	}
-	b.WriteString("COMMIT;")
-	return s.execScriptLocked(ctx, b.String())
+	doc.Deleted = deleted == 1
+	return doc, nil
 }
 
-func (s *SQLiteStore) queryRows(ctx context.Context, script string) ([]map[string]interface{}, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+func (s *SQLiteStore) ListFiles(ctx context.Context, prefix, glob string, limit, offset int) ([]model.Document, int64, error) {
+	db, err := s.ensureDB(ctx)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer s.ReleaseDB()
 
-	dbPath, sqlite3Path, err := s.ensureReadyLocked()
+	if limit <= 0 {
+		limit = 200
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	normalizedPrefix := normalizePrefix(prefix)
+
+	query := `SELECT doc_id, rel_path, doc_type, size_bytes, mtime_unix, content_hash, status, deleted FROM documents`
+	where := make([]string, 0, 2)
+	args := make([]any, 0, 4)
+	if normalizedPrefix != "" {
+		where = append(where, "rel_path LIKE ? ESCAPE '\\\\'")
+		args = append(args, escapeLike(normalizedPrefix)+"%")
+	}
+	if strings.TrimSpace(glob) != "" {
+		where = append(where, "rel_path GLOB ?")
+		args = append(args, glob)
+	}
+	if len(where) > 0 {
+		query += " WHERE " + strings.Join(where, " AND ")
+	}
+	query += " ORDER BY rel_path LIMIT ? OFFSET ?"
+	args = append(args, limit, offset)
+
+	rows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	docs := make([]model.Document, 0, limit)
+	for rows.Next() {
+		var doc model.Document
+		var deleted int
+		if err := rows.Scan(
+			&doc.DocID,
+			&doc.RelPath,
+			&doc.DocType,
+			&doc.SizeBytes,
+			&doc.MTimeUnix,
+			&doc.ContentHash,
+			&doc.Status,
+			&deleted,
+		); err != nil {
+			return nil, 0, err
+		}
+		doc.Deleted = deleted == 1
+		docs = append(docs, doc)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+
+	var total int64
+	countQuery := "SELECT COUNT(*) FROM documents"
+	countArgs := make([]any, 0)
+	if len(where) > 0 {
+		countQuery += " WHERE " + strings.Join(where, " AND ")
+		countArgs = append(countArgs, args[:len(args)-2]...)
+	}
+	if err := db.QueryRowContext(ctx, countQuery, countArgs...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	return docs, total, nil
+}
+
+func (s *SQLiteStore) NextPending(ctx context.Context, limit int, indexKind string) ([]model.ChunkTask, error) {
+	db, err := s.ensureDB(ctx)
 	if err != nil {
 		return nil, err
 	}
+	defer s.ReleaseDB()
+	if limit <= 0 {
+		limit = 32
+	}
 
-	cmd := exec.CommandContext(ctx, sqlite3Path, "-cmd", ".timeout 5000", "-json", dbPath, script)
-	output, err := cmd.CombinedOutput()
+	args := []any{"pending"}
+	query := `SELECT chunk_id, rel_path, doc_type, rep_type, text, index_kind FROM chunks WHERE embedding_status = ? AND deleted = 0`
+	if strings.TrimSpace(indexKind) != "" {
+		query += " AND index_kind = ?"
+		args = append(args, indexKind)
+	}
+	args = append(args, limit)
+	query += " ORDER BY chunk_id LIMIT ?"
+
+	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("sqlite query failed: %w (%s)", err, strings.TrimSpace(string(output)))
+		return nil, err
 	}
+	defer func() { _ = rows.Close() }()
 
-	trimmed := strings.TrimSpace(string(output))
-	if trimmed == "" {
-		return []map[string]interface{}{}, nil
+	tasks := make([]model.ChunkTask, 0, limit)
+	for rows.Next() {
+		var (
+			chunkID int64
+			relPath string
+			docType string
+			repType string
+			text    string
+			idxKind string
+		)
+		if err := rows.Scan(&chunkID, &relPath, &docType, &repType, &text, &idxKind); err != nil {
+			return nil, err
+		}
+		tasks = append(tasks, model.NewChunkTask(chunkID, text, idxKind, model.ChunkMetadata{
+			ChunkID: chunkID,
+			RelPath: relPath,
+			DocType: docType,
+			RepType: repType,
+			Snippet: snippet(text, 240),
+			Span:    model.Span{Kind: "lines"},
+		}))
 	}
-
-	var rows []map[string]interface{}
-	if err := json.Unmarshal([]byte(trimmed), &rows); err != nil {
-		return nil, fmt.Errorf("decode sqlite json result: %w", err)
-	}
-	return rows, nil
+	return tasks, rows.Err()
 }
 
-func (s *SQLiteStore) ensureReadyLocked() (dbPath string, sqlite3Path string, err error) {
-	if s == nil {
-		return "", "", errors.New("nil store")
+func (s *SQLiteStore) ListEmbeddedChunkMetadata(ctx context.Context, indexKind string, limit, offset int) ([]model.ChunkTask, error) {
+	db, err := s.ensureDB(ctx)
+	if err != nil {
+		return nil, err
 	}
-	if !s.initialized {
-		return "", "", errors.New("store is not initialized")
+	defer s.ReleaseDB()
+	if limit <= 0 {
+		limit = 500
 	}
-	if strings.TrimSpace(s.sqlite3Path) == "" {
-		return "", "", errors.New("sqlite3 binary is not configured")
+	if offset < 0 {
+		offset = 0
 	}
-	if strings.TrimSpace(s.path) == "" {
-		return "", "", errors.New("sqlite path is empty")
+
+	args := []any{"ok"}
+	query := `SELECT chunk_id, rel_path, doc_type, rep_type, text, index_kind
+	          FROM chunks
+	          WHERE embedding_status = ? AND deleted = 0`
+	if strings.TrimSpace(indexKind) != "" {
+		query += ` AND index_kind = ?`
+		args = append(args, indexKind)
 	}
-	return s.path, s.sqlite3Path, nil
+	args = append(args, limit, offset)
+	query += ` ORDER BY chunk_id LIMIT ? OFFSET ?`
+
+	rows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	out := make([]model.ChunkTask, 0, limit)
+	for rows.Next() {
+		var (
+			chunkID int64
+			relPath string
+			docType string
+			repType string
+			text    string
+			kind    string
+		)
+		if err := rows.Scan(&chunkID, &relPath, &docType, &repType, &text, &kind); err != nil {
+			return nil, err
+		}
+		out = append(out, model.ChunkTask{
+			Label:     chunkID,
+			Text:      text,
+			IndexKind: kind,
+			Metadata: model.ChunkMetadata{
+				ChunkID: chunkID,
+				RelPath: relPath,
+				DocType: docType,
+				RepType: repType,
+				Snippet: snippet(text, 240),
+				Span:    model.Span{Kind: "lines"},
+			},
+		})
+	}
+	return out, rows.Err()
 }
 
-func initScript() string {
-	return `
-		PRAGMA journal_mode = WAL;
-		PRAGMA synchronous = NORMAL;
-		CREATE TABLE IF NOT EXISTS documents (
-			doc_id INTEGER PRIMARY KEY AUTOINCREMENT,
-			rel_path TEXT NOT NULL UNIQUE,
-			source_type TEXT NOT NULL DEFAULT 'file',
-			doc_type TEXT NOT NULL,
-			size_bytes INTEGER NOT NULL DEFAULT 0,
-			mtime_unix INTEGER NOT NULL DEFAULT 0,
-			content_hash TEXT NOT NULL DEFAULT '',
-			status TEXT NOT NULL DEFAULT 'ok',
-			error TEXT,
-			deleted INTEGER NOT NULL DEFAULT 0 CHECK(deleted IN (0,1))
-		);
-		CREATE TABLE IF NOT EXISTS representations (
-			rep_id INTEGER PRIMARY KEY AUTOINCREMENT,
-			doc_id INTEGER NOT NULL,
-			rep_type TEXT NOT NULL,
-			rep_hash TEXT NOT NULL,
-			created_unix INTEGER NOT NULL,
-			meta_json TEXT NOT NULL DEFAULT '{}',
-			deleted INTEGER NOT NULL DEFAULT 0 CHECK(deleted IN (0,1)),
-			UNIQUE(doc_id, rep_type),
-			FOREIGN KEY (doc_id) REFERENCES documents(doc_id) ON DELETE CASCADE
-		);
-		CREATE TABLE IF NOT EXISTS chunks (
-			chunk_id INTEGER PRIMARY KEY AUTOINCREMENT,
-			rep_id INTEGER NOT NULL,
-			ordinal INTEGER NOT NULL,
-			text TEXT NOT NULL,
-			text_hash TEXT NOT NULL,
-			tokens_est INTEGER NOT NULL DEFAULT 0,
-			index_kind TEXT NOT NULL,
-			embedding_status TEXT NOT NULL DEFAULT 'pending',
-			embedding_error TEXT,
-			deleted INTEGER NOT NULL DEFAULT 0 CHECK(deleted IN (0,1)),
-			UNIQUE(rep_id, ordinal),
-			FOREIGN KEY (rep_id) REFERENCES representations(rep_id) ON DELETE CASCADE
-		);
-		CREATE TABLE IF NOT EXISTS spans (
-			span_id INTEGER PRIMARY KEY AUTOINCREMENT,
-			chunk_id INTEGER NOT NULL,
-			span_kind TEXT NOT NULL,
-			start INTEGER NOT NULL,
-			end INTEGER NOT NULL,
-			extra_json TEXT,
-			FOREIGN KEY (chunk_id) REFERENCES chunks(chunk_id) ON DELETE CASCADE
-		);
-		CREATE TABLE IF NOT EXISTS settings (
-			key TEXT PRIMARY KEY,
-			value TEXT NOT NULL
-		);
-		CREATE INDEX IF NOT EXISTS idx_documents_rel_path ON documents(rel_path);
-		CREATE INDEX IF NOT EXISTS idx_documents_deleted ON documents(deleted);
-		CREATE INDEX IF NOT EXISTS idx_representations_doc_id ON representations(doc_id);
-		CREATE INDEX IF NOT EXISTS idx_chunks_rep_id ON chunks(rep_id);
-		CREATE INDEX IF NOT EXISTS idx_chunks_embedding_status ON chunks(embedding_status);
-		CREATE INDEX IF NOT EXISTS idx_spans_chunk_id ON spans(chunk_id);
-	`
+func (s *SQLiteStore) MarkEmbedded(ctx context.Context, labels []int64) error {
+	return s.markEmbeddingStatus(ctx, labels, "ok", "")
 }
 
-func (s *SQLiteStore) bootstrapSettingsLocked(ctx context.Context) error {
+func (s *SQLiteStore) MarkFailed(ctx context.Context, labels []int64, reason string) error {
+	return s.markEmbeddingStatus(ctx, labels, "error", reason)
+}
+
+func (s *SQLiteStore) markEmbeddingStatus(ctx context.Context, labels []int64, status, reason string) error {
+	if len(labels) == 0 {
+		return nil
+	}
+	db, err := s.ensureDB(ctx)
+	if err != nil {
+		return err
+	}
+	defer s.ReleaseDB()
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	stmt, err := tx.PrepareContext(ctx, `UPDATE chunks SET embedding_status = ?, embedding_error = ? WHERE chunk_id = ?`)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = stmt.Close() }()
+
+	for _, label := range labels {
+		if _, err := stmt.ExecContext(ctx, status, reason, label); err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
+}
+
+func (s *SQLiteStore) Close() error {
+	s.mu.Lock()
+	for s.closing {
+		s.cond.Wait()
+	}
+	if s.db == nil {
+		s.mu.Unlock()
+		return nil
+	}
+	s.closing = true
+	db := s.db
+	s.db = nil
+	for s.activeOps > 0 {
+		s.cond.Wait()
+	}
+	s.mu.Unlock()
+
+	err := db.Close()
+
+	s.mu.Lock()
+	s.closing = false
+	s.cond.Broadcast()
+	s.mu.Unlock()
+	return err
+}
+
+func (s *SQLiteStore) ensureDB(ctx context.Context) (*sql.DB, error) {
+	// Acquire lock early so Close cannot clear s.db between init and use.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closing {
+		return nil, errors.New("sqlite db is closing")
+	}
+
+	if s.db == nil {
+		if err := s.initLocked(ctx); err != nil {
+			return nil, err
+		}
+	}
+	if s.db == nil {
+		return nil, errors.New("sqlite db not initialized")
+	}
+	s.activeOps++
+	return s.db, nil
+}
+
+// ReleaseDB marks completion of an operation that previously acquired a
+// database handle via ensureDB.
+func (s *SQLiteStore) ReleaseDB() {
+	s.mu.Lock()
+	if s.activeOps > 0 {
+		s.activeOps--
+	}
+	if s.activeOps == 0 {
+		s.cond.Broadcast()
+	}
+	s.mu.Unlock()
+}
+
+func bootstrapSettingsLocked(ctx context.Context, db *sql.DB) error {
 	defaults := map[string]string{
 		"schema_version":       "1",
 		"protocol_version":     "2025-11-25",
@@ -641,40 +855,24 @@ func (s *SQLiteStore) bootstrapSettingsLocked(ctx context.Context) error {
 		"chat_model":           "mistral-small-2506",
 	}
 
-	statements := make([]string, 0, len(defaults))
 	for key, value := range defaults {
-		statements = append(
-			statements,
-			fmt.Sprintf(
-				`INSERT INTO settings (key, value) VALUES (%s, %s)
-				ON CONFLICT(key) DO NOTHING;`,
-				sqlQuote(key),
-				sqlQuote(value),
-			),
-		)
+		if _, err := db.ExecContext(
+			ctx,
+			`INSERT INTO settings(key, value) VALUES(?, ?)
+			 ON CONFLICT(key) DO NOTHING`,
+			key,
+			value,
+		); err != nil {
+			return err
+		}
 	}
-
-	return s.execTransactionLocked(ctx, statements)
-}
-
-func buildListWhereClause(prefix, glob string) string {
-	filters := make([]string, 0, 2)
-	if normalizedPrefix := normalizePrefix(prefix); normalizedPrefix != "" {
-		filters = append(filters, "rel_path LIKE "+sqlQuote(normalizedPrefix+"%"))
-	}
-	if trimmedGlob := strings.TrimSpace(glob); trimmedGlob != "" {
-		filters = append(filters, "rel_path GLOB "+sqlQuote(trimmedGlob))
-	}
-	if len(filters) == 0 {
-		return ""
-	}
-	return " WHERE " + strings.Join(filters, " AND ")
+	return nil
 }
 
 func normalizeRelPath(relPath string) (string, error) {
 	normalized := strings.TrimSpace(relPath)
 	if filepath.IsAbs(normalized) {
-		return "", errors.New("rel_path must be a non-empty relative path without parent-traversal or absolute paths")
+		return "", errors.New(relPathErrorMessage)
 	}
 
 	normalized = filepath.ToSlash(filepath.Clean(normalized))
@@ -683,7 +881,7 @@ func normalizeRelPath(relPath string) (string, error) {
 		normalized == ".." ||
 		strings.HasPrefix(normalized, "../") ||
 		strings.Contains(normalized, "/..") {
-		return "", errors.New("rel_path must be a non-empty relative path without parent-traversal or absolute paths")
+		return "", errors.New(relPathErrorMessage)
 	}
 
 	return normalized, nil
@@ -764,63 +962,32 @@ func spanToRow(span model.Span) (kind string, start int, end int, err error) {
 	}
 }
 
-func rowString(row map[string]interface{}, key string) string {
-	value, ok := row[key]
-	if !ok || value == nil {
-		return ""
-	}
-	switch typed := value.(type) {
-	case string:
-		return typed
-	default:
-		return fmt.Sprintf("%v", typed)
-	}
-}
-
-func rowInt64(row map[string]interface{}, key string) (int64, error) {
-	value, ok := row[key]
-	if !ok || value == nil {
-		return 0, fmt.Errorf("missing numeric column %q", key)
-	}
-	switch typed := value.(type) {
-	case float64:
-		return int64(typed), nil
-	case float32:
-		return int64(typed), nil
-	case int:
-		return int64(typed), nil
-	case int64:
-		return typed, nil
-	case string:
-		parsed, err := strconv.ParseInt(strings.TrimSpace(typed), 10, 64)
-		if err != nil {
-			return 0, fmt.Errorf("parse numeric column %q: %w", key, err)
-		}
-		return parsed, nil
-	default:
-		return 0, fmt.Errorf("unsupported numeric type for column %q: %T", key, value)
-	}
-}
-
-func sqlQuote(value string) string {
-	escaped := strings.ReplaceAll(value, "'", "''")
-	return "'" + escaped + "'"
-}
-
-func sqlMaybeNull(value string) string {
-	if strings.TrimSpace(value) == "" {
-		return "NULL"
-	}
-	return sqlQuote(value)
-}
-
-func boolToInt(value bool) int {
-	if value {
+func boolToInt(v bool) int {
+	if v {
 		return 1
 	}
 	return 0
 }
 
-func pragmaPrefix() string {
-	return "PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;"
+func defaultIfEmpty(v, fallback string) string {
+	if strings.TrimSpace(v) == "" {
+		return fallback
+	}
+	return v
+}
+
+func escapeLike(v string) string {
+	v = strings.ReplaceAll(v, `\\`, `\\\\`)
+	v = strings.ReplaceAll(v, `%`, `\\%`)
+	v = strings.ReplaceAll(v, `_`, `\\_`)
+	return v
+}
+
+func snippet(text string, max int) string {
+	text = strings.TrimSpace(text)
+	runes := []rune(text)
+	if len(runes) <= max {
+		return text
+	}
+	return string(runes[:max])
 }

@@ -276,7 +276,7 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	}
 
 	client := mistral.NewClient(cfg.MistralBaseURL, cfg.MistralAPIKey)
-	ret := retrieval.NewService(st, ix, client)
+	ret := retrieval.NewService(st, ix, client, client)
 	indexingState := appstate.NewIndexingState(appstate.ModeIncremental)
 	mcpServer := mcp.NewServer(cfg, ret, mcp.WithStore(st), mcp.WithIndexingState(indexingState))
 	ing := a.newIngestor(cfg, st)
