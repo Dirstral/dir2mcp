@@ -10,7 +10,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/Dirstral/dir2mcp/internal/model"
+	"dir2mcp/internal/model"
 )
 
 const (
@@ -167,7 +167,7 @@ func (s *Server) handleToolsCall(ctx context.Context, w http.ResponseWriter, raw
 func parseToolsCallParams(raw json.RawMessage) (toolsCallParams, error) {
 	if len(raw) == 0 {
 		return toolsCallParams{}, validationError{
-			message:       "tools/call params are required",
+			message:       "params is required",
 			canonicalCode: "MISSING_FIELD",
 		}
 	}
@@ -307,11 +307,10 @@ func (s *Server) handleListFilesTool(ctx context.Context, args map[string]interf
 		docs  []model.Document
 		total int64
 	)
-	switch {
-	case s.store == nil:
+	if s.store == nil {
 		docs = []model.Document{}
 		total = 0
-	default:
+	} else {
 		listedDocs, listedTotal, listErr := s.store.ListFiles(ctx, pathPrefix, glob, limit, offset)
 		if listErr != nil && !errors.Is(listErr, model.ErrNotImplemented) {
 			return toolCallResult{}, &toolExecutionError{
@@ -355,7 +354,7 @@ func (s *Server) handleListFilesTool(ctx context.Context, args map[string]interf
 	}, nil
 }
 
-func (s *Server) handleSearchTool(_ context.Context, args map[string]interface{}) (toolCallResult, *toolExecutionError) {
+func (s *Server) handleSearchTool(ctx context.Context, args map[string]interface{}) (toolCallResult, *toolExecutionError) {
 	if err := assertNoUnknownArguments(args, map[string]struct{}{
 		"query":       {},
 		"k":           {},
@@ -374,7 +373,7 @@ func (s *Server) handleSearchTool(_ context.Context, args map[string]interface{}
 	if !ok {
 		return toolCallResult{}, &toolExecutionError{Code: "MISSING_FIELD", Message: "query is required", Retryable: false}
 	}
-	k := 10
+	k := DefaultSearchK
 	if rawK, exists := args["k"]; exists {
 		parsedK, parseErr := parseInteger(rawK, "k")
 		if parseErr != nil {
@@ -382,21 +381,81 @@ func (s *Server) handleSearchTool(_ context.Context, args map[string]interface{}
 		}
 		k = parsedK
 	}
-	if k < 1 || k > 50 {
+	if k <= 0 {
+		k = DefaultSearchK
+	}
+	if k > 50 {
 		return toolCallResult{}, &toolExecutionError{Code: "INVALID_RANGE", Message: "k must be between 1 and 50", Retryable: false}
+	}
+
+	indexName, err := parseOptionalString(args, "index")
+	if err != nil {
+		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
+	}
+	indexName = strings.ToLower(strings.TrimSpace(indexName))
+	if indexName == "" {
+		indexName = "auto"
+	}
+	switch indexName {
+	case "auto", "text", "code", "both":
+	default:
+		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: "index must be one of auto,text,code,both", Retryable: false}
+	}
+
+	pathPrefix, err := parseOptionalString(args, "path_prefix")
+	if err != nil {
+		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
+	}
+	fileGlob, err := parseOptionalString(args, "file_glob")
+	if err != nil {
+		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
+	}
+	docTypes, err := parseOptionalStringSlice(args, "doc_types")
+	if err != nil {
+		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
+	}
+
+	if s.retriever == nil {
+		return toolCallResult{}, &toolExecutionError{Code: "INDEX_NOT_READY", Message: "retriever not configured", Retryable: false}
+	}
+	hits, searchErr := s.retriever.Search(ctx, model.SearchQuery{
+		Query:      query,
+		K:          k,
+		Index:      indexName,
+		PathPrefix: pathPrefix,
+		FileGlob:   fileGlob,
+		DocTypes:   docTypes,
+	})
+	if searchErr != nil {
+		code := "INTERNAL_ERROR"
+		message := "internal server error"
+		retryable := true
+		if errors.Is(searchErr, model.ErrIndexNotReady) || errors.Is(searchErr, model.ErrIndexNotConfigured) {
+			code = "INDEX_NOT_READY"
+			message = "index not ready"
+		}
+		return toolCallResult{}, &toolExecutionError{Code: code, Message: message, Retryable: retryable}
+	}
+
+	indexUsed := "text"
+	switch indexName {
+	case "code":
+		indexUsed = "code"
+	case "both":
+		indexUsed = "both"
 	}
 
 	structured := map[string]interface{}{
 		"query":             query,
 		"k":                 k,
-		"index_used":        "text",
-		"hits":              []interface{}{},
+		"index_used":        indexUsed,
+		"hits":              hits,
 		"indexing_complete": false,
 	}
 
 	return toolCallResult{
 		Content: []toolContentItem{
-			{Type: "text", Text: "search stub is registered; retrieval is not wired yet"},
+			{Type: "text", Text: fmt.Sprintf("found %d result(s)", len(hits))},
 		},
 		StructuredContent: structured,
 	}, nil
@@ -531,6 +590,42 @@ func parseInteger(value interface{}, field string) (int, error) {
 		return int(v), nil
 	default:
 		return 0, fmt.Errorf("%s must be an integer", field)
+	}
+}
+
+func parseOptionalStringSlice(args map[string]interface{}, key string) ([]string, error) {
+	raw, ok := args[key]
+	if !ok || raw == nil {
+		return nil, nil
+	}
+
+	switch typed := raw.(type) {
+	case []interface{}:
+		out := make([]string, 0, len(typed))
+		for idx, item := range typed {
+			v, ok := item.(string)
+			if !ok {
+				return nil, fmt.Errorf("%s[%d] must be a string", key, idx)
+			}
+			v = strings.TrimSpace(v)
+			if v == "" {
+				return nil, fmt.Errorf("%s[%d] must be a non-empty string", key, idx)
+			}
+			out = append(out, v)
+		}
+		return out, nil
+	case []string:
+		out := make([]string, 0, len(typed))
+		for idx, item := range typed {
+			item = strings.TrimSpace(item)
+			if item == "" {
+				return nil, fmt.Errorf("%s[%d] must be a non-empty string", key, idx)
+			}
+			out = append(out, item)
+		}
+		return out, nil
+	default:
+		return nil, fmt.Errorf("%s must be an array of strings", key)
 	}
 }
 

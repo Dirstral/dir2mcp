@@ -8,8 +8,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/Dirstral/dir2mcp/internal/config"
-	"github.com/Dirstral/dir2mcp/internal/mcp"
+	"dir2mcp/internal/config"
+	"dir2mcp/internal/mcp"
 )
 
 func TestMCPToolsList_RegistersDayOneToolsWithSchemas(t *testing.T) {
@@ -125,8 +125,9 @@ func TestMCPToolsCallStats_ReturnsStructuredContent(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected models object, got %#v", envelope.Result.StructuredContent["models"])
 	}
-	if modelsRaw["stt_provider"] == "" {
-		t.Fatalf("expected non-empty models.stt_provider, got %#v", modelsRaw["stt_provider"])
+	sttProvider, ok := modelsRaw["stt_provider"].(string)
+	if !ok || sttProvider == "" {
+		t.Fatalf("expected non-empty string models.stt_provider, got %#v", modelsRaw["stt_provider"])
 	}
 }
 

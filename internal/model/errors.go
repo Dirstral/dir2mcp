@@ -5,6 +5,14 @@ import "errors"
 var (
 	// ErrNotImplemented marks skeleton methods that still need subsystem work.
 	ErrNotImplemented = errors.New("not implemented")
+
+	// ErrIndexNotReady is returned by a Retriever when the index exists but
+	// has not yet finished building or loading.
+	ErrIndexNotReady = errors.New("index not ready")
+
+	// ErrIndexNotConfigured is returned by a Retriever when no index has been
+	// configured at all (e.g. the caller never provided one).
+	ErrIndexNotConfigured = errors.New("index not configured")
 )
 
 type ProviderError struct {

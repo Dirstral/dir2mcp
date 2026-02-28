@@ -1,4 +1,4 @@
-package mistral
+package tests
 
 import (
 	"context"
@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"dir2mcp/internal/mistral"
 )
 
 func TestEmbed_Integration_MistralAPI(t *testing.T) {
@@ -20,7 +22,7 @@ func TestEmbed_Integration_MistralAPI(t *testing.T) {
 	}
 
 	baseURL := strings.TrimSpace(os.Getenv("MISTRAL_BASE_URL"))
-	client := NewClient(baseURL, apiKey)
+	client := mistral.NewClient(baseURL, apiKey)
 	client.BatchSize = 2
 	client.MaxRetries = 2
 
