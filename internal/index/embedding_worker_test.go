@@ -173,7 +173,7 @@ func TestEmbeddingWorker_RunOnce_EmbeddingTransient(t *testing.T) {
 
 	// net.Error with Temporary() true is also transient
 	source.tasks = []model.ChunkTask{model.NewChunkTask(43, "again", "", model.ChunkMetadata{ChunkID: 43})}
-	tmpErr := &net.DNSError{IsTimeout: true}
+	tmpErr := &net.DNSError{IsTemporary: true, IsTimeout: false}
 	retryWorker := &EmbeddingWorker{
 		Source:    source,
 		Index:     NewHNSWIndex(""),

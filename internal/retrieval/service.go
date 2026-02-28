@@ -157,9 +157,14 @@ func (s *Service) SetRootDir(root string) {
 }
 
 func (s *Service) SetPathExcludes(patterns []string) {
-	copied := append([]string(nil), patterns...)
-	compiled := make(map[string]*regexp.Regexp, len(copied))
-	for _, pat := range copied {
+	// merge defaults with caller-provided patterns so that hardcoded
+	// security exclusions (.git, node_modules, .env, key/pem files) are
+	// never silently dropped when the caller supplies custom patterns.
+	merged := make([]string, 0, len(defaultPathExcludes)+len(patterns))
+	merged = append(merged, defaultPathExcludes...)
+	merged = append(merged, patterns...)
+	compiled := make(map[string]*regexp.Regexp, len(merged))
+	for _, pat := range merged {
 		norm := strings.TrimSpace(filepath.ToSlash(pat))
 		if norm == "" {
 			continue
@@ -177,13 +182,23 @@ func (s *Service) SetPathExcludes(patterns []string) {
 	// callers observe exactly what they provided. compiled regexps are
 	// stored in s.excludeRegexps; the helper matchExcludePattern will
 	// perform the necessary normalization when doing lookups.
-	s.pathExcludes = copied
+	s.pathExcludes = merged
 	s.excludeRegexps = compiled
 	s.metaMu.Unlock()
 }
 
 func (s *Service) SetSecretPatterns(patterns []string) error {
-	compiled := make([]*regexp.Regexp, 0, len(patterns))
+	// start with compiled defaults so that baseline secret-detection
+	// patterns (AWS keys, JWT tokens, etc.) are never dropped when callers
+	// add custom patterns.
+	compiled := make([]*regexp.Regexp, 0, len(defaultSecretPatternLiterals)+len(patterns))
+	for _, pattern := range defaultSecretPatternLiterals {
+		re, err := regexp.Compile(pattern)
+		if err != nil {
+			return fmt.Errorf("failed to compile default secret pattern %q: %w", pattern, err)
+		}
+		compiled = append(compiled, re)
+	}
 	for _, pattern := range patterns {
 		re, err := regexp.Compile(pattern)
 		if err != nil {
