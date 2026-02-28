@@ -17,15 +17,15 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/Dirstral/dir2mcp/internal/appstate"
-	"github.com/Dirstral/dir2mcp/internal/config"
-	"github.com/Dirstral/dir2mcp/internal/index"
-	"github.com/Dirstral/dir2mcp/internal/ingest"
-	"github.com/Dirstral/dir2mcp/internal/mcp"
-	"github.com/Dirstral/dir2mcp/internal/mistral"
-	"github.com/Dirstral/dir2mcp/internal/model"
-	"github.com/Dirstral/dir2mcp/internal/retrieval"
-	"github.com/Dirstral/dir2mcp/internal/store"
+	"dir2mcp/internal/appstate"
+	"dir2mcp/internal/config"
+	"dir2mcp/internal/index"
+	"dir2mcp/internal/ingest"
+	"dir2mcp/internal/mcp"
+	"dir2mcp/internal/mistral"
+	"dir2mcp/internal/model"
+	"dir2mcp/internal/retrieval"
+	"dir2mcp/internal/store"
 )
 
 const (

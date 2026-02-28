@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Dirstral/dir2mcp/internal/model"
-	"github.com/Dirstral/dir2mcp/internal/store"
+	"dir2mcp/internal/model"
+	"dir2mcp/internal/store"
 )
 
 func TestSQLiteStoreInitBootstrapsSchemaAndSettings(t *testing.T) {

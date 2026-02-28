@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Dirstral/dir2mcp/internal/mistral"
-	"github.com/Dirstral/dir2mcp/internal/model"
+	"dir2mcp/internal/mistral"
+	"dir2mcp/internal/model"
 )
 
 type embedTestRequest struct {

@@ -8,8 +8,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/Dirstral/dir2mcp/internal/config"
-	"github.com/Dirstral/dir2mcp/internal/mcp"
+	"dir2mcp/internal/config"
+	"dir2mcp/internal/mcp"
 )
 
 func TestMCPToolsList_RegistersDayOneToolsWithSchemas(t *testing.T) {

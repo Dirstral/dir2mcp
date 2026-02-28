@@ -13,7 +13,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
-	"github.com/Dirstral/dir2mcp/internal/model"
+	"dir2mcp/internal/model"
 )
 
 const relPathErrorMessage = "rel_path must be a non-empty relative path without parent-traversal or absolute paths"

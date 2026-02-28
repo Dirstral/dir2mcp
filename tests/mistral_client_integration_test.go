@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Dirstral/dir2mcp/internal/mistral"
+	"dir2mcp/internal/mistral"
 )
 
 func TestEmbed_Integration_MistralAPI(t *testing.T) {

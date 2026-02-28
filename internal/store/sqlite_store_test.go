@@ -9,7 +9,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/Dirstral/dir2mcp/internal/model"
+	"dir2mcp/internal/model"
 )
 
 func TestSQLiteStore_PendingChunkLifecycle(t *testing.T) {

@@ -10,7 +10,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/Dirstral/dir2mcp/internal/model"
+	"dir2mcp/internal/model"
 )
 
 const (

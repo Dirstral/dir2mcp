@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/Dirstral/dir2mcp/internal/config"
+	"dir2mcp/internal/config"
 )
 
 func TestLoad_UsesDotEnvWhenEnvIsMissing(t *testing.T) {
