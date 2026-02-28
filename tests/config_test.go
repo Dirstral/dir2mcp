@@ -109,6 +109,22 @@ func TestLoad_AllowedOriginsEnvDeduplicatesHostCase(t *testing.T) {
 	})
 }
 
+func TestLoad_AllowedOriginsEnvSkipsMalformedOrigins(t *testing.T) {
+	tmp := t.TempDir()
+
+	withWorkingDir(t, tmp, func() {
+		t.Setenv("DIR2MCP_ALLOWED_ORIGINS", "://bad-origin,https://elevenlabs.io")
+		cfg, err := config.Load("")
+		if err != nil {
+			t.Fatalf("Load failed: %v", err)
+		}
+
+		assertNotContains(t, cfg.AllowedOrigins, "://bad-origin")
+		assertContains(t, cfg.AllowedOrigins, "https://elevenlabs.io")
+		assertContains(t, cfg.AllowedOrigins, "http://localhost")
+	})
+}
+
 func assertContains(t *testing.T, values []string, want string) {
 	t.Helper()
 	for _, value := range values {
@@ -117,6 +133,15 @@ func assertContains(t *testing.T, values []string, want string) {
 		}
 	}
 	t.Fatalf("expected %q in %v", want, values)
+}
+
+func assertNotContains(t *testing.T, values []string, needle string) {
+	t.Helper()
+	for _, value := range values {
+		if value == needle {
+			t.Fatalf("did not expect %q in %v", needle, values)
+		}
+	}
 }
 
 func writeFile(t *testing.T, path, content string) {

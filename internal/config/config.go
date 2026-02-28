@@ -153,7 +153,7 @@ func normalizeOriginKey(origin string) string {
 	if strings.Contains(origin, "://") {
 		parsed, err := url.Parse(origin)
 		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-			return strings.ToLower(origin)
+			return ""
 		}
 		scheme := strings.ToLower(parsed.Scheme)
 		host := strings.ToLower(parsed.Hostname())

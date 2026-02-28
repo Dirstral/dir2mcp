@@ -14,7 +14,6 @@ import (
 func TestOriginAllowlist_NoOriginHeaderPasses(t *testing.T) {
 	cfg := config.Default()
 	cfg.AuthMode = "none"
-	cfg.AllowedOrigins = []string{}
 
 	rr := initializeRequest(t, cfg, "")
 	if rr.Code != http.StatusOK {
