@@ -16,7 +16,9 @@ type uniformEmbedder struct {
 func (u *uniformEmbedder) Embed(_ context.Context, _ string, texts []string) ([][]float32, error) {
 	out := make([][]float32, len(texts))
 	for i := range texts {
-		out[i] = u.vec
+		vec := make([]float32, len(u.vec))
+		copy(vec, u.vec)
+		out[i] = vec
 	}
 	return out, nil
 }

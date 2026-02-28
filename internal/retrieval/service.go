@@ -784,7 +784,7 @@ func buildFallbackAnswer(question string, hits []model.SearchHit) string {
 	}
 	for i := 0; i < limit; i++ {
 		h := hits[i]
-		snippet := strings.TrimSpace(h.Snippet)
+		snippet := truncateSnippet(strings.TrimSpace(h.Snippet), 300)
 		if snippet == "" {
 			snippet = "(no snippet)"
 		}
@@ -810,14 +810,26 @@ func buildRAGPrompt(question string, hits []model.SearchHit) string {
 		b.WriteString("- [")
 		b.WriteString(h.RelPath)
 		b.WriteString("] ")
-		if strings.TrimSpace(h.Snippet) == "" {
+		snippet := truncateSnippet(strings.TrimSpace(h.Snippet), 300)
+		if snippet == "" {
 			b.WriteString("(no snippet)\n")
 			continue
 		}
-		b.WriteString(strings.TrimSpace(h.Snippet))
+		b.WriteString(snippet)
 		b.WriteString("\n")
 	}
 	return b.String()
+}
+
+func truncateSnippet(s string, maxRunes int) string {
+	if maxRunes <= 0 {
+		return ""
+	}
+	r := []rune(strings.TrimSpace(s))
+	if len(r) <= maxRunes {
+		return string(r)
+	}
+	return strings.TrimSpace(string(r[:maxRunes])) + "..."
 }
 
 func ensureAnswerAttributions(answer string, citations []model.Citation) string {

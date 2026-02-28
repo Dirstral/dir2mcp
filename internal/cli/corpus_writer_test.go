@@ -61,9 +61,19 @@ func TestRunCorpusWriterWithInterval_UpdatesSnapshotWhileRunning(t *testing.T) {
 	idxState.SetRunning(true)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	go runCorpusWriterWithInterval(ctx, stateDir, store, idxState, io.Discard, 20*time.Millisecond)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runCorpusWriterWithInterval(ctx, stateDir, store, idxState, io.Discard, 20*time.Millisecond)
+	}()
+	defer func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("corpus writer goroutine did not exit after cancel")
+		}
+	}()
 
 	corpusPath := filepath.Join(stateDir, "corpus.json")
 	waitForCondition(t, 2*time.Second, func() bool {

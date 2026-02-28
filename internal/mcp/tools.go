@@ -518,9 +518,10 @@ func (s *Server) handleAskTool(ctx context.Context, args map[string]interface{})
 		if parseErr != nil {
 			return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: parseErr.Error(), Retryable: false}
 		}
-		// Mirror handleSearchTool: only override when k is positive; otherwise,
-		// treat non-positive values as "use the default".
-		if parsedK > 0 {
+		// Mirror handleSearchTool behavior explicitly.
+		if parsedK <= 0 {
+			k = DefaultSearchK
+		} else {
 			k = parsedK
 		}
 	}
