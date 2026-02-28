@@ -307,8 +307,8 @@ func (s *Server) handleListFilesTool(ctx context.Context, args map[string]interf
 		docs  []model.Document
 		total int64
 	)
-	switch {
-	case s.store == nil:
+	switch s.store {
+	case nil:
 		docs = []model.Document{}
 		total = 0
 	default:
