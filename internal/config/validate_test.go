@@ -40,3 +40,17 @@ func TestValidate_PlaceholderTreatedAsMissing(t *testing.T) {
 		t.Fatal("expected error when key is placeholder")
 	}
 }
+
+func TestValidate_InvalidMCPPath(t *testing.T) {
+	cfg := Default()
+	cfg.Mistral.APIKey = "test-key"
+	cfg.Server.MCPPath = "mcp"
+
+	err := Validate(&cfg, true)
+	if err == nil {
+		t.Fatal("expected error when mcp path is invalid")
+	}
+	if !strings.Contains(err.Error(), "server.mcp_path") {
+		t.Fatalf("expected server.mcp_path validation error, got: %v", err)
+	}
+}

@@ -2,8 +2,10 @@ package mcp
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/Dirstral/dir2mcp/internal/config"
@@ -25,6 +27,12 @@ type Server struct {
 
 // NewServer creates an MCP server (stub: just blocks on Serve).
 func NewServer(opts ServerOptions) (*Server, error) {
+	if opts.McpPath == "" {
+		return nil, fmt.Errorf("invalid mcp path: cannot be empty")
+	}
+	if !strings.HasPrefix(opts.McpPath, "/") {
+		return nil, fmt.Errorf("invalid mcp path %q: must start with '/'", opts.McpPath)
+	}
 	return &Server{opts: opts}, nil
 }
 
