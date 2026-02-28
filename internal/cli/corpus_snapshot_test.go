@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"math"
 	"testing"
 
 	"dir2mcp/internal/appstate"
@@ -58,8 +59,10 @@ func TestBuildCorpusSnapshot_ComputesDocCountsAndCodeRatio(t *testing.T) {
 	if snap.DocCounts["md"] != 1 {
 		t.Fatalf("expected md count=1, got %d", snap.DocCounts["md"])
 	}
-	if snap.CodeRatio < 0.66 || snap.CodeRatio > 0.67 {
-		t.Fatalf("expected code_ratio around 0.6667, got %f", snap.CodeRatio)
+	// use an epsilon-based comparison rather than hardcoded bounds
+	eps := 1e-3
+	if math.Abs(snap.CodeRatio-0.6667) > eps {
+		t.Fatalf("expected code_ratio around 0.6667 (±%f), got %f", eps, snap.CodeRatio)
 	}
 	if !snap.Indexing.Running {
 		t.Fatalf("expected indexing.running=true")

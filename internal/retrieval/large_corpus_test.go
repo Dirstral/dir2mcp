@@ -51,7 +51,10 @@ func TestSearch_BothMode_LargeCorpus_NoDuplicates(t *testing.T) {
 }
 
 func BenchmarkSearchBothLargeCorpus(b *testing.B) {
-	svc := buildLargeCorpusService(nil, 300)
+	// ensure any failures during index population are surfaced; previously we
+	// passed nil which ignored Add errors and could let the benchmark run on
+	// incomplete data.
+	svc := buildLargeCorpusService(b, 300)
 	ctx := context.Background()
 	query := model.SearchQuery{Query: "find relevant context", K: 60, Index: "both"}
 

@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -60,7 +61,7 @@ func TestRunCorpusWriterWithInterval_UpdatesSnapshotWhileRunning(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	go runCorpusWriterWithInterval(ctx, stateDir, store, idxState, ioDiscard{}, 20*time.Millisecond)
+	go runCorpusWriterWithInterval(ctx, stateDir, store, idxState, io.Discard, 20*time.Millisecond)
 
 	corpusPath := filepath.Join(stateDir, "corpus.json")
 	waitForCondition(t, 2*time.Second, func() bool {
@@ -83,7 +84,11 @@ func TestRunCorpusWriterWithInterval_UpdatesSnapshotWhileRunning(t *testing.T) {
 	})
 
 	waitForCondition(t, 2*time.Second, func() bool {
-		updated := readCorpusFile(t, corpusPath)
+		updated, err := readCorpusFileMaybe(t, corpusPath)
+		if err != nil {
+			// ignore transient read/unmarshal errors during partial writes
+			return false
+		}
 		return updated.TotalDocs == 3 && updated.DocCounts["md"] == 2
 	})
 	updated := readCorpusFile(t, corpusPath)
@@ -135,10 +140,6 @@ func TestWriteCorpusSnapshot_ConcurrentWriters(t *testing.T) {
 	}
 }
 
-type ioDiscard struct{}
-
-func (ioDiscard) Write(p []byte) (int, error) { return len(p), nil }
-
 func waitForCondition(t *testing.T, timeout time.Duration, fn func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -162,4 +163,17 @@ func readCorpusFile(t *testing.T, path string) corpusSnapshot {
 		t.Fatalf("unmarshal corpus file: %v", err)
 	}
 	return snap
+}
+
+func readCorpusFileMaybe(t *testing.T, path string) (corpusSnapshot, error) {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return corpusSnapshot{}, err
+	}
+	var snap corpusSnapshot
+	if err := json.Unmarshal(raw, &snap); err != nil {
+		return corpusSnapshot{}, err
+	}
+	return snap, nil
 }

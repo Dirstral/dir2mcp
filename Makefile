@@ -35,3 +35,7 @@ test:
 check: fmt vet lint test
 
 ci: vet test
+
+benchmark:
+	# run the large-corpus retrieval benchmark only
+	go test -bench BenchmarkSearchBothLargeCorpus -run ^$$ ./internal/retrieval

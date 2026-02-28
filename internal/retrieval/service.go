@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"math"
 	"os"
 	"path"
@@ -73,6 +74,7 @@ type Service struct {
 	codeIndex           model.Index
 	embedder            model.Embedder
 	gen                 model.Generator
+	logger              *log.Logger
 	textModel           string
 	codeModel           string
 	overfetchMultiplier int
@@ -104,6 +106,7 @@ func NewService(store model.Store, index model.Index, embedder model.Embedder, g
 		codeIndex:           index,
 		embedder:            embedder,
 		gen:                 gen,
+		logger:              log.Default(),
 		textModel:           "mistral-embed",
 		codeModel:           "codestral-embed",
 		overfetchMultiplier: 5,
@@ -117,6 +120,26 @@ func NewService(store model.Store, index model.Index, embedder model.Embedder, g
 		pathExcludes:   append([]string(nil), defaultPathExcludes...),
 		secretPatterns: compiledPatterns,
 	}
+}
+
+func (s *Service) SetLogger(l *log.Logger) {
+	s.metaMu.Lock()
+	defer s.metaMu.Unlock()
+	if l == nil {
+		s.logger = log.Default()
+		return
+	}
+	s.logger = l
+}
+
+func (s *Service) logf(format string, args ...interface{}) {
+	s.metaMu.RLock()
+	logger := s.logger
+	s.metaMu.RUnlock()
+	if logger == nil {
+		logger = log.Default()
+	}
+	logger.Printf(format, args...)
 }
 
 func (s *Service) SetQueryEmbeddingModel(modelName string) {
@@ -316,7 +339,12 @@ func (s *Service) Ask(ctx context.Context, question string, query model.SearchQu
 	answer := buildFallbackAnswer(question, hits)
 	if s.gen != nil && len(hits) > 0 {
 		prompt := buildRAGPrompt(question, hits)
-		if generated, genErr := s.gen.Generate(ctx, prompt); genErr == nil {
+		generated, genErr := s.gen.Generate(ctx, prompt)
+		if genErr != nil {
+			// log the error so callers have visibility; fall back to the
+			// precomputed answer when generation fails.
+			s.logf("generator error for question %q: %v", question, genErr)
+		} else {
 			if trimmed := strings.TrimSpace(generated); trimmed != "" {
 				answer = trimmed
 			}

@@ -245,9 +245,14 @@ func TestReindexClearsContentHashesBeforeRun(t *testing.T) {
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
+	var hashAtReindexTime string
 	app := cli.NewAppWithIOAndHooks(&stdout, &stderr, cli.RuntimeHooks{
 		NewIngestor: func(cfg config.Config, st model.Store) model.Ingestor {
-			return failingIngestor{}
+			return &capturingIngestor{
+				store:        st,
+				relPath:      "docs/a.md",
+				capturedHash: &hashAtReindexTime,
+			}
 		},
 	})
 
@@ -270,6 +275,9 @@ func TestReindexClearsContentHashesBeforeRun(t *testing.T) {
 	}
 	if doc.ContentHash != "" {
 		t.Fatalf("expected content_hash to be cleared before reindex, got %q", doc.ContentHash)
+	}
+	if hashAtReindexTime != "" {
+		t.Fatalf("expected content_hash to be cleared before ingestor Reindex, got %q", hashAtReindexTime)
 	}
 }
 
@@ -692,5 +700,28 @@ func (f failingIngestor) Run(ctx context.Context) error {
 
 func (f failingIngestor) Reindex(ctx context.Context) error {
 	_ = ctx
+	return nil
+}
+
+type capturingIngestor struct {
+	store        model.Store
+	relPath      string
+	capturedHash *string
+}
+
+func (c *capturingIngestor) Run(ctx context.Context) error {
+	_ = ctx
+	return nil
+}
+
+func (c *capturingIngestor) Reindex(ctx context.Context) error {
+	if c.store == nil || c.capturedHash == nil {
+		return nil
+	}
+	doc, err := c.store.GetDocumentByPath(ctx, c.relPath)
+	if err != nil {
+		return err
+	}
+	*c.capturedHash = doc.ContentHash
 	return nil
 }

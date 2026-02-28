@@ -493,7 +493,10 @@ func (s *Server) handleAskTool(ctx context.Context, args map[string]interface{})
 		return toolCallResult{}, &toolExecutionError{Code: "INDEX_NOT_READY", Message: "retriever not configured", Retryable: false}
 	}
 
-	k := 5
+	// default k should stay in sync with the schema and other tools.  the
+	// shared constant lives in server.go (DefaultSearchK == 10) so use that
+	// instead of a hardcoded literal.  parsing/validation logic is unchanged.
+	k := DefaultSearchK
 	if rawK, exists := args["k"]; exists {
 		parsedK, parseErr := parseInteger(rawK, "k")
 		if parseErr != nil {

@@ -1,8 +1,10 @@
 package retrieval
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log"
 	"math"
 	"os"
 	"path/filepath"
@@ -61,6 +63,30 @@ func (e *fakeRetrievalEmbedder) Embed(_ context.Context, model string, texts []s
 		res[i] = vec
 	}
 	return res, nil
+}
+
+func TestAsk_GeneratorErrorLogged(t *testing.T) {
+	buf := &bytes.Buffer{}
+
+	idx := index.NewHNSWIndex("")
+	if err := idx.Add(1, []float32{1, 0}); err != nil {
+		t.Fatalf("idx.Add failed: %v", err)
+	}
+
+	svc := NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{"mistral-embed": {1, 0}}}, &fakeGenerator{out: "unused", err: errors.New("oh no")})
+	svc.SetLogger(log.New(buf, "", 0))
+	svc.SetChunkMetadata(1, model.SearchHit{RelPath: "doc.txt", DocType: "md", Snippet: "hi"})
+
+	res, err := svc.Ask(context.Background(), "question", model.SearchQuery{Query: "", K: 1})
+	if err != nil {
+		t.Fatalf("Ask returned error: %v", err)
+	}
+	if res.Answer == "" || !strings.Contains(res.Answer, "question") {
+		t.Fatalf("unexpected answer: %q", res.Answer)
+	}
+	if !strings.Contains(buf.String(), "generator error") {
+		t.Fatalf("expected log entry about generator error, got %q", buf.String())
+	}
 }
 
 func TestSearch_ReturnsRankedHitsWithFilters(t *testing.T) {
@@ -528,5 +554,43 @@ func TestAsk_AppendsMissingAttributions(t *testing.T) {
 	}
 	if !strings.Contains(got.Answer, "[docs/a.md]") || !strings.Contains(got.Answer, "[docs/b.md]") {
 		t.Fatalf("expected answer to include missing source tags, got %q", got.Answer)
+	}
+}
+
+func TestAsk_AppendsOnlyMissingAttributions(t *testing.T) {
+	idx := index.NewHNSWIndex("")
+	if err := idx.Add(1, []float32{1, 0}); err != nil {
+		t.Fatalf("idx.Add failed: %v", err)
+	}
+	if err := idx.Add(2, []float32{0.9, 0.1}); err != nil {
+		t.Fatalf("idx.Add failed: %v", err)
+	}
+	svc := NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{
+		"mistral-embed": {1, 0},
+	}}, &fakeGenerator{out: "Generated summary with [docs/a.md] already present."})
+	svc.SetChunkMetadata(1, model.SearchHit{
+		RelPath: "docs/a.md",
+		Snippet: "alpha snippet",
+		Span:    model.Span{Kind: "lines", StartLine: 1, EndLine: 2},
+	})
+	svc.SetChunkMetadata(2, model.SearchHit{
+		RelPath: "docs/b.md",
+		Snippet: "beta snippet",
+		Span:    model.Span{Kind: "lines", StartLine: 3, EndLine: 4},
+	})
+
+	got, err := svc.Ask(context.Background(), "q", model.SearchQuery{K: 2})
+	if err != nil {
+		t.Fatalf("Ask failed: %v", err)
+	}
+	// should still include both a.md and b.md, but a.md only once
+	if !strings.Contains(got.Answer, "[docs/a.md]") {
+		t.Fatalf("expected answer to still contain [docs/a.md], got %q", got.Answer)
+	}
+	if !strings.Contains(got.Answer, "[docs/b.md]") {
+		t.Fatalf("expected answer to contain [docs/b.md], got %q", got.Answer)
+	}
+	if strings.Count(got.Answer, "[docs/a.md]") != 1 {
+		t.Fatalf("expected only one [docs/a.md] tag, got %q", got.Answer)
 	}
 }
