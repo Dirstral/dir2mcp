@@ -1,6 +1,7 @@
 package config
 
 // Default returns a config with SPEC §16.2 default values.
+// All enum fields use valid values; Validate will pass after setting Mistral.APIKey.
 func Default() Config {
 	return Config{
 		Version: 1,

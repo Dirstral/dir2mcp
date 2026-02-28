@@ -1,5 +1,26 @@
 package config
 
+// Allowed enum values for config validation (SPEC §16).
+var (
+	IngestModePDF     = []string{"off", "ocr", "auto"}
+	IngestModeImages  = []string{"off", "ocr_auto", "ocr_on"}
+	IngestModeAudio   = []string{"off", "auto", "on"}
+	IngestModeArchives = []string{"off", "shallow", "deep"}
+	STTProviders      = []string{"mistral", "elevenlabs"}
+	X402Modes         = []string{"off", "on", "required"}
+	SecretsProviders  = []string{"auto", "keychain", "file", "env", "session"}
+	SecurityAuthModes = []string{"auto", "none", "file"}
+)
+
+func stringIn(s string, allowed []string) bool {
+	for _, a := range allowed {
+		if s == a {
+			return true
+		}
+	}
+	return false
+}
+
 // Config holds the full resolved configuration.
 // Precedence: CLI flags > env vars > .dir2mcp.yaml > defaults (SPEC §16.1).
 type Config struct {
@@ -15,6 +36,7 @@ type Config struct {
 	Security Security `yaml:"security"`
 }
 
+// Mistral holds API keys and model names for Mistral services.
 type Mistral struct {
 	APIKey         string `yaml:"api_key"`
 	ChatModel      string `yaml:"chat_model"`
@@ -23,6 +45,7 @@ type Mistral struct {
 	OCRModel       string `yaml:"ocr_model"`
 }
 
+// RAG holds retrieval-augmented generation settings.
 type RAG struct {
 	GenerateAnswer  bool   `yaml:"generate_answer"`
 	KDefault        int    `yaml:"k_default"`
@@ -31,6 +54,7 @@ type RAG struct {
 	OversampleFactor int   `yaml:"oversample_factor"`
 }
 
+// Ingest holds file ingestion and modality settings.
 type Ingest struct {
 	Gitignore      bool        `yaml:"gitignore"`
 	PDF            IngestMode  `yaml:"pdf"`
@@ -41,10 +65,12 @@ type Ingest struct {
 	MaxFileMB      int         `yaml:"max_file_mb"`
 }
 
+// IngestMode specifies how a modality (PDF, images, etc.) is processed.
 type IngestMode struct {
-	Mode string `yaml:"mode"` // e.g. "ocr", "off", "auto", "deep"
+	Mode string `yaml:"mode"` // Allowed: off, ocr, auto, deep, etc. (see IngestMode* constants)
 }
 
+// Chunking holds text chunking parameters.
 type Chunking struct {
 	MaxChars     int           `yaml:"max_chars"`
 	OverlapChars int           `yaml:"overlap_chars"`
@@ -63,6 +89,7 @@ type ChunkingTranscript struct {
 	OverlapMs int `yaml:"overlap_ms"`
 }
 
+// STT holds speech-to-text provider and model settings.
 type STT struct {
 	Provider   string      `yaml:"provider"` // mistral | elevenlabs
 	Mistral    STTMistral  `yaml:"mistral"`
@@ -81,6 +108,7 @@ type STTElevenLabs struct {
 	Timestamps bool   `yaml:"timestamps"`
 }
 
+// X402 holds optional payment protocol settings.
 type X402 struct {
 	Enabled         bool           `yaml:"enabled"`
 	Mode            string         `yaml:"mode"` // off | on | required
@@ -112,6 +140,7 @@ type X402Bazaar struct {
 	Metadata X402BazaarMetadata `yaml:"metadata"`
 }
 
+// Server holds HTTP server and MCP path settings.
 type Server struct {
 	Listen          string    `yaml:"listen"`
 	MCPPath         string    `yaml:"mcp_path"`
@@ -127,6 +156,7 @@ type ServerTLS struct {
 	KeyFile  string `yaml:"key_file"`
 }
 
+// Secrets holds secret storage provider configuration.
 type Secrets struct {
 	Provider  string        `yaml:"provider"` // auto | keychain | file | env | session
 	Keychain  SecretsKeychain `yaml:"keychain"`
@@ -143,6 +173,7 @@ type SecretsFile struct {
 	Mode string `yaml:"mode"`
 }
 
+// Security holds auth and CORS settings.
 type Security struct {
 	Auth            SecurityAuth `yaml:"auth"`
 	AllowedOrigins  []string     `yaml:"allowed_origins"`

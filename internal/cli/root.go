@@ -18,7 +18,7 @@ const (
 	ExitIngestionFatal   = 6
 )
 
-// GlobalFlags holds flags shared across commands.
+// GlobalFlags holds flags shared across all commands (dir, config, state-dir, json, etc.).
 type GlobalFlags struct {
 	Dir             string
 	ConfigPath      string

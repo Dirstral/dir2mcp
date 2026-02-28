@@ -9,6 +9,7 @@ import (
 )
 
 // CorpusJSON is the schema written to corpus.json (SPEC §4.4).
+// CorpusJSON is the schema for corpus.json (SPEC §4.2).
 type CorpusJSON struct {
 	Root     string         `json:"root"`
 	Profile  CorpusProfile  `json:"profile,omitempty"`
@@ -48,6 +49,7 @@ type CorpusIndexing struct {
 }
 
 // WriteCorpusJSON writes corpus.json to stateDir atomically to avoid corruption on interrupt.
+// WriteCorpusJSON writes corpus.json to stateDir.
 func WriteCorpusJSON(stateDir string, c *CorpusJSON) error {
 	data, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
@@ -79,6 +81,7 @@ func WriteCorpusJSON(stateDir string, c *CorpusJSON) error {
 }
 
 // InitialCorpus returns a new CorpusJSON with zeros and mode "incremental", filled from cfg.
+// InitialCorpus builds the initial corpus state from config.
 func InitialCorpus(rootDir, jobID string, cfg *config.Config) *CorpusJSON {
 	sttModel := cfg.STT.Mistral.Model
 	if cfg.STT.Provider == "elevenlabs" {

@@ -44,3 +44,29 @@ func TestValidate_PlaceholderTreatedAsMissing(t *testing.T) {
 		t.Errorf("error should contain CONFIG_INVALID, got: %s", msg)
 	}
 }
+
+// TestValidate_InvalidEnumRejected verifies invalid enum values fail validation.
+func TestValidate_InvalidEnumRejected(t *testing.T) {
+	cfg := Default()
+	cfg.Mistral.APIKey = "test-key"
+
+	cfg.Ingest.PDF.Mode = "invalid"
+	err := Validate(&cfg, true)
+	if err == nil {
+		t.Fatal("expected error for invalid ingest.pdf.mode")
+	}
+	if !strings.Contains(err.Error(), "ingest.pdf.mode") {
+		t.Errorf("error should mention ingest.pdf.mode, got: %s", err.Error())
+	}
+
+	cfg = Default()
+	cfg.Mistral.APIKey = "test-key"
+	cfg.STT.Provider = "unknown"
+	err = Validate(&cfg, true)
+	if err == nil {
+		t.Fatal("expected error for invalid stt.provider")
+	}
+	if !strings.Contains(err.Error(), "stt.provider") {
+		t.Errorf("error should mention stt.provider, got: %s", err.Error())
+	}
+}

@@ -9,6 +9,7 @@ import (
 )
 
 // ConnectionJSON is the schema written to connection.json (SPEC §4.3).
+// Clients use this to connect to the MCP server with the correct transport and auth.
 type ConnectionJSON struct {
 	Transport string            `json:"transport"`
 	URL       string            `json:"url"`
@@ -24,7 +25,8 @@ type ConnectionSession struct {
 	AssignedOnInitialize  bool   `json:"assigned_on_initialize"`
 }
 
-// WriteConnectionJSON writes connection.json. If authMode is "file:<path>", sets token_source and token_file.
+// WriteConnectionJSON writes connection.json atomically. If authMode is "file:<path>",
+// sets token_source and token_file; rejects empty file: path.
 func WriteConnectionJSON(stateDir, mcpURL, token, tokenSource, authMode string) error {
 	conn := ConnectionJSON{
 		Transport: "mcp_streamable_http",

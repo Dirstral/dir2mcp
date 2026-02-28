@@ -8,24 +8,24 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Options for loading config. ConfigPath is relative to RootDir if not absolute.
+// Options configures config loading. ConfigPath is relative to RootDir if not absolute.
 type Options struct {
-	ConfigPath     string
-	RootDir        string
-	StateDir       string
-	NonInteractive bool
-	JSON           bool
-	SkipValidate   bool // if true, do not validate (e.g. for config print)
-	// Overrides apply last (flags > env > file > defaults). Nil means no CLI overrides.
-	Overrides *Overrides
+	ConfigPath     string   // Path to .dir2mcp.yaml
+	RootDir        string   // Root directory being indexed
+	StateDir       string   // State directory (default: <root>/.dir2mcp)
+	NonInteractive bool     // If true, fail fast with actionable errors
+	JSON           bool     // Emit NDJSON for automation
+	SkipValidate   bool     // If true, skip validation (e.g. for config print)
+	Overrides      *Overrides // CLI overrides; nil means no overrides
 }
 
 // Overrides holds CLI flag values that take precedence over env/file/defaults (issue #10).
-// Only non-nil fields are applied.
+// Only non-nil fields are applied. Callers should pass nil for flags not explicitly set.
 type Overrides struct {
 	ServerListen  *string
 	ServerMCPPath *string
 	ServerPublic  *bool
+	ServerAuth    *string
 	MistralAPIKey *string
 }
 
@@ -78,6 +78,9 @@ func applyOverrides(cfg *Config, o *Overrides) {
 	}
 	if o.ServerPublic != nil {
 		cfg.Server.Public = *o.ServerPublic
+	}
+	if o.ServerAuth != nil {
+		cfg.Server.Auth = *o.ServerAuth
 	}
 	if o.MistralAPIKey != nil {
 		cfg.Mistral.APIKey = *o.MistralAPIKey

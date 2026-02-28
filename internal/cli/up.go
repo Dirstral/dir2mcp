@@ -73,15 +73,29 @@ func runUp(cmd *cobra.Command, _ []string) error {
 		exitWith(ExitRootInaccessible, "ERROR: state directory path invalid: "+err.Error())
 	}
 
-	// Precedence: flags > env > file > defaults (issue #10)
-	listenOverride := upListen
-	if upPublic {
-		listenOverride = "0.0.0.0:0"
+	// Precedence: flags > env > file > defaults (issue #10).
+	// Only apply overrides when flags were explicitly set.
+	overrides := &config.Overrides{}
+	listenChanged := cmd.Flags().Changed("listen")
+	publicChanged := cmd.Flags().Changed("public")
+	if listenChanged {
+		v := upListen
+		if upPublic {
+			v = "0.0.0.0:0"
+		}
+		overrides.ServerListen = &v
+	} else if publicChanged && upPublic {
+		v := "0.0.0.0:0"
+		overrides.ServerListen = &v
 	}
-	overrides := &config.Overrides{
-		ServerListen:  &listenOverride,
-		ServerMCPPath: &upMcpPath,
-		ServerPublic:  &upPublic,
+	if publicChanged {
+		overrides.ServerPublic = &upPublic
+	}
+	if cmd.Flags().Changed("mcp-path") {
+		overrides.ServerMCPPath = &upMcpPath
+	}
+	if cmd.Flags().Changed("auth") {
+		overrides.ServerAuth = &upAuth
 	}
 	cfg, err := config.Load(config.Options{
 		ConfigPath:      globalFlags.ConfigPath,
@@ -94,7 +108,11 @@ func runUp(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		exitWith(ExitConfigInvalid, "ERROR: "+err.Error())
 	}
-	cfg.Server.Auth = upAuth
+	// Auth defaults from flag when not overridden (Cobra default is "auto")
+	if cfg.Server.Auth == "" {
+		cfg.Server.Auth = upAuth
+	}
+	mcpPath := cfg.Server.MCPPath
 
 	if err := state.EnsureStateDir(stateDir, cfg); err != nil {
 		exitWith(ExitIndexLoadFailure, "ERROR: failed to init state: "+err.Error())
@@ -112,14 +130,14 @@ func runUp(cmd *cobra.Command, _ []string) error {
 	if upTLSCert != "" && upTLSKey != "" {
 		baseURL = fmt.Sprintf("https://%s", addr.String())
 	}
-	mcpURL := baseURL + upMcpPath
+	mcpURL := baseURL + mcpPath
 
-	token, tokenSource, err := state.ResolveAuthToken(stateDir, upAuth)
+	token, tokenSource, err := state.ResolveAuthToken(stateDir, cfg.Server.Auth)
 	if err != nil {
 		exitWith(ExitConfigInvalid, "ERROR: auth: "+err.Error())
 	}
 
-	if err := state.WriteConnectionJSON(stateDir, mcpURL, token, tokenSource, upAuth); err != nil {
+	if err := state.WriteConnectionJSON(stateDir, mcpURL, token, tokenSource, cfg.Server.Auth); err != nil {
 		exitWith(ExitIndexLoadFailure, "ERROR: failed to write connection.json: "+err.Error())
 	}
 
@@ -149,7 +167,7 @@ func runUp(cmd *cobra.Command, _ []string) error {
 		RootDir:    rootDir,
 		StateDir:   stateDir,
 		Config:     cfg,
-		McpPath:    upMcpPath,
+		McpPath:    mcpPath,
 		AuthToken:  token,
 	})
 	if err != nil {
@@ -171,7 +189,7 @@ func runUp(cmd *cobra.Command, _ []string) error {
 
 	// Combined mux: MCP path + /api/mcp proxy (for web UI) + /api/corpus
 	mux := http.NewServeMux()
-	mux.Handle(upMcpPath, server.MCPHandler())
+	mux.Handle(mcpPath, server.MCPHandler())
 	mux.HandleFunc("/api/mcp", requireBearer(token, func(w http.ResponseWriter, r *http.Request) {
 		proxyToMCP(w, r, mcpURL, token)
 	}))

@@ -9,7 +9,7 @@ import (
 	"dir2mcp/internal/config"
 )
 
-// ServerOptions for running the MCP server.
+// ServerOptions configures the MCP server. McpPath is the HTTP path (e.g. /mcp).
 type ServerOptions struct {
 	RootDir   string
 	StateDir  string
@@ -18,20 +18,20 @@ type ServerOptions struct {
 	AuthToken string
 }
 
-// Server is a minimal stub until full MCP Streamable HTTP server is integrated (main has a full implementation with sessions/auth).
+// Server is a minimal stub until full MCP Streamable HTTP is integrated.
 type Server struct {
 	opts ServerOptions
 }
 
-// NewServer creates an MCP server (stub: used by CLI up for shared mux with /api/mcp proxy).
+// NewServer creates an MCP server. Stub: returns 501 on tool calls until backend is wired.
 func NewServer(opts ServerOptions) (*Server, error) {
 	return &Server{opts: opts}, nil
 }
 
-// RunIndexer runs background indexing (stub: no-op until pipeline exists).
+// RunIndexer runs background indexing. Stub: no-op until ingestion pipeline exists.
 func (s *Server) RunIndexer(ctx context.Context) {}
 
-// MCPHandler returns the HTTP handler for the MCP path (for mounting on a shared mux).
+// MCPHandler returns the HTTP handler for the MCP path.
 func (s *Server) MCPHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotImplemented)
@@ -39,8 +39,7 @@ func (s *Server) MCPHandler() http.Handler {
 	})
 }
 
-// Serve blocks while handling HTTP. Stub: responds 501 on the MCP path.
-// Cancel ctx to initiate graceful shutdown; in-flight requests are allowed to drain.
+// Serve blocks while handling HTTP. Cancel ctx to initiate graceful shutdown.
 func (s *Server) Serve(ctx context.Context, listener net.Listener) error {
 	mux := http.NewServeMux()
 	mux.Handle(s.opts.McpPath, s.MCPHandler())
