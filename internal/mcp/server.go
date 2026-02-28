@@ -116,7 +116,31 @@ func NewServer(cfg config.Config, retriever model.Retriever, opts ...ServerOptio
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc(s.cfg.MCPPath, s.handleMCP)
-	return mux
+	return s.corsMiddleware(mux)
+}
+
+// corsMiddleware wraps the handler to support CORS preflight (OPTIONS) and
+// response headers for the MCP endpoint. Required for browser-based MCP
+// clients such as ElevenLabs Conversational AI.
+func (s *Server) corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		origin := strings.TrimSpace(r.Header.Get("Origin"))
+		if origin != "" && isOriginAllowed(origin, s.cfg.AllowedOrigins) {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, MCP-Protocol-Version, MCP-Session-Id")
+			w.Header().Set("Access-Control-Expose-Headers", "MCP-Session-Id")
+			w.Header().Set("Access-Control-Max-Age", "86400")
+			w.Header().Set("Vary", "Origin")
+		}
+
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) Run(ctx context.Context) error {
