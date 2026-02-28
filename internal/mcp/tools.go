@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -66,6 +68,10 @@ type toolExecutionError struct {
 	Code      string
 	Message   string
 	Retryable bool
+}
+
+type retrieverOpenFileWithMeta interface {
+	OpenFileWithMeta(ctx context.Context, relPath string, span model.Span, maxChars int) (string, bool, error)
 }
 
 func (s *Server) buildToolRegistry() map[string]toolDefinition {
@@ -498,7 +504,7 @@ func (s *Server) handleAskTool(_ context.Context, args map[string]interface{}) (
 	}, nil
 }
 
-func (s *Server) handleOpenFileTool(_ context.Context, args map[string]interface{}) (toolCallResult, *toolExecutionError) {
+func (s *Server) handleOpenFileTool(ctx context.Context, args map[string]interface{}) (toolCallResult, *toolExecutionError) {
 	if err := assertNoUnknownArguments(args, map[string]struct{}{
 		"rel_path":   {},
 		"start_line": {},
@@ -519,16 +525,143 @@ func (s *Server) handleOpenFileTool(_ context.Context, args map[string]interface
 		return toolCallResult{}, &toolExecutionError{Code: "MISSING_FIELD", Message: "rel_path is required", Retryable: false}
 	}
 
+	if s.retriever == nil {
+		return toolCallResult{}, &toolExecutionError{Code: "INDEX_NOT_READY", Message: "retriever not configured", Retryable: false}
+	}
+
+	maxChars := 20000
+	if raw, ok := args["max_chars"]; ok {
+		parsed, parseErr := parseInteger(raw, "max_chars")
+		if parseErr != nil {
+			return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: parseErr.Error(), Retryable: false}
+		}
+		maxChars = parsed
+	}
+	if maxChars < 200 || maxChars > 50000 {
+		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: "max_chars must be between 200 and 50000", Retryable: false}
+	}
+
+	// parse all span-related parameters so we can detect conflicts between groups
+	span := model.Span{}
+	// group A: page
+	hasPage := false
+	var page int
+	if raw, ok := args["page"]; ok {
+		hasPage = true
+		var parseErr error
+		page, parseErr = parseInteger(raw, "page")
+		if parseErr != nil {
+			return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: parseErr.Error(), Retryable: false}
+		}
+		if page <= 0 {
+			return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: "page must be > 0", Retryable: false}
+		}
+	}
+
+	// group B: start_ms/end_ms
+	startMS, hasStartMS, err := parseOptionalIntegerWithPresence(args, "start_ms")
+	if err != nil {
+		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
+	}
+	endMS, hasEndMS, err := parseOptionalIntegerWithPresence(args, "end_ms")
+	if err != nil {
+		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
+	}
+
+	// group C: start_line/end_line
+	startLine, hasStartLine, err := parseOptionalIntegerWithPresence(args, "start_line")
+	if err != nil {
+		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
+	}
+	endLine, hasEndLine, err := parseOptionalIntegerWithPresence(args, "end_line")
+	if err != nil {
+		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
+	}
+
+	// detect mutually-exclusive groups: page vs time vs lines
+	groups := 0
+	if hasPage {
+		groups++
+	}
+	if hasStartMS || hasEndMS {
+		groups++
+	}
+	if hasStartLine || hasEndLine {
+		groups++
+	}
+	if groups > 1 {
+		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: "conflicting span parameters: provide only one of page, start_ms/end_ms, or start_line/end_line", Retryable: false}
+	}
+
+	// now build the span based on the single group present (if any)
+	if hasPage {
+		span = model.Span{Kind: "page", Page: page}
+	} else if hasStartMS || hasEndMS {
+		// require both parameters when specifying a time span
+		if hasStartMS != hasEndMS {
+			return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: "both start_ms and end_ms must be provided", Retryable: false}
+		}
+		if (hasStartMS && startMS < 0) || (hasEndMS && endMS < 0) {
+			return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: "start_ms/end_ms must be >= 0", Retryable: false}
+		}
+		if hasStartMS && hasEndMS && startMS > endMS {
+			return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: "start_ms must be <= end_ms", Retryable: false}
+		}
+		span = model.Span{Kind: "time", StartMS: startMS, EndMS: endMS}
+	} else if hasStartLine || hasEndLine {
+		// runtime validation mirrors openFileInputSchema which requires
+		// positive line numbers; do not allow zero or negative values.
+		if hasStartLine != hasEndLine {
+			return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: "both start_line and end_line must be provided", Retryable: false}
+		}
+		if (hasStartLine && startLine <= 0) || (hasEndLine && endLine <= 0) {
+			return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: "start_line/end_line must be > 0", Retryable: false}
+		}
+		if hasStartLine && hasEndLine && startLine > endLine {
+			return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: "start_line must be <= end_line", Retryable: false}
+		}
+		span = model.Span{Kind: "lines", StartLine: startLine, EndLine: endLine}
+	}
+
+	var (
+		content   string
+		truncated bool
+		openErr   error
+	)
+	if withMeta, ok := s.retriever.(retrieverOpenFileWithMeta); ok {
+		content, truncated, openErr = withMeta.OpenFileWithMeta(ctx, relPath, span, maxChars)
+	} else {
+		content, openErr = s.retriever.OpenFile(ctx, relPath, span, maxChars)
+		truncated = len([]rune(content)) > maxChars
+	}
+	if openErr != nil {
+		switch {
+		case errors.Is(openErr, model.ErrForbidden):
+			return toolCallResult{}, &toolExecutionError{Code: "FORBIDDEN", Message: "forbidden", Retryable: false}
+		case errors.Is(openErr, model.ErrPathOutsideRoot):
+			return toolCallResult{}, &toolExecutionError{Code: "PATH_OUTSIDE_ROOT", Message: "path outside root", Retryable: false}
+		case errors.Is(openErr, model.ErrDocTypeUnsupported):
+			return toolCallResult{}, &toolExecutionError{Code: "DOC_TYPE_UNSUPPORTED", Message: "doc type unsupported", Retryable: false}
+		case errors.Is(openErr, os.ErrNotExist):
+			return toolCallResult{}, &toolExecutionError{Code: "NOT_FOUND", Message: "file not found", Retryable: false}
+		default:
+			return toolCallResult{}, &toolExecutionError{Code: "INTERNAL_ERROR", Message: "internal server error", Retryable: true}
+		}
+	}
+
 	structured := map[string]interface{}{
 		"rel_path":  relPath,
-		"doc_type":  "unknown",
-		"content":   "open_file stub is registered; file slicing is not wired yet",
-		"truncated": false,
+		"doc_type":  inferDocType(relPath),
+		"content":   content,
+		"truncated": truncated,
+	}
+	if strings.TrimSpace(span.Kind) != "" {
+		structured["span"] = buildOpenFileSpan(span)
 	}
 
 	return toolCallResult{
 		Content: []toolContentItem{
-			{Type: "text", Text: "open_file stub is registered; file access is not wired yet"},
+			{Type: "text", Text: content},
 		},
 		StructuredContent: structured,
 	}, nil
@@ -571,6 +704,61 @@ func parseOptionalString(args map[string]interface{}, key string) (string, error
 	return strings.TrimSpace(value), nil
 }
 
+func inferDocType(relPath string) string {
+	ext := strings.ToLower(filepath.Ext(strings.TrimSpace(relPath)))
+	switch ext {
+	case ".go", ".js", ".jsx", ".ts", ".tsx",
+		".py", ".java", ".rb", ".cpp", ".c", ".cs",
+		".kt", ".kts", ".swift", ".php", ".scala", ".rs",
+		".h", ".hpp", ".hh", ".m", ".mm", ".dart",
+		".pl", ".pm", ".lua", ".r", ".jl", ".hs",
+		".erl", ".ex", ".exs", ".sql", ".sh", ".zsh",
+		".fish":
+		return "code"
+	case ".html", ".htm", ".css":
+		return "html"
+	case ".md":
+		return "md"
+	case ".txt", ".rst":
+		return "text"
+	case ".pdf":
+		return "pdf"
+	case ".mp3", ".wav", ".m4a", ".flac":
+		return "audio"
+	case ".png", ".jpg", ".jpeg", ".gif", ".webp":
+		return "image"
+	default:
+		return "unknown"
+	}
+}
+
+func buildOpenFileSpan(span model.Span) map[string]interface{} {
+	kind := strings.TrimSpace(span.Kind)
+	switch kind {
+	case "lines":
+		return map[string]interface{}{
+			"kind":       "lines",
+			"start_line": span.StartLine,
+			"end_line":   span.EndLine,
+		}
+	case "page":
+		return map[string]interface{}{
+			"kind": "page",
+			"page": span.Page,
+		}
+	case "time":
+		return map[string]interface{}{
+			"kind":     "time",
+			"start_ms": span.StartMS,
+			"end_ms":   span.EndMS,
+		}
+	default:
+		return map[string]interface{}{
+			"kind": kind,
+		}
+	}
+}
+
 func parseInteger(value interface{}, field string) (int, error) {
 	switch v := value.(type) {
 	case float64:
@@ -591,6 +779,18 @@ func parseInteger(value interface{}, field string) (int, error) {
 	default:
 		return 0, fmt.Errorf("%s must be an integer", field)
 	}
+}
+
+func parseOptionalIntegerWithPresence(args map[string]interface{}, key string) (int, bool, error) {
+	raw, ok := args[key]
+	if !ok {
+		return 0, false, nil
+	}
+	v, err := parseInteger(raw, key)
+	if err != nil {
+		return 0, true, err
+	}
+	return v, true, nil
 }
 
 func parseOptionalStringSlice(args map[string]interface{}, key string) ([]string, error) {

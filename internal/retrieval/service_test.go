@@ -2,7 +2,11 @@ package retrieval
 
 import (
 	"context"
+	"errors"
 	"math"
+	"os"
+	"path/filepath"
+	"sync"
 	"testing"
 
 	"dir2mcp/internal/index"
@@ -212,6 +216,187 @@ func TestSearch_BothMode_DedupesAndNormalizes(t *testing.T) {
 		if hit.Score < 0 || hit.Score > 1 {
 			t.Fatalf("score should be normalized to [0,1], got %f", hit.Score)
 		}
+	}
+}
+
+func TestOpenFile_LineSpan(t *testing.T) {
+	root := t.TempDir()
+	filePath := filepath.Join(root, "docs", "a.md")
+	if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
+		t.Fatalf("mkdir failed: %v", err)
+	}
+	if err := os.WriteFile(filePath, []byte("one\ntwo\nthree\nfour"), 0o644); err != nil {
+		t.Fatalf("write file failed: %v", err)
+	}
+
+	svc := NewService(nil, nil, nil, nil)
+	svc.SetRootDir(root)
+	out, err := svc.OpenFile(context.Background(), "docs/a.md", model.Span{Kind: "lines", StartLine: 2, EndLine: 3}, 200)
+	if err != nil {
+		t.Fatalf("OpenFile failed: %v", err)
+	}
+	if out != "two\nthree" {
+		t.Fatalf("unexpected open_file slice: %q", out)
+	}
+}
+
+func TestOpenFile_PathExcluded(t *testing.T) {
+	root := t.TempDir()
+	filePath := filepath.Join(root, "private", "secret.txt")
+	if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
+		t.Fatalf("mkdir failed: %v", err)
+	}
+	if err := os.WriteFile(filePath, []byte("super secret"), 0o644); err != nil {
+		t.Fatalf("write file failed: %v", err)
+	}
+
+	svc := NewService(nil, nil, nil, nil)
+	svc.SetRootDir(root)
+	svc.SetPathExcludes([]string{"**/private/**"})
+	_, err := svc.OpenFile(context.Background(), "private/secret.txt", model.Span{}, 200)
+	if !errors.Is(err, model.ErrForbidden) {
+		t.Fatalf("expected ErrForbidden, got %v", err)
+	}
+}
+
+func TestOpenFile_ContentSecretBlocked(t *testing.T) {
+	root := t.TempDir()
+	filePath := filepath.Join(root, "docs", "token.txt")
+	if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
+		t.Fatalf("mkdir failed: %v", err)
+	}
+	if err := os.WriteFile(filePath, []byte("Authorization: Bearer abcdefgh.ijklmnop.qrstuvwx"), 0o644); err != nil {
+		t.Fatalf("write file failed: %v", err)
+	}
+
+	svc := NewService(nil, nil, nil, nil)
+	svc.SetRootDir(root)
+	_, err := svc.OpenFile(context.Background(), "docs/token.txt", model.Span{}, 200)
+	if !errors.Is(err, model.ErrForbidden) {
+		t.Fatalf("expected ErrForbidden, got %v", err)
+	}
+}
+
+func TestOpenFile_PathTraversalBlocked(t *testing.T) {
+	root := t.TempDir()
+	svc := NewService(nil, nil, nil, nil)
+	svc.SetRootDir(root)
+	_, err := svc.OpenFile(context.Background(), "../outside.txt", model.Span{}, 200)
+	if !errors.Is(err, model.ErrPathOutsideRoot) {
+		t.Fatalf("expected ErrPathOutsideRoot, got %v", err)
+	}
+}
+
+func TestOpenFile_PageSpan(t *testing.T) {
+	root := t.TempDir()
+	filePath := filepath.Join(root, "docs", "ocr.txt")
+	if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
+		t.Fatalf("mkdir failed: %v", err)
+	}
+	if err := os.WriteFile(filePath, []byte("page1\fpage2\fpage3"), 0o644); err != nil {
+		t.Fatalf("write file failed: %v", err)
+	}
+
+	svc := NewService(nil, nil, nil, nil)
+	svc.SetRootDir(root)
+	out, err := svc.OpenFile(context.Background(), "docs/ocr.txt", model.Span{Kind: "page", Page: 2}, 200)
+	if err != nil {
+		t.Fatalf("OpenFile failed: %v", err)
+	}
+	if out != "page2" {
+		t.Fatalf("unexpected page slice: %q", out)
+	}
+}
+
+func TestOpenFile_TimeSpan(t *testing.T) {
+	root := t.TempDir()
+	filePath := filepath.Join(root, "audio", "transcript.txt")
+	if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
+		t.Fatalf("mkdir failed: %v", err)
+	}
+	content := "[00:00] intro\n[00:02] alpha\n[00:05] beta\n[00:10] omega"
+	if err := os.WriteFile(filePath, []byte(content), 0o644); err != nil {
+		t.Fatalf("write file failed: %v", err)
+	}
+
+	svc := NewService(nil, nil, nil, nil)
+	svc.SetRootDir(root)
+	out, err := svc.OpenFile(context.Background(), "audio/transcript.txt", model.Span{Kind: "time", StartMS: 2000, EndMS: 6000}, 200)
+	if err != nil {
+		t.Fatalf("OpenFile failed: %v", err)
+	}
+	want := "[00:02] alpha\n[00:05] beta"
+	if out != want {
+		t.Fatalf("unexpected time slice: got %q want %q", out, want)
+	}
+}
+
+func TestMatchExcludePattern_Concurrent(t *testing.T) {
+	svc := NewService(nil, nil, nil, nil)
+	pattern := "**/foo/**"
+	var wg sync.WaitGroup
+	const goroutines = 20
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			if !svc.matchExcludePattern(pattern, "a/foo/b") {
+				t.Error("expected pattern to match")
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+func TestOpenFile_PageSpan_FromMetadata(t *testing.T) {
+	root := t.TempDir()
+	// Keep the path inside root but do not create file contents; metadata should drive output.
+	path := filepath.Join(root, "docs", "ocr.txt")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir failed: %v", err)
+	}
+
+	svc := NewService(nil, nil, nil, nil)
+	svc.SetRootDir(root)
+	svc.SetChunkMetadata(1, model.SearchHit{
+		RelPath: "docs/ocr.txt",
+		Snippet: "page-two-snippet",
+		Span:    model.Span{Kind: "page", Page: 2},
+	})
+	out, err := svc.OpenFile(context.Background(), "docs/ocr.txt", model.Span{Kind: "page", Page: 2}, 200)
+	if err != nil {
+		t.Fatalf("OpenFile failed: %v", err)
+	}
+	if out != "page-two-snippet" {
+		t.Fatalf("unexpected metadata page slice: %q", out)
+	}
+}
+
+func TestOpenFile_TimeSpan_FromMetadata(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "audio", "transcript.txt")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir failed: %v", err)
+	}
+
+	svc := NewService(nil, nil, nil, nil)
+	svc.SetRootDir(root)
+	svc.SetChunkMetadata(1, model.SearchHit{
+		RelPath: "audio/transcript.txt",
+		Snippet: "alpha",
+		Span:    model.Span{Kind: "time", StartMS: 1000, EndMS: 3000},
+	})
+	svc.SetChunkMetadata(2, model.SearchHit{
+		RelPath: "audio/transcript.txt",
+		Snippet: "beta",
+		Span:    model.Span{Kind: "time", StartMS: 4000, EndMS: 6000},
+	})
+	out, err := svc.OpenFile(context.Background(), "audio/transcript.txt", model.Span{Kind: "time", StartMS: 2000, EndMS: 5000}, 200)
+	if err != nil {
+		t.Fatalf("OpenFile failed: %v", err)
+	}
+	if out != "alpha\nbeta" {
+		t.Fatalf("unexpected metadata time slice: %q", out)
 	}
 }
 

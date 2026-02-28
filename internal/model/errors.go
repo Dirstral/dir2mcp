@@ -13,6 +13,15 @@ var (
 	// ErrIndexNotConfigured is returned by a Retriever when no index has been
 	// configured at all (e.g. the caller never provided one).
 	ErrIndexNotConfigured = errors.New("index not configured")
+
+	// ErrPathOutsideRoot indicates a requested path resolves outside configured root.
+	ErrPathOutsideRoot = errors.New("path outside root")
+
+	// ErrForbidden indicates access was denied by security policy.
+	ErrForbidden = errors.New("forbidden")
+
+	// ErrDocTypeUnsupported indicates the requested span/doc mode isn't supported.
+	ErrDocTypeUnsupported = errors.New("doc type unsupported")
 )
 
 type ProviderError struct {

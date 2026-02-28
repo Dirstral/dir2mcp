@@ -3,10 +3,15 @@ package retrieval
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"math"
+	"os"
 	"path"
+	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -19,7 +24,27 @@ var (
 	codeKeywordRe   = regexp.MustCompile(`\b(func|class|package|import|return|if|for|while|switch|case)\b`)
 	codePunctRe     = regexp.MustCompile(`[(){}\[\];]`)
 	fileExtensionRe = regexp.MustCompile(`\.(js|ts|py|go|java|rb|cpp|c|cs|html|css|json|yaml|yml)\b`)
+	timePrefixRe    = regexp.MustCompile(`^\s*\[?(\d{1,2}):(\d{2})(?::(\d{2}))?\]?\s*(.*)$`)
 )
+
+var defaultPathExcludes = []string{
+	"**/.git/**",
+	"**/node_modules/**",
+	"**/.dir2mcp/**",
+	"**/.env",
+	"**/*.pem",
+	"**/*.key",
+	"**/id_rsa",
+}
+
+var defaultSecretPatternLiterals = []string{
+	`AKIA[0-9A-Z]{16}`,
+	`(?i)(?:aws(?:.{0,20})?secret|(?:secret|aws|token|key)\s*[:=]\s*[0-9a-zA-Z/+=]{40})`,
+
+	`(?i)(?:authorization\s*[:=]\s*bearer\s+|(?:access|id|refresh)_token\s*[:=]\s*)[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}`,
+	`(?i)token\s*[:=]\s*[A-Za-z0-9_.-]{20,}`,
+	`sk_[a-z0-9]{32}|api_[A-Za-z0-9]{32}`,
+}
 
 // Service implements retrieval operations over embedded data.
 // It holds necessary components like store, index, embedder and
@@ -54,9 +79,22 @@ type Service struct {
 	metaMu              sync.RWMutex
 	chunkByLabel        map[uint64]model.SearchHit
 	chunkByIndex        map[string]map[uint64]model.SearchHit
+	rootDir             string
+	pathExcludes        []string
+	// cached compiled regexps for exclude patterns; keys are normalized patterns
+	excludeRegexps map[string]*regexp.Regexp
+	secretPatterns []*regexp.Regexp
 }
 
 func NewService(store model.Store, index model.Index, embedder model.Embedder, gen model.Generator) *Service {
+	compiledPatterns := make([]*regexp.Regexp, 0, len(defaultSecretPatternLiterals))
+	for _, pattern := range defaultSecretPatternLiterals {
+		re, err := regexp.Compile(pattern)
+		if err != nil {
+			panic(fmt.Errorf("invalid default secret pattern %q: %w", pattern, err))
+		}
+		compiledPatterns = append(compiledPatterns, re)
+	}
 	// overfetchMultiplier defaults to 5; callers may override it with
 	// SetOverfetchMultiplier to tune for their workload.  Values less than
 	// 1 are silently bumped to 1, and values above 100 are capped.
@@ -74,6 +112,10 @@ func NewService(store model.Store, index model.Index, embedder model.Embedder, g
 			"text": make(map[uint64]model.SearchHit),
 			"code": make(map[uint64]model.SearchHit),
 		},
+		rootDir:        ".",
+		excludeRegexps: make(map[string]*regexp.Regexp),
+		pathExcludes:   append([]string(nil), defaultPathExcludes...),
+		secretPatterns: compiledPatterns,
 	}
 }
 
@@ -102,6 +144,73 @@ func (s *Service) SetCodeIndex(index model.Index) {
 	s.metaMu.Lock()
 	s.codeIndex = index
 	s.metaMu.Unlock()
+}
+
+func (s *Service) SetRootDir(root string) {
+	root = strings.TrimSpace(root)
+	if root == "" {
+		root = "."
+	}
+	s.metaMu.Lock()
+	s.rootDir = root
+	s.metaMu.Unlock()
+}
+
+func (s *Service) SetPathExcludes(patterns []string) {
+	// merge defaults with caller-provided patterns so that hardcoded
+	// security exclusions (.git, node_modules, .env, key/pem files) are
+	// never silently dropped when the caller supplies custom patterns.
+	merged := make([]string, 0, len(defaultPathExcludes)+len(patterns))
+	merged = append(merged, defaultPathExcludes...)
+	merged = append(merged, patterns...)
+	compiled := make(map[string]*regexp.Regexp, len(merged))
+	for _, pat := range merged {
+		norm := strings.TrimSpace(filepath.ToSlash(pat))
+		if norm == "" {
+			continue
+		}
+		re, err := regexp.Compile(globToRegexp(norm))
+		if err != nil {
+			// ignore invalid pattern, it'll simply never match
+			continue
+		}
+		compiled[norm] = re
+	}
+
+	s.metaMu.Lock()
+	// record the merged set of exclusions (defaults + caller patterns) in
+	// s.pathExcludes. this no longer reflects just the caller-provided
+	// values but the full list used for matching; compiled regexps are
+	// still held in s.excludeRegexps and matchExcludePattern will normalize
+	// and consult the merged patterns when performing lookups.
+	s.pathExcludes = merged
+	s.excludeRegexps = compiled
+	s.metaMu.Unlock()
+}
+
+func (s *Service) SetSecretPatterns(patterns []string) error {
+	// start with compiled defaults so that baseline secret-detection
+	// patterns (AWS keys, JWT tokens, etc.) are never dropped when callers
+	// add custom patterns.
+	compiled := make([]*regexp.Regexp, 0, len(defaultSecretPatternLiterals)+len(patterns))
+	for _, pattern := range defaultSecretPatternLiterals {
+		re, err := regexp.Compile(pattern)
+		if err != nil {
+			return fmt.Errorf("failed to compile default secret pattern %q: %w", pattern, err)
+		}
+		compiled = append(compiled, re)
+	}
+	for _, pattern := range patterns {
+		re, err := regexp.Compile(pattern)
+		if err != nil {
+			return err
+		}
+		compiled = append(compiled, re)
+	}
+	s.metaMu.Lock()
+	s.secretPatterns = compiled
+	s.metaMu.Unlock()
+	return nil
 }
 
 func (s *Service) SetChunkMetadata(label uint64, metadata model.SearchHit) {
@@ -185,11 +294,157 @@ func (s *Service) Ask(ctx context.Context, question string, query model.SearchQu
 }
 
 func (s *Service) OpenFile(ctx context.Context, relPath string, span model.Span, maxChars int) (string, error) {
-	_ = ctx
-	_ = relPath
-	_ = span
-	_ = maxChars
-	return "", model.ErrNotImplemented
+	content, _, err := s.openFile(ctx, relPath, span, maxChars)
+	return content, err
+}
+
+func (s *Service) OpenFileWithMeta(ctx context.Context, relPath string, span model.Span, maxChars int) (string, bool, error) {
+	return s.openFile(ctx, relPath, span, maxChars)
+}
+
+func (s *Service) openFile(ctx context.Context, relPath string, span model.Span, maxChars int) (string, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return "", false, err
+	}
+	relPath = strings.TrimSpace(relPath)
+	if relPath == "" {
+		return "", false, model.ErrForbidden
+	}
+
+	if maxChars <= 0 {
+		maxChars = 20000
+	}
+	if maxChars > 50000 {
+		maxChars = 50000
+	}
+
+	s.metaMu.RLock()
+	rootDir := s.rootDir
+	pathExcludes := append([]string(nil), s.pathExcludes...)
+	secretPatterns := append([]*regexp.Regexp(nil), s.secretPatterns...)
+	s.metaMu.RUnlock()
+	if strings.TrimSpace(rootDir) == "" {
+		rootDir = "."
+	}
+
+	normalizedRel := filepath.ToSlash(filepath.Clean(relPath))
+	if normalizedRel == "." || strings.HasPrefix(normalizedRel, "../") || normalizedRel == ".." || filepath.IsAbs(relPath) {
+		return "", false, model.ErrPathOutsideRoot
+	}
+	for _, pattern := range pathExcludes {
+		if s.matchExcludePattern(pattern, normalizedRel) {
+			return "", false, model.ErrForbidden
+		}
+	}
+
+	rootAbs, err := filepath.Abs(rootDir)
+	if err != nil {
+		return "", false, err
+	}
+	realRoot := rootAbs
+	if resolvedRoot, rootErr := filepath.EvalSymlinks(rootAbs); rootErr == nil {
+		realRoot = resolvedRoot
+	}
+
+	targetAbs := filepath.Join(realRoot, filepath.FromSlash(normalizedRel))
+	relFromRoot, err := filepath.Rel(realRoot, targetAbs)
+	if err != nil || relFromRoot == ".." || strings.HasPrefix(relFromRoot, ".."+string(os.PathSeparator)) {
+		return "", false, model.ErrPathOutsideRoot
+	}
+
+	kind := strings.ToLower(strings.TrimSpace(span.Kind))
+	if kind == "page" || kind == "time" {
+		if fromMeta, ok := s.sliceFromMetadata(normalizedRel, span); ok {
+			for _, re := range secretPatterns {
+				if re != nil && re.MatchString(fromMeta) {
+					return "", false, model.ErrForbidden
+				}
+			}
+			out, truncated := truncateRunesWithFlag(fromMeta, maxChars)
+			return out, truncated, nil
+		}
+	}
+
+	resolvedAbs, err := filepath.EvalSymlinks(targetAbs)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", false, err
+		}
+		// if eval fails for other reasons, continue with direct target path check
+		resolvedAbs = targetAbs
+	}
+	resolvedRel, err := filepath.Rel(realRoot, resolvedAbs)
+	if err != nil || resolvedRel == ".." || strings.HasPrefix(resolvedRel, ".."+string(os.PathSeparator)) {
+		return "", false, model.ErrPathOutsideRoot
+	}
+	resolvedRel = filepath.ToSlash(filepath.Clean(resolvedRel))
+	for _, pattern := range pathExcludes {
+		if s.matchExcludePattern(pattern, resolvedRel) {
+			return "", false, model.ErrForbidden
+		}
+	}
+
+	info, err := os.Stat(resolvedAbs)
+	if err != nil {
+		return "", false, err
+	}
+	if info.IsDir() {
+		return "", false, model.ErrDocTypeUnsupported
+	}
+
+	raw, readTruncated, err := readFileBounded(resolvedAbs, 0)
+	if err != nil {
+		return "", false, err
+	}
+	content := string(raw)
+
+	for _, re := range secretPatterns {
+		if re != nil && re.MatchString(content) {
+			return "", false, model.ErrForbidden
+		}
+	}
+
+	selected := content
+	switch kind {
+	case "", "lines":
+		if kind == "lines" || span.StartLine > 0 || span.EndLine > 0 {
+			selected = sliceLines(content, span.StartLine, span.EndLine)
+		}
+	case "page":
+		page := span.Page
+		if page <= 0 {
+			page = 1
+		}
+		// metadata-backed OCR handled above; fall back to slicing pages directly
+		paged, ok := slicePage(content, page)
+		if !ok {
+			return "", false, model.ErrDocTypeUnsupported
+		}
+		selected = paged
+	case "time":
+		startMS := span.StartMS
+		endMS := span.EndMS
+		if startMS < 0 {
+			startMS = 0
+		}
+		if endMS < 0 {
+			endMS = 0
+		}
+		if endMS > 0 && endMS < startMS {
+			endMS = startMS
+		}
+		// metadata-backed slices for time spans are handled earlier; just extract
+		timeSlice, ok := sliceTime(content, startMS, endMS)
+		if !ok {
+			return "", false, model.ErrDocTypeUnsupported
+		}
+		selected = timeSlice
+	default:
+		return "", false, model.ErrDocTypeUnsupported
+	}
+
+	out, outTruncated := truncateRunesWithFlag(selected, maxChars)
+	return out, readTruncated || outTruncated, nil
 }
 
 func (s *Service) Stats(ctx context.Context) (model.Stats, error) {
@@ -433,4 +688,246 @@ func matchFilters(hit model.SearchHit, query model.SearchQuery) bool {
 	}
 
 	return true
+}
+
+func (s *Service) matchExcludePattern(pattern, relPath string) bool {
+	pattern = strings.TrimSpace(filepath.ToSlash(pattern))
+	relPath = strings.TrimSpace(filepath.ToSlash(relPath))
+	if pattern == "" || relPath == "" {
+		return false
+	}
+
+	// look up precompiled regexp
+	s.metaMu.RLock()
+	re := s.excludeRegexps[pattern]
+	s.metaMu.RUnlock()
+	if re == nil {
+		// compile lazily in case cache was missed; store for future
+		regex, err := regexp.Compile(globToRegexp(pattern))
+		if err != nil {
+			return false
+		}
+		// another goroutine may have stored the compiled regexp while we
+		// were working; grab write lock and re-check before inserting.
+		s.metaMu.Lock()
+		if s.excludeRegexps == nil {
+			s.excludeRegexps = make(map[string]*regexp.Regexp)
+		}
+		if existing := s.excludeRegexps[pattern]; existing != nil {
+			// use the one already in cache instead of overwriting
+			re = existing
+		} else {
+			s.excludeRegexps[pattern] = regex
+			re = regex
+		}
+		s.metaMu.Unlock()
+	}
+	return re.MatchString(relPath)
+}
+
+func globToRegexp(glob string) string {
+	var b strings.Builder
+	b.WriteString("^")
+	for i := 0; i < len(glob); {
+		c := glob[i]
+		switch c {
+		case '*':
+			if i+1 < len(glob) && glob[i+1] == '*' {
+				i += 2
+				if i < len(glob) && glob[i] == '/' {
+					i++
+					b.WriteString("(?:.*/)?")
+				} else {
+					b.WriteString(".*")
+				}
+				continue
+			}
+			b.WriteString(`[^/]*`)
+		case '?':
+			b.WriteString(`[^/]`)
+		default:
+			if strings.ContainsRune(`.+()|[]{}^$\`, rune(c)) {
+				b.WriteByte('\\')
+			}
+			b.WriteByte(c)
+		}
+		i++
+	}
+	b.WriteString("$")
+	return b.String()
+}
+
+func sliceLines(content string, start, end int) string {
+	lines := strings.Split(content, "\n")
+	if start <= 0 {
+		start = 1
+	}
+	if end <= 0 {
+		end = start
+	}
+	if start > len(lines) {
+		return ""
+	}
+	if end > len(lines) {
+		end = len(lines)
+	}
+	if end < start {
+		end = start
+	}
+	return strings.Join(lines[start-1:end], "\n")
+}
+
+func truncateRunesWithFlag(s string, max int) (string, bool) {
+	if max <= 0 {
+		return s, false
+	}
+	r := []rune(s)
+	if len(r) <= max {
+		return s, false
+	}
+	return string(r[:max]), true
+}
+
+func readFileBounded(path string, maxBytes int) ([]byte, bool, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, false, err
+	}
+	defer func() { _ = f.Close() }()
+
+	if maxBytes <= 0 {
+		data, readErr := io.ReadAll(f)
+		return data, false, readErr
+	}
+
+	lim := io.LimitReader(f, int64(maxBytes))
+	data, readErr := io.ReadAll(lim)
+	if readErr != nil {
+		return nil, false, readErr
+	}
+	return data, len(data) == maxBytes, nil
+}
+
+func (s *Service) sliceFromMetadata(relPath string, requested model.Span) (string, bool) {
+	s.metaMu.RLock()
+	defer s.metaMu.RUnlock()
+
+	type candidate struct {
+		start int
+		page  int
+		text  string
+	}
+	matches := make([]candidate, 0, 8)
+
+	for _, hit := range s.chunkByLabel {
+		if strings.TrimSpace(filepath.ToSlash(hit.RelPath)) != strings.TrimSpace(filepath.ToSlash(relPath)) {
+			continue
+		}
+		if strings.TrimSpace(hit.Snippet) == "" {
+			continue
+		}
+		span := hit.Span
+		switch requested.Kind {
+		case "page":
+			if strings.EqualFold(span.Kind, "page") && span.Page == requested.Page {
+				matches = append(matches, candidate{page: span.Page, text: hit.Snippet})
+			}
+		case "time":
+			if !strings.EqualFold(span.Kind, "time") {
+				continue
+			}
+			if overlapsTime(span.StartMS, span.EndMS, requested.StartMS, requested.EndMS) {
+				matches = append(matches, candidate{start: span.StartMS, text: hit.Snippet})
+			}
+		}
+	}
+
+	if len(matches) == 0 {
+		return "", false
+	}
+	sort.Slice(matches, func(i, j int) bool {
+		if matches[i].page != matches[j].page {
+			return matches[i].page < matches[j].page
+		}
+		return matches[i].start < matches[j].start
+	})
+
+	out := make([]string, 0, len(matches))
+	for _, m := range matches {
+		out = append(out, m.text)
+	}
+	return strings.Join(out, "\n"), true
+}
+
+func overlapsTime(aStart, aEnd, bStart, bEnd int) bool {
+	if aEnd <= 0 {
+		aEnd = aStart
+	}
+	if bEnd <= 0 {
+		bEnd = bStart
+	}
+	if aEnd < aStart {
+		aEnd = aStart
+	}
+	if bEnd < bStart {
+		bEnd = bStart
+	}
+	return aStart <= bEnd && bStart <= aEnd
+}
+
+func slicePage(content string, page int) (string, bool) {
+	if page <= 0 {
+		page = 1
+	}
+	parts := strings.Split(content, "\f")
+	if len(parts) > 1 {
+		if page > len(parts) {
+			return "", false
+		}
+		return strings.Trim(parts[page-1], "\n"), true
+	}
+	if page == 1 {
+		return content, true
+	}
+	return "", false
+}
+
+func sliceTime(content string, startMS, endMS int) (string, bool) {
+	lines := strings.Split(content, "\n")
+	out := make([]string, 0, len(lines))
+	foundTimestamp := false
+
+	for _, line := range lines {
+		m := timePrefixRe.FindStringSubmatch(line)
+		if len(m) == 0 {
+			continue
+		}
+		foundTimestamp = true
+		tsMS := parseTimestampMS(m[1], m[2], m[3])
+		if tsMS < startMS {
+			continue
+		}
+		if endMS > 0 && tsMS > endMS {
+			continue
+		}
+		out = append(out, line)
+	}
+
+	if !foundTimestamp {
+		return "", false
+	}
+	if len(out) == 0 {
+		return "", true
+	}
+	return strings.Join(out, "\n"), true
+}
+
+func parseTimestampMS(a, b, c string) int {
+	x, _ := strconv.Atoi(a)
+	y, _ := strconv.Atoi(b)
+	if c == "" {
+		return (x*60 + y) * 1000
+	}
+	z, _ := strconv.Atoi(c)
+	return (x*3600 + y*60 + z) * 1000
 }

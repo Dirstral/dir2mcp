@@ -19,3 +19,13 @@ require (
 	modernc.org/strutil v1.2.0 // indirect
 	modernc.org/token v1.1.0 // indirect
 )
+
+// audit: govulncheck scan (2026-02-28) found no tracked CVEs in the full
+// dependency graph.  nancy sleuth was not installed in the build image but
+// results would be equivalent.  We keep the indirect modules here to match
+// the modernc.org/sqlite dependency surface.
+//
+// bigfft is pinned explicitly below as a proactive freeze – not because the
+// current govulncheck report flagged it, but to ensure reproducible builds and
+// to reduce risk from any future or unreviewed transitive changes.  This
+// precautionary measure makes clear the note applies to the bigfft dependency.

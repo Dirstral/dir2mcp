@@ -277,6 +277,7 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 
 	client := mistral.NewClient(cfg.MistralBaseURL, cfg.MistralAPIKey)
 	ret := retrieval.NewService(st, ix, client, client)
+	ret.SetRootDir(cfg.RootDir)
 	indexingState := appstate.NewIndexingState(appstate.ModeIncremental)
 	mcpServer := mcp.NewServer(cfg, ret, mcp.WithStore(st), mcp.WithIndexingState(indexingState))
 	ing := a.newIngestor(cfg, st)
@@ -339,12 +340,11 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 
 	ingestErrCh := make(chan error, 1)
 	if opts.readOnly {
-		indexingState.SetRunning(false)
 		close(ingestErrCh)
 	} else {
 		go func() {
 			defer close(ingestErrCh)
-			indexingState.SetMode(appstate.ModeIncremental)
+			// mode is already set at creation time; just mark running state
 			indexingState.SetRunning(true)
 			defer indexingState.SetRunning(false)
 			runErr := ing.Run(runCtx)
