@@ -123,6 +123,17 @@ func TestMCPToolsCallTranscribe_ProviderFailureIsRetryable(t *testing.T) {
 	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":31,"method":"tools/call","params":{"name":"dir2mcp.transcribe","arguments":{"rel_path":"voice.wav"}}}`)
 	defer func() { _ = resp.Body.Close() }()
 
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected HTTP 200 for retryable provider failure, got %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("failed to read response body: %v", err)
+	}
+	if !bytes.Contains(body, []byte(`"retryable":true`)) {
+		t.Fatalf("expected error to be marked retryable in response body, got: %s", string(body))
+	}
+	resp.Body = io.NopCloser(bytes.NewReader(body))
 	assertToolCallErrorCode(t, resp, "TRANSCRIBE_FAILED")
 }
 
