@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"dir2mcp/internal/dirstral/mcp"
+	"dir2mcp/internal/protocol"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -38,10 +39,10 @@ func Run(ctx context.Context, opts Options) error {
 	}
 
 	if strings.TrimSpace(opts.Transport) == "" {
-		opts.Transport = "streamable-http"
+		opts.Transport = protocol.DefaultTransport
 	}
 	if strings.TrimSpace(opts.Model) == "" {
-		opts.Model = "mistral-small-latest"
+		opts.Model = protocol.DefaultModel
 	}
 
 	client := mcp.NewWithTransport(opts.MCPURL, opts.Transport, opts.Verbose)
@@ -240,7 +241,7 @@ func parseMacDevicesPrimary(lines []string) []string {
 
 	for _, raw := range lines {
 		line := strings.TrimSpace(raw)
-		if !strings.Contains(line, "AVFoundation input device") {
+		if !isLikelyAVFoundationAudioLine(line) {
 			continue
 		}
 
@@ -271,7 +272,7 @@ func parseMacDevicesFallback(lines []string) []string {
 
 	for _, raw := range lines {
 		line := strings.TrimSpace(raw)
-		if !strings.Contains(strings.ToLower(line), "input device") {
+		if !isLikelyAVFoundationAudioLine(line) {
 			continue
 		}
 
@@ -297,4 +298,15 @@ func parseMacDevicesFallback(lines []string) []string {
 	}
 
 	return devices
+}
+
+func isLikelyAVFoundationAudioLine(line string) bool {
+	lower := strings.ToLower(strings.TrimSpace(line))
+	if !strings.Contains(lower, "avfoundation") {
+		return false
+	}
+	if strings.Contains(lower, "audio") || strings.Contains(lower, "input") {
+		return true
+	}
+	return !strings.Contains(lower, "video")
 }
