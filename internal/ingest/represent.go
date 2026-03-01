@@ -300,24 +300,63 @@ func chunkTranscriptByTime(content string) []chunkSegment {
 		if trimmed == "" {
 			return nil
 		}
-		return []chunkSegment{{
-			Text: trimmed,
-			Span: model.Span{Kind: "time", StartMS: 0, EndMS: 0},
-		}}
+		return splitTranscriptSegmentWithTiming(trimmed, 0, estimateTranscriptDurationMS(trimmed))
 	}
 
 	out := make([]chunkSegment, 0, len(segments))
 	for i := range segments {
-		endMS := segments[i].startMS + 1
+		endMS := segments[i].startMS + estimateTranscriptDurationMS(segments[i].text)
 		if i+1 < len(segments) && segments[i+1].startMS >= segments[i].startMS {
 			endMS = segments[i+1].startMS
 		}
+		out = append(out, splitTranscriptSegmentWithTiming(segments[i].text, segments[i].startMS, endMS)...)
+	}
+	return out
+}
+
+func estimateTranscriptDurationMS(text string) int {
+	words := len(strings.Fields(text))
+	// Rough speaking pace: ~200 words/min => 300ms per word.
+	estimated := words * 300
+	if estimated < 1000 {
+		return 1000
+	}
+	return estimated
+}
+
+func splitTranscriptSegmentWithTiming(text string, startMS, endMS int) []chunkSegment {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return nil
+	}
+	if endMS <= startMS {
+		endMS = startMS + 1
+	}
+
+	const (
+		maxChars = 1200
+		overlap  = 120
+		minChars = 80
+	)
+	parts := chunkTextByChars(text, maxChars, overlap, minChars)
+	if len(parts) == 0 {
+		parts = []chunkSegment{{Text: text}}
+	}
+
+	duration := endMS - startMS
+	out := make([]chunkSegment, 0, len(parts))
+	for i, part := range parts {
+		partStart := startMS + (duration*i)/len(parts)
+		partEnd := startMS + (duration*(i+1))/len(parts)
+		if partEnd <= partStart {
+			partEnd = partStart + 1
+		}
 		out = append(out, chunkSegment{
-			Text: segments[i].text,
+			Text: strings.TrimSpace(part.Text),
 			Span: model.Span{
 				Kind:    "time",
-				StartMS: segments[i].startMS,
-				EndMS:   endMS,
+				StartMS: partStart,
+				EndMS:   partEnd,
 			},
 		})
 	}

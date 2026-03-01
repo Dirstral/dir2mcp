@@ -118,7 +118,6 @@ func TestMCPToolsCallTranscribe_ProviderFailureIsRetryable(t *testing.T) {
 
 	server := httptest.NewServer(mcp.NewServer(cfg, nil, mcp.WithStore(st)).Handler())
 	defer server.Close()
-	defer func() { _ = st.Close() }()
 
 	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
 	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":31,"method":"tools/call","params":{"name":"dir2mcp.transcribe","arguments":{"rel_path":"voice.wav"}}}`)
@@ -152,7 +151,6 @@ func TestMCPToolsCallTranscribe_Success(t *testing.T) {
 
 	server := httptest.NewServer(mcp.NewServer(cfg, nil, mcp.WithStore(st)).Handler())
 	defer server.Close()
-	defer func() { _ = st.Close() }()
 
 	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
 	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":32,"method":"tools/call","params":{"name":"dir2mcp.transcribe","arguments":{"rel_path":"voice.wav","timestamps":true,"language":"fr"}}}`)
@@ -190,7 +188,6 @@ func TestMCPToolsCallAnnotate_MissingSchema(t *testing.T) {
 	cfg.AuthMode = "none"
 	server := httptest.NewServer(mcp.NewServer(cfg, nil, mcp.WithStore(st)).Handler())
 	defer server.Close()
-	defer func() { _ = st.Close() }()
 
 	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
 	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":33,"method":"tools/call","params":{"name":"dir2mcp.annotate","arguments":{"rel_path":"note.txt"}}}`)
@@ -215,7 +212,6 @@ func TestMCPToolsCallAnnotate_ProviderFailure(t *testing.T) {
 
 	server := httptest.NewServer(mcp.NewServer(cfg, nil, mcp.WithStore(st)).Handler())
 	defer server.Close()
-	defer func() { _ = st.Close() }()
 
 	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
 	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":34,"method":"tools/call","params":{"name":"dir2mcp.annotate","arguments":{"rel_path":"note.txt","schema_json":{"type":"object"}}}}`)
@@ -243,7 +239,6 @@ func TestMCPToolsCallAnnotate_Success(t *testing.T) {
 
 	server := httptest.NewServer(mcp.NewServer(cfg, nil, mcp.WithStore(st)).Handler())
 	defer server.Close()
-	defer func() { _ = st.Close() }()
 
 	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
 	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":35,"method":"tools/call","params":{"name":"dir2mcp.annotate","arguments":{"rel_path":"note.txt","schema_json":{"type":"object","properties":{"summary":{"type":"string"}}},"index_flattened_text":true}}}`)
@@ -318,7 +313,6 @@ func TestMCPToolsCallTranscribeAndAsk_Success(t *testing.T) {
 	}
 	server := httptest.NewServer(mcp.NewServer(cfg, retriever, mcp.WithStore(st)).Handler())
 	defer server.Close()
-	defer func() { _ = st.Close() }()
 
 	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
 	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":37,"method":"tools/call","params":{"name":"dir2mcp.transcribe_and_ask","arguments":{"rel_path":"voice.wav","question":"what is alpha?","k":5}}}`)
@@ -378,6 +372,9 @@ func setupMCPToolStore(t *testing.T, relPath, docType string, content []byte) (c
 	}); err != nil {
 		t.Fatalf("upsert document: %v", err)
 	}
+
+	// ensure callers don't need to close the store manually
+	t.Cleanup(func() { _ = st.Close() })
 
 	cfg := config.Default()
 	cfg.RootDir = rootDir

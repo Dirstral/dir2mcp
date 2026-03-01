@@ -286,6 +286,43 @@ func TestChunkTranscriptByTimeBracketMatching(t *testing.T) {
 	}
 }
 
+func TestChunkTranscriptByTime_SplitsLongTimestampWindow(t *testing.T) {
+	longText := strings.Repeat("alpha beta gamma delta ", 600)
+	input := "[00:00] " + longText + "\n[01:00] tail"
+	chunks := ingest.ChunkTranscriptByTime(input)
+	if len(chunks) < 2 {
+		t.Fatalf("expected long transcript to be split, got %d chunk(s)", len(chunks))
+	}
+	if chunks[0].Span.Kind != "time" {
+		t.Fatalf("expected time span, got %+v", chunks[0].Span)
+	}
+	if chunks[0].Span.StartMS != 0 {
+		t.Fatalf("expected first chunk at 0ms, got %+v", chunks[0].Span)
+	}
+	if chunks[0].Span.EndMS <= chunks[0].Span.StartMS {
+		t.Fatalf("expected positive duration span, got %+v", chunks[0].Span)
+	}
+	if len([]rune(chunks[0].Text)) > 1300 {
+		t.Fatalf("expected first split chunk to be bounded, got %d runes", len([]rune(chunks[0].Text)))
+	}
+}
+
+func TestChunkTranscriptByTime_NoTimestampsStillGetsTimeSpans(t *testing.T) {
+	input := strings.Repeat("plain transcript text without timestamps ", 300)
+	chunks := ingest.ChunkTranscriptByTime(input)
+	if len(chunks) == 0 {
+		t.Fatal("expected fallback chunks")
+	}
+	for i, ch := range chunks {
+		if ch.Span.Kind != "time" {
+			t.Fatalf("chunk %d expected time span, got %+v", i, ch.Span)
+		}
+		if ch.Span.EndMS <= ch.Span.StartMS {
+			t.Fatalf("chunk %d expected positive duration, got %+v", i, ch.Span)
+		}
+	}
+}
+
 func TestChunkTextByChars(t *testing.T) {
 	content := strings.Repeat("abcdefghijklmnopqrstuvwxyz", 200)
 	chunks := ingest.ChunkTextByChars(content, 250, 25, 50)

@@ -1036,6 +1036,12 @@ func flattenJSONForIndexing(v interface{}) string {
 		default:
 			b, err := json.Marshal(typed)
 			if err != nil {
+				// log the marshaling failure with context but continue processing
+				// so that other entries aren't dropped. include prefix, the
+				// value being marshaled and a reference to json.Marshal in the
+				// message so the source is obvious when debugging.
+				log.Printf("flattenJSONForIndexing: json.Marshal failed for prefix=%s value=%#v error=%v (lines so far=%d)",
+					prefix, typed, err, len(lines))
 				return
 			}
 			lines = append(lines, fmt.Sprintf("%s: %s", prefix, string(b)))
