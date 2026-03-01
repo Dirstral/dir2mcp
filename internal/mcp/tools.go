@@ -473,12 +473,18 @@ func (s *Server) handleSearchTool(ctx context.Context, args map[string]interface
 		indexUsed = "both"
 	}
 
+	// attempt to reflect real indexing status; when unknown we preserve the
+	// retriever-side default semantics (true).
+	indexingComplete := true
+	if ic, err := s.retriever.IndexingComplete(ctx); err == nil {
+		indexingComplete = ic
+	}
 	structured := map[string]interface{}{
 		"query":             query,
 		"k":                 k,
 		"index_used":        indexUsed,
 		"hits":              hits,
-		"indexing_complete": false,
+		"indexing_complete": indexingComplete,
 	}
 
 	return toolCallResult{
@@ -607,8 +613,8 @@ func (s *Server) handleAskTool(ctx context.Context, args map[string]interface{})
 			hitMaps = append(hitMaps, serializeHit(h))
 		}
 
-		// obtain the indexing_complete flag via the new accessor.  avoids the
-		// extra work that Ask would perform while still exposing the same state.
+		// obtain the indexing_complete flag via the new accessor; keep default
+		// true on errors to mirror retriever semantics for unknown state.
 		indexingComplete := true
 		if ic, err := s.retriever.IndexingComplete(ctx); err == nil {
 			indexingComplete = ic
@@ -762,12 +768,17 @@ func (s *Server) handleAskAudioTool(ctx context.Context, args map[string]interfa
 		for _, h := range hits {
 			hitMaps = append(hitMaps, serializeHit(h))
 		}
+		// dynamic status retrieval here as well; default true on error.
+		indexingComplete := true
+		if ic, err := s.retriever.IndexingComplete(ctx); err == nil {
+			indexingComplete = ic
+		}
 		structured := map[string]interface{}{
 			"question":          question,
 			"answer":            "",
 			"citations":         []interface{}{},
 			"hits":              hitMaps,
-			"indexing_complete": false,
+			"indexing_complete": indexingComplete,
 		}
 		return toolCallResult{
 			Content: []toolContentItem{

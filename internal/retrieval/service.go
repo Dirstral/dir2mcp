@@ -89,6 +89,10 @@ type Service struct {
 	secretPatterns []*regexp.Regexp
 }
 
+// compile-time assertion that Service implements model.Retriever.  This
+// will fail to compile if the interface changes without updating this type.
+var _ model.Retriever = (*Service)(nil)
+
 func NewService(store model.Store, index model.Index, embedder model.Embedder, gen model.Generator) *Service {
 	compiledPatterns := make([]*regexp.Regexp, 0, len(defaultSecretPatternLiterals))
 	for _, pattern := range defaultSecretPatternLiterals {
@@ -380,13 +384,10 @@ func (s *Service) Ask(ctx context.Context, question string, query model.SearchQu
 	}
 	answer = ensureAnswerAttributions(answer, citations)
 
-	indexingComplete := true
-	s.metaMu.RLock()
-	indexingFn := s.indexingStateFn
-	s.metaMu.RUnlock()
-	if indexingFn != nil {
-		indexingComplete = indexingFn()
-	}
+	// use the shared accessor to determine whether indexing is complete;
+	// this centralizes locking and nil-handling logic and avoids duplicating
+	// the callback lookup that was previously done here.
+	indexingComplete, _ := s.IndexingComplete(ctx)
 
 	return model.AskResult{
 		Question:         question,
@@ -407,9 +408,22 @@ func (s *Service) OpenFile(ctx context.Context, relPath string, span model.Span,
 // available we conservatively report true (i.e. indexing complete) so that
 // callers do not stall waiting for an event that cannot be delivered.
 func (s *Service) IndexingComplete(ctx context.Context) (bool, error) {
+	// grab the callback under lock, then release before doing any work.
+	// this mirrors the pattern used elsewhere in the package and keeps the
+	// critical section small.  We also respect the incoming context by
+	// checking for cancellation before invoking the callback (which may
+	// itself do expensive work or block).
+
 	s.metaMu.RLock()
 	indexingFn := s.indexingStateFn
 	s.metaMu.RUnlock()
+
+	if err := ctx.Err(); err != nil {
+		// context already cancelled or expired; report that to caller rather
+		// than potentially running the provider.
+		return false, err
+	}
+
 	if indexingFn == nil {
 		return true, nil
 	}

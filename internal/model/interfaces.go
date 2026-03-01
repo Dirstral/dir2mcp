@@ -25,9 +25,9 @@ type Retriever interface {
 	Stats(ctx context.Context) (Stats, error)
 
 	// IndexingComplete returns true if the underlying index has finished
-	// processing new documents.  callers previously had to invoke Ask and read
+	// processing new documents.  Callers previously had to invoke Ask and read
 	// the flag from the resulting AskResult; this accessor provides a lightweight
-	// alternative.  implementations may always return true if they cannot
+	// alternative.  Implementations may always return true if they cannot
 	// determine the state.
 	IndexingComplete(ctx context.Context) (bool, error)
 }

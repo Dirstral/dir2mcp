@@ -78,6 +78,9 @@ func (s *commandTestRetrieverStub) IndexingComplete(_ context.Context) (bool, er
 	return s.indexingComplete, nil
 }
 
+// compile-time assertion ensuring our stub satisfies the Retriever interface
+var _ model.Retriever = (*commandTestRetrieverStub)(nil)
+
 func TestStatusReadsCorpusSnapshotHuman(t *testing.T) {
 	tmp := t.TempDir()
 	stateDir := filepath.Join(tmp, ".dir2mcp")
@@ -482,8 +485,8 @@ func TestAskJSONOutput(t *testing.T) {
 }
 
 // Search-only mode with JSON output should still report the current indexing
-// state.  the implementation obtains the boolean by invoking Ask on the
-// retriever; consequently we expect both Search and Ask to be called.
+// state. The implementation obtains the boolean via the dedicated
+// IndexingComplete accessor, so only Search (not Ask) is invoked.
 func TestAskSearchOnlyJSONIncludesIndexingComplete(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("MISTRAL_API_KEY", "test-key")
@@ -526,7 +529,7 @@ func TestAskSearchOnlyJSONIncludesIndexingComplete(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
 		t.Fatalf("unmarshal ask payload: %v\nraw=%s", err, stdout.String())
 	}
-	if payload.IndexingComplete != true {
+	if !payload.IndexingComplete {
 		t.Fatalf("expected indexing_complete=true got %+v", payload)
 	}
 }

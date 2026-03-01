@@ -94,6 +94,84 @@ func TestAsk_GeneratorErrorLogged(t *testing.T) {
 	}
 }
 
+func TestAsk_IndexingCompleteFlag(t *testing.T) {
+	idx := index.NewHNSWIndex("")
+	if err := idx.Add(1, []float32{1, 0}); err != nil {
+		t.Fatalf("idx.Add failed: %v", err)
+	}
+	// provider returns false to simulate ongoing indexing
+	svc := NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{"mistral-embed": {1, 0}}}, nil)
+	svc.SetIndexingCompleteProvider(func() bool { return false })
+	svc.SetChunkMetadata(1, model.SearchHit{RelPath: "doc.txt", DocType: "md", Snippet: "hi"})
+
+	res, err := svc.Ask(context.Background(), "question", model.SearchQuery{K: 1})
+	if err != nil {
+		t.Fatalf("Ask returned error: %v", err)
+	}
+	if res.IndexingComplete != false {
+		t.Fatalf("expected indexing complete false, got %v", res.IndexingComplete)
+	}
+}
+
+func TestAsk_IndexingCompleteDefaultTrue(t *testing.T) {
+	idx := index.NewHNSWIndex("")
+	if err := idx.Add(1, []float32{1, 0}); err != nil {
+		t.Fatalf("idx.Add failed: %v", err)
+	}
+	svc := NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{"mistral-embed": {1, 0}}}, nil)
+	// no provider set, should default to true
+	svc.SetChunkMetadata(1, model.SearchHit{RelPath: "doc.txt", DocType: "md", Snippet: "hi"})
+
+	res, err := svc.Ask(context.Background(), "question", model.SearchQuery{K: 1})
+	if err != nil {
+		t.Fatalf("Ask returned error: %v", err)
+	}
+	if !res.IndexingComplete {
+		t.Fatalf("expected indexing complete true with nil provider, got %v", res.IndexingComplete)
+	}
+}
+
+// Test the IndexingComplete accessor directly; the Ask tests above exercised it
+// indirectly, but having a standalone verification improves clarity and
+// prevents regressions when the interface changes.
+func TestIndexingCompleteAccessorDirect(t *testing.T) {
+	idx := index.NewHNSWIndex("")
+	if err := idx.Add(1, []float32{1, 0}); err != nil {
+		t.Fatalf("idx.Add failed: %v", err)
+	}
+	svc := NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{"mistral-embed": {1, 0}}}, nil)
+
+	// default provider nil -> should report true
+	if ic, err := svc.IndexingComplete(context.Background()); err != nil || !ic {
+		t.Fatalf("expected true default, got %v,%v", ic, err)
+	}
+
+	svc.SetIndexingCompleteProvider(func() bool { return false })
+	if ic, err := svc.IndexingComplete(context.Background()); err != nil || ic {
+		t.Fatalf("expected false after setting provider, got %v,%v", ic, err)
+	}
+}
+
+func TestIndexingComplete_CanceledContext(t *testing.T) {
+	idx := index.NewHNSWIndex("")
+	if err := idx.Add(1, []float32{1, 0}); err != nil {
+		t.Fatalf("idx.Add failed: %v", err)
+	}
+	svc := NewService(nil, idx, &fakeRetrievalEmbedder{vectorsByModel: map[string][]float32{"mistral-embed": {1, 0}}}, nil)
+	// provider returns true but should not be invoked
+	svc.SetIndexingCompleteProvider(func() bool { t.Fatal("provider should not be called"); return true })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	ok, err := svc.IndexingComplete(ctx)
+	if err == nil {
+		t.Fatalf("expected error when context canceled")
+	}
+	if ok {
+		t.Fatalf("expected false result when context canceled")
+	}
+}
+
 func TestSearch_ReturnsRankedHitsWithFilters(t *testing.T) {
 	idx := index.NewHNSWIndex("")
 	if err := idx.Add(1, []float32{1, 0}); err != nil {

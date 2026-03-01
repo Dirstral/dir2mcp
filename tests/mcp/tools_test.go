@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"dir2mcp/internal/config"
@@ -642,10 +643,10 @@ func TestMCPToolsCallAsk_SearchOnly(t *testing.T) {
 	if got, ok := envelope.Result.StructuredContent["indexing_complete"].(bool); !ok || !got {
 		t.Fatalf("expected indexing_complete=true, got %#v", envelope.Result.StructuredContent["indexing_complete"])
 	}
-	if !retriever.searchCalled {
+	if !retriever.searchCalled.Load() {
 		t.Fatal("expected Search to be called")
 	}
-	if retriever.askCalled {
+	if retriever.askCalled.Load() {
 		t.Fatal("did not expect Ask to be called after optimization")
 	}
 }
@@ -775,16 +776,19 @@ type askAudioRetrieverStub struct {
 	EchoQuestion bool
 	OnAsk        func(question string) string
 
-	// tracking for assertions
-	searchCalled bool
-	askCalled    bool
+	// tracking for assertions (read from HTTP handler goroutines)
+	searchCalled atomic.Bool
+	askCalled    atomic.Bool
 
 	// indexing state for the new accessor
+	// this field is only written during initialization and then read by
+	// handlers, so it does not currently need to be atomic.  keep as a
+	// plain bool for now.
 	indexingComplete bool
 }
 
 func (s *askAudioRetrieverStub) Search(_ context.Context, q model.SearchQuery) ([]model.SearchHit, error) {
-	s.searchCalled = true
+	s.searchCalled.Store(true)
 	if s.OnSearch != nil {
 		return s.OnSearch(q)
 	}
@@ -798,7 +802,7 @@ func (s *askAudioRetrieverStub) Search(_ context.Context, q model.SearchQuery) (
 }
 
 func (s *askAudioRetrieverStub) Ask(_ context.Context, question string, _ model.SearchQuery) (model.AskResult, error) {
-	s.askCalled = true
+	s.askCalled.Store(true)
 	if s.askErr != nil {
 		return model.AskResult{}, s.askErr
 	}
@@ -823,6 +827,10 @@ func (s *askAudioRetrieverStub) Stats(_ context.Context) (model.Stats, error) {
 func (s *askAudioRetrieverStub) IndexingComplete(_ context.Context) (bool, error) {
 	return s.indexingComplete, nil
 }
+
+// compile-time assertion that askAudioRetrieverStub satisfies the Retriever
+// interface; helps catch missing methods during refactoring.
+var _ model.Retriever = (*askAudioRetrieverStub)(nil)
 
 type fakeTTSSynthesizer struct {
 	audio []byte
