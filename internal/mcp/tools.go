@@ -1142,7 +1142,7 @@ func (s *Server) handleTranscribeAndAskTool(ctx context.Context, args map[string
 		Query:    question,
 		K:        k,
 		Index:    "text",
-		FileGlob: relPath,
+		FileGlob: escapeGlobLiteral(relPath),
 	})
 	if askErr != nil {
 		if errors.Is(askErr, model.ErrIndexNotReady) || errors.Is(askErr, model.ErrIndexNotConfigured) {
@@ -1468,15 +1468,6 @@ func (s *Server) readDocumentContent(relPath string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	normalized := filepath.ToSlash(filepath.Clean(strings.TrimSpace(relPath)))
-	if normalized == "." || normalized == ".." || strings.HasPrefix(normalized, "../") || filepath.IsAbs(relPath) {
-		return nil, model.ErrPathOutsideRoot
-	}
-func (s *Server) readDocumentContent(relPath string) ([]byte, error) {
-	rootAbs, err := filepath.Abs(strings.TrimSpace(s.cfg.RootDir))
-	if err != nil {
-		return nil, err
-	}
 	rootReal, err := filepath.EvalSymlinks(rootAbs)
 	if err != nil {
 		return nil, err
@@ -1496,6 +1487,17 @@ func (s *Server) readDocumentContent(relPath string) ([]byte, error) {
 	}
 	return os.ReadFile(targetReal)
 }
+
+func escapeGlobLiteral(input string) string {
+	var b strings.Builder
+	for _, r := range input {
+		switch r {
+		case '\\', '*', '?', '[', ']':
+			b.WriteByte('\\')
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 func (s *Server) newMistralClient() (*mistral.Client, *toolExecutionError) {
