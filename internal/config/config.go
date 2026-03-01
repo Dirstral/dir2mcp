@@ -799,8 +799,10 @@ func applyEnvOverrides(cfg *Config, overrideEnv map[string]string) {
 	if trustedProxies, ok := envLookup("DIR2MCP_TRUSTED_PROXIES", overrideEnv); ok {
 		cfg.TrustedProxies = MergeTrustedProxies(cfg.TrustedProxies, trustedProxies)
 	}
-	// session-related environment variables are durations parsed by
-	// time.ParseDuration.  invalid values are warned but not fatal.
+	// session-related environment variables are durations parsed by time.ParseDuration.
+	// Syntactically invalid values (parse errors) are warned about but not fatal; values
+	// that parse successfully (including negative durations) are stored and may still
+	// cause Validate() to fail later.
 	// Historically the variable was named DIR2MCP_SESSION_TIMEOUT; we
 	// elect to prefer the more explicit DIR2MCP_SESSION_INACTIVITY_TIMEOUT
 	// while still accepting the old name for compatibility.
