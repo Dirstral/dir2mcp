@@ -2,6 +2,7 @@ package breeze
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -336,6 +337,9 @@ func formatHelp() string {
 	fmt.Fprintf(&b, "  %s  %s\n", ui.Keyword.Render("/list [prefix]"), ui.Muted.Render("List indexed files"))
 	fmt.Fprintf(&b, "  %s  %s\n", ui.Keyword.Render("/search <query>"), ui.Muted.Render("Search corpus"))
 	fmt.Fprintf(&b, "  %s  %s\n", ui.Keyword.Render("/open <rel_path>"), ui.Muted.Render("Open file from index"))
+	fmt.Fprintf(&b, "  %s  %s\n", ui.Keyword.Render("/transcribe <rel_path>"), ui.Muted.Render("Force transcribe audio"))
+	fmt.Fprintf(&b, "  %s  %s\n", ui.Keyword.Render("/annotate <path> <schema>"), ui.Muted.Render("Extract structured JSON"))
+	fmt.Fprintf(&b, "  %s  %s\n", ui.Keyword.Render("/transcribe_and_ask <path> <q>"), ui.Muted.Render("Transcribe & Ask"))
 	b.WriteString(ui.Dim("  Any other text is sent to " + protocol.ToolNameAsk))
 	return b.String()
 }
@@ -348,6 +352,9 @@ func formatHelpPlain() string {
 		"/list [prefix] - List indexed files",
 		"/search <query> - Search corpus",
 		"/open <rel_path> - Open file from index",
+		"/transcribe <rel_path> - Force transcribe audio",
+		"/annotate <rel_path> <schema_json> - Extract structured JSON",
+		"/transcribe_and_ask <rel_path> <question> - Transcribe & Ask",
 		"Any other text is sent to " + protocol.ToolNameAsk,
 	}, "\n")
 }
@@ -360,8 +367,12 @@ func renderResultString(tool string, res *mcp.ToolCallResult) string {
 		return renderSearchString(res.StructuredContent)
 	case protocol.ToolNameOpenFile:
 		return renderOpenFileString(res.StructuredContent)
-	case protocol.ToolNameAsk:
+	case protocol.ToolNameAsk, protocol.ToolNameTranscribeAndAsk:
 		return renderAskString(res.StructuredContent)
+	case protocol.ToolNameAnnotate:
+		return renderAnnotateString(res.StructuredContent)
+	case protocol.ToolNameTranscribe:
+		return renderTranscribeString(res.StructuredContent)
 	default:
 		var b strings.Builder
 		for _, c := range res.Content {
@@ -445,6 +456,44 @@ func renderAskString(sc map[string]any) string {
 			styled[i] = ui.Citation(c)
 		}
 		fmt.Fprintf(&b, "%s %s\n", ui.Dim("Sources:"), strings.Join(styled, ui.Dim(", ")))
+	}
+	return strings.TrimSpace(b.String())
+}
+
+func renderAnnotateString(sc map[string]any) string {
+	var b strings.Builder
+	path := asString(sc["rel_path"])
+	b.WriteString(ui.Cyan.Render("Annotated: "+path) + "\n")
+	if text, ok := sc["annotation_text_preview"].(string); ok && text != "" {
+		b.WriteString(ui.Dim("Preview: "+text) + "\n")
+	}
+	if jsonObj, ok := sc["annotation_json"].(map[string]any); ok {
+		bytes, err := json.MarshalIndent(jsonObj, "", "  ")
+		if err == nil {
+			b.WriteString(string(bytes))
+		}
+	}
+	if ordered := citationsFor(protocol.ToolNameAnnotate, sc); len(ordered) > 0 {
+		styled := make([]string, len(ordered))
+		for i, c := range ordered {
+			styled[i] = ui.Citation(c)
+		}
+		fmt.Fprintf(&b, "\n%s %s\n", ui.Dim("Sources:"), strings.Join(styled, ui.Dim(", ")))
+	}
+	return strings.TrimSpace(b.String())
+}
+
+func renderTranscribeString(sc map[string]any) string {
+	var b strings.Builder
+	path := asString(sc["rel_path"])
+	b.WriteString(ui.Cyan.Render("Transcribed: "+path) + "\n")
+	if provider := asString(sc["provider"]); provider != "" {
+		b.WriteString(ui.Dim("Provider: "+provider) + "\n")
+	}
+	if segments, ok := sc["segments"].([]any); ok && len(segments) > 0 {
+		b.WriteString(fmt.Sprintf("Extracted %d segments.", len(segments)))
+	} else {
+		b.WriteString("Transcription complete.")
 	}
 	return strings.TrimSpace(b.String())
 }
