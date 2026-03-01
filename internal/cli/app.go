@@ -1142,8 +1142,11 @@ func parseAskOptions(args []string) (askOptions, error) {
 	if opts.question == "" {
 		return askOptions{}, errors.New("ask command requires a question argument")
 	}
-	if opts.k <= 0 || opts.k > 50 {
-		return askOptions{}, errors.New("k must be between 1 and 50")
+	if opts.k <= 0 {
+		opts.k = mcp.DefaultSearchK
+	}
+	if opts.k > 50 {
+		return askOptions{}, errors.New("k must be <= 50")
 	}
 
 	opts.mode = strings.ToLower(strings.TrimSpace(opts.mode))
