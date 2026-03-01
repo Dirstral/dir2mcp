@@ -47,7 +47,7 @@ func newRootCommand(cfg config.Config) *cobra.Command {
 					opts := BuildTempestOptions(cfg, mcpURL, cfg.ElevenLabs.Voice, "", false, cfg.Verbose, cfg.ElevenLabs.BaseURL)
 					printModeFeedback("Tempest", tempest.Run(cmd.Context(), opts))
 				case ChoiceLighthouse:
-					if err := runLighthouseMenu(cfg); err != nil {
+					if err := runLighthouseMenu(cmd.Context(), cfg); err != nil {
 						printUIError(err)
 					}
 				case ChoiceSettings:
@@ -345,7 +345,7 @@ func BuildTempestOptions(cfg config.Config, mcpURL, voice, device string, mute, 
 	}
 }
 
-func runLighthouseMenu(cfg config.Config) error {
+func runLighthouseMenu(ctx context.Context, cfg config.Config) error {
 	for {
 		result, err := RunMenu(screenLighthouse)
 		if err != nil {
@@ -354,7 +354,7 @@ func runLighthouseMenu(cfg config.Config) error {
 		switch result.Chosen {
 		case lighthouseActionStart:
 			printModeHeader("Lighthouse / Start Server")
-			if err := host.UpDetached(context.Background(), host.UpOptions{Listen: cfg.Host.Listen, MCPPath: cfg.Host.MCPPath}); err != nil {
+			if err := host.UpDetached(ctx, host.UpOptions{Listen: cfg.Host.Listen, MCPPath: cfg.Host.MCPPath}); err != nil {
 				printModeFeedbackTo("Lighthouse start", err, "Lighthouse menu")
 				continue
 			}
@@ -379,7 +379,7 @@ func runLighthouseMenu(cfg config.Config) error {
 			printReturnTo("Lighthouse menu")
 		case lighthouseActionRemote:
 			printModeHeader("Lighthouse / Remote MCP")
-			if err := host.StatusRemote(context.Background(), strings.TrimSpace(cfg.MCP.URL)); err != nil {
+			if err := host.StatusRemote(ctx, strings.TrimSpace(cfg.MCP.URL)); err != nil {
 				printModeFeedbackTo("Lighthouse remote", err, "Lighthouse menu")
 				continue
 			}
