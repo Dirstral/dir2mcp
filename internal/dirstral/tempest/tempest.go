@@ -206,15 +206,20 @@ func resolveMacInputDevice(device string) (string, error) {
 		return "", fmt.Errorf("unable to resolve --device %q: %w", trimmed, err)
 	}
 	needle := strings.ToLower(trimmed)
-	for idx, name := range devices {
-		if strings.Contains(strings.ToLower(name), needle) {
-			return fmt.Sprintf(":%d", idx), nil
+	for _, dev := range devices {
+		if strings.Contains(strings.ToLower(dev.Name), needle) {
+			return fmt.Sprintf(":%d", dev.Index), nil
 		}
 	}
 	return "", fmt.Errorf("input device %q not found, list devices with: ffmpeg -f avfoundation -list_devices true -i \"\"", trimmed)
 }
 
-func listMacInputDevices() ([]string, error) {
+type macInputDevice struct {
+	Index int
+	Name  string
+}
+
+func listMacInputDevices() ([]macInputDevice, error) {
 	cmd := exec.Command("ffmpeg", "-f", "avfoundation", "-list_devices", "true", "-i", "")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -233,32 +238,25 @@ func listMacInputDevices() ([]string, error) {
 	return devices, nil
 }
 
-func parseMacDevicesPrimary(lines []string) []string {
-	quotedName := regexp.MustCompile(`"([^"]+)"`)
+func parseMacDevicesPrimary(lines []string) []macInputDevice {
 	indexedName := regexp.MustCompile(`\[(\d+)\]\s*(.+)$`)
-	devices := make([]string, 0)
-	seen := map[string]bool{}
+	devices := make([]macInputDevice, 0)
+	seen := map[int]bool{}
 
 	for _, raw := range lines {
 		line := strings.TrimSpace(raw)
 		if !isLikelyAVFoundationAudioLine(line) {
 			continue
 		}
-
-		if match := quotedName.FindStringSubmatch(line); len(match) == 2 {
-			name := strings.TrimSpace(match[1])
-			if name != "" && !seen[name] {
-				seen[name] = true
-				devices = append(devices, name)
-			}
-			continue
-		}
-
 		if match := indexedName.FindStringSubmatch(line); len(match) == 3 {
-			name := strings.TrimSpace(match[2])
-			if name != "" && !seen[name] {
-				seen[name] = true
-				devices = append(devices, name)
+			index, err := strconv.Atoi(strings.TrimSpace(match[1]))
+			if err != nil || seen[index] {
+				continue
+			}
+			name := cleanAVFoundationDeviceName(match[2])
+			if name != "" {
+				seen[index] = true
+				devices = append(devices, macInputDevice{Index: index, Name: name})
 			}
 		}
 	}
@@ -266,38 +264,48 @@ func parseMacDevicesPrimary(lines []string) []string {
 	return devices
 }
 
-func parseMacDevicesFallback(lines []string) []string {
-	devices := make([]string, 0)
-	seen := map[string]bool{}
+func parseMacDevicesFallback(lines []string) []macInputDevice {
+	indexedName := regexp.MustCompile(`\[(\d+)\]\s*(.+)$`)
+	devices := make([]macInputDevice, 0)
+	seen := map[int]bool{}
 
 	for _, raw := range lines {
 		line := strings.TrimSpace(raw)
 		if !isLikelyAVFoundationAudioLine(line) {
 			continue
 		}
-
-		if idx := strings.LastIndex(line, "]"); idx >= 0 && idx+1 < len(line) {
-			line = strings.TrimSpace(line[idx+1:])
-		}
-		line = strings.TrimSpace(strings.Trim(line, `"'`))
-		if line == "" {
+		match := indexedName.FindStringSubmatch(line)
+		if len(match) != 3 {
 			continue
 		}
-
-		if lower := strings.ToLower(line); strings.HasPrefix(lower, "avfoundation input device") {
-			line = strings.TrimSpace(line[len("avfoundation input device"):])
-		}
-		if line == "" {
+		index, err := strconv.Atoi(strings.TrimSpace(match[1]))
+		if err != nil || seen[index] {
 			continue
 		}
-
-		if !seen[line] {
-			seen[line] = true
-			devices = append(devices, line)
+		name := cleanAVFoundationDeviceName(match[2])
+		if name == "" {
+			continue
 		}
+		seen[index] = true
+		devices = append(devices, macInputDevice{Index: index, Name: name})
 	}
 
 	return devices
+}
+
+func cleanAVFoundationDeviceName(raw string) string {
+	line := strings.TrimSpace(raw)
+	if idx := strings.LastIndex(line, "]"); idx >= 0 && idx+1 < len(line) {
+		line = strings.TrimSpace(line[idx+1:])
+	}
+	line = strings.TrimSpace(strings.Trim(line, `"'`))
+	if line == "" {
+		return ""
+	}
+	if lower := strings.ToLower(line); strings.HasPrefix(lower, "avfoundation input device") {
+		line = strings.TrimSpace(line[len("avfoundation input device"):])
+	}
+	return strings.TrimSpace(strings.Trim(line, `"'`))
 }
 
 func isLikelyAVFoundationAudioLine(line string) bool {
