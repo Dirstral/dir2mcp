@@ -15,17 +15,14 @@ import (
 	"time"
 
 	"dir2mcp/internal/dirstral/host"
+	"dir2mcp/internal/protocol"
 )
 
 func TestSmokeLighthouseLifecycleWithFakeDir2MCP(t *testing.T) {
 	setTestConfigDir(t)
 	installFakeDir2MCPOnPath(t)
 
-	listen := "127.0.0.1:" + reserveFreePort(t)
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- host.Up(context.Background(), host.UpOptions{Listen: listen, MCPPath: "/mcp"})
-	}()
+	errCh := startLighthouseWithRetry(t, 5)
 
 	waitFor(t, 3*time.Second, func() bool {
 		_, err := host.LoadState()
@@ -54,6 +51,37 @@ func TestSmokeLighthouseLifecycleWithFakeDir2MCP(t *testing.T) {
 	}
 }
 
+func startLighthouseWithRetry(t *testing.T, attempts int) chan error {
+	t.Helper()
+
+	for attempt := 1; attempt <= attempts; attempt++ {
+		reserved := reserveListener(t)
+		listen := reserved.Addr().String()
+
+		errCh := make(chan error, 1)
+		go func(ln net.Listener, addr string) {
+			_ = ln.Close()
+			errCh <- host.Up(context.Background(), host.UpOptions{Listen: addr, MCPPath: protocol.DefaultMCPPath})
+		}(reserved, listen)
+
+		select {
+		case err := <-errCh:
+			if attempt < attempts && isAddressInUseError(err) {
+				continue
+			}
+			if err != nil {
+				t.Fatalf("lighthouse up failed (attempt %d/%d): %v", attempt, attempts, err)
+			}
+			t.Fatalf("lighthouse up exited before test shutdown (attempt %d/%d)", attempt, attempts)
+		case <-time.After(350 * time.Millisecond):
+			return errCh
+		}
+	}
+
+	t.Fatalf("failed to start lighthouse after %d attempts", attempts)
+	return nil
+}
+
 func installFakeDir2MCPOnPath(t *testing.T) {
 	t.Helper()
 
@@ -69,21 +97,22 @@ func installFakeDir2MCPOnPath(t *testing.T) {
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
-func reserveFreePort(t *testing.T) string {
+func reserveListener(t *testing.T) net.Listener {
 	t.Helper()
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("reserve free port: %v", err)
 	}
-	defer func() {
-		_ = ln.Close()
-	}()
-	_, port, err := net.SplitHostPort(ln.Addr().String())
-	if err != nil {
-		t.Fatalf("split host port: %v", err)
+	return ln
+}
+
+func isAddressInUseError(err error) bool {
+	if err == nil {
+		return false
 	}
-	return port
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "address already in use") || strings.Contains(msg, "bind:") || strings.Contains(msg, "exit status 1")
 }
 
 func waitFor(t *testing.T, timeout time.Duration, ok func() bool) {
@@ -121,7 +150,7 @@ func runFakeDir2MCPBinary() error {
 	}
 
 	listen := "127.0.0.1:8087"
-	mcpPath := "/mcp"
+	mcpPath := protocol.DefaultMCPPath
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--listen":
@@ -160,8 +189,8 @@ func runFakeDir2MCPBinary() error {
 		id := req["id"]
 
 		switch method {
-		case "initialize":
-			w.Header().Set("MCP-Session-Id", sessionID)
+		case protocol.RPCMethodInitialize:
+			w.Header().Set(protocol.MCPSessionHeader, sessionID)
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"jsonrpc": "2.0",
@@ -170,10 +199,10 @@ func runFakeDir2MCPBinary() error {
 					"capabilities": map[string]any{"tools": map[string]any{}},
 				},
 			})
-		case "notifications/initialized":
+		case protocol.RPCMethodNotificationsInitialized:
 			w.WriteHeader(http.StatusAccepted)
-		case "tools/list":
-			if r.Header.Get("MCP-Session-Id") != sessionID {
+		case protocol.RPCMethodToolsList:
+			if r.Header.Get(protocol.MCPSessionHeader) != sessionID {
 				http.Error(w, "unknown session", http.StatusNotFound)
 				return
 			}
@@ -182,7 +211,7 @@ func runFakeDir2MCPBinary() error {
 				"jsonrpc": "2.0",
 				"id":      id,
 				"result": map[string]any{
-					"tools": []map[string]any{{"name": "dir2mcp.search", "description": "search"}},
+					"tools": []map[string]any{{"name": protocol.ToolNameSearch, "description": "search"}},
 				},
 			})
 		default:
