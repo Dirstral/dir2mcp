@@ -80,12 +80,13 @@ type jsonRPCResponse struct {
 }
 
 type jsonRPCError struct {
-	Code                  int
-	Message               string
-	HTTPStatus            int
-	Headers               map[string]string
-	PaymentRequiredHeader *x402.X402Payload
-	PaymentResponseHeader string
+	Code                   int
+	Message                string
+	HTTPStatus             int
+	Headers                map[string]string
+	PaymentRequiredHeader  *x402.X402Payload
+	PaymentResponseHeader  string
+	PaymentRequiredPresent bool
 }
 
 func (e *jsonRPCError) Error() string {
@@ -105,7 +106,7 @@ func (e *jsonRPCError) isPaymentRequired() bool {
 	if e.HTTPStatus != http.StatusPaymentRequired {
 		return false
 	}
-	return e.PaymentRequiredHeader != nil || strings.TrimSpace(e.PaymentResponseHeader) != ""
+	return e.PaymentRequiredPresent || e.PaymentRequiredHeader != nil || strings.TrimSpace(e.PaymentResponseHeader) != ""
 }
 
 func New(endpoint string, verbose bool) *Client {
@@ -378,20 +379,22 @@ func (c *Client) call(ctx context.Context, method string, params map[string]any,
 		return nil, resp.StatusCode, resp.Header, err
 	}
 	if envelope.Error != nil {
+		prVal := headerValueIgnoreCase(resp.Header, x402.HeaderPaymentRequired)
 		var prHeader *x402.X402Payload
-		if val := headerValueIgnoreCase(resp.Header, x402.HeaderPaymentRequired); val != "" {
+		if prVal != "" {
 			var parsed x402.X402Payload
-			if err := json.Unmarshal([]byte(val), &parsed); err == nil {
+			if err := json.Unmarshal([]byte(prVal), &parsed); err == nil {
 				prHeader = &parsed
 			}
 		}
 		return nil, resp.StatusCode, resp.Header, &jsonRPCError{
-			Code:                  envelope.Error.Code,
-			Message:               envelope.Error.Message,
-			HTTPStatus:            resp.StatusCode,
-			Headers:               flattenHeaders(resp.Header),
-			PaymentRequiredHeader: prHeader,
-			PaymentResponseHeader: headerValueIgnoreCase(resp.Header, x402.HeaderPaymentResponse),
+			Code:                   envelope.Error.Code,
+			Message:                envelope.Error.Message,
+			HTTPStatus:             resp.StatusCode,
+			Headers:                flattenHeaders(resp.Header),
+			PaymentRequiredHeader:  prHeader,
+			PaymentResponseHeader:  headerValueIgnoreCase(resp.Header, x402.HeaderPaymentResponse),
+			PaymentRequiredPresent: prVal != "",
 		}
 	}
 	var raw map[string]any
