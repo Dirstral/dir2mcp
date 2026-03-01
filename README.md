@@ -226,7 +226,7 @@ To run the live transcription integration test (use your own audio file for spee
 ```bash
 RUN_INTEGRATION_TESTS=1 \
 MISTRAL_STT_SAMPLE=/absolute/path/to/sample.mp3 \
- go test -v ./tests/mistral -run Transcribe_Integration
+go test -v ./tests/mistral -run Transcribe_Integration
 ```
 
 `MISTRAL_STT_SAMPLE` may point to any local audio file that the Mistral STT service accepts (e.g. `.mp3`, `.wav`, `.m4a` or other supported codecs); the example above shows an MP3 sample together with the `Transcribe_Integration` test name so you can see both the env var and test at once.
