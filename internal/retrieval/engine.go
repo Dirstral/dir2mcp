@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"dir2mcp/internal/config"
 	"dir2mcp/internal/index"
@@ -24,12 +25,15 @@ type embeddedChunkMetadataSource interface {
 	ListEmbeddedChunkMetadata(ctx context.Context, indexKind string, limit, offset int) ([]model.ChunkTask, error)
 }
 
+const defaultEngineAskTimeout = 120 * time.Second
+
 // Engine provides a convenience wrapper around retrieval.Service for callers
 // that still rely on the legacy Engine API.
 type Engine struct {
-	retriever engineRetriever
-	closeFns  []func()
-	closeOnce sync.Once
+	retriever  engineRetriever
+	closeFns   []func()
+	closeOnce  sync.Once
+	askTimeout time.Duration
 }
 
 // NewEngine creates a retrieval engine backed by the on-disk state.
@@ -101,6 +105,7 @@ func NewEngine(stateDir, rootDir string, cfg *config.Config) (*Engine, error) {
 			func() { _ = textIndex.Close() },
 			func() { _ = codeIndex.Close() },
 		},
+		askTimeout: defaultEngineAskTimeout,
 	}, nil
 }
 
@@ -149,12 +154,21 @@ func (e *Engine) Ask(question string, opts AskOptions) (*AskResult, error) {
 	if k <= 0 {
 		k = 10
 	}
+	timeout := e.askTimeout
+	if timeout <= 0 {
+		timeout = defaultEngineAskTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
 
-	res, err := e.retriever.Ask(context.Background(), question, model.SearchQuery{
+	res, err := e.retriever.Ask(ctx, question, model.SearchQuery{
 		Query: question,
 		K:     k,
 	})
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return nil, fmt.Errorf("ask timed out after %s: %w", timeout, context.DeadlineExceeded)
+		}
 		return nil, err
 	}
 
