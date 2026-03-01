@@ -93,6 +93,8 @@ func canonicalCodeFromText(text string) string {
 		"RATE LIMIT",
 		"RATE-LIMIT",
 		"RATE_LIMIT",
+		"RATE LIMITED",
+		"RATE_LIMITED",
 		"RATE LIMIT EXCEEDED",
 		"TOO MANY REQUESTS",
 	) {
