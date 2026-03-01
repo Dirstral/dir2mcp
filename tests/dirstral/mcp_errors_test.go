@@ -139,7 +139,7 @@ func TestMCPPaymentRequiredActionableMessageWithHints(t *testing.T) {
 		case "notifications/initialized":
 			w.WriteHeader(http.StatusAccepted)
 		case "tools/call":
-			w.Header().Set("payment-required", `{"x402Version":2, "accepts":[{"amount":"100", "asset":"USD", "network":"base", "payTo":"someone", "resource":"stats"}]}`)
+			w.Header().Set(x402.HeaderPaymentRequired, `{"x402Version":2, "accepts":[{"amount":"100", "asset":"USD", "network":"base", "payTo":"someone", "resource":"stats"}]}`)
 			w.WriteHeader(http.StatusPaymentRequired)
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"jsonrpc": "2.0",
