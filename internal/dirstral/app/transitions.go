@@ -1,10 +1,9 @@
 package app
 
 import (
-	"os"
-	"strings"
 	"time"
 
+	"dir2mcp/internal/dirstral/ui"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -21,13 +20,7 @@ type tipTickMsg struct{}
 
 // animationsEnabled returns false when NO_COLOR is set or TERM=dumb.
 func animationsEnabled() bool {
-	if os.Getenv("NO_COLOR") != "" {
-		return false
-	}
-	if strings.ToLower(os.Getenv("TERM")) == "dumb" {
-		return false
-	}
-	return true
+	return ui.Enabled()
 }
 
 // tickReveal returns a tea.Cmd that fires a revealTickMsg after the delay.
