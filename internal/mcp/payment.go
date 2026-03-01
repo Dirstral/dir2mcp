@@ -194,5 +194,5 @@ func (s *Server) appendPaymentLog(event string, data map[string]interface{}) {
 	defer func() {
 		_ = f.Close()
 	}()
-	_, _ = f.WriteString(fmt.Sprintf("%s\n", string(raw)))
+	_, _ = fmt.Fprintf(f, "%s\n", raw)
 }
