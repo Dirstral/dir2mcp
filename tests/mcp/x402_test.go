@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"dir2mcp/internal/config"
 	"dir2mcp/internal/mcp"
@@ -279,8 +280,8 @@ func TestX402ToolsCall_SettleRetryReplaysCachedOutcomeWithoutReexecution(t *test
 	})
 	defer func() { _ = first.Body.Close() }()
 	assertRPCErrorCodeAndRetryable(t, first, http.StatusServiceUnavailable, "PAYMENT_SETTLEMENT_UNAVAILABLE", true)
-	if retriever.searchCalls != 1 {
-		t.Fatalf("search calls after first request=%d want=1", retriever.searchCalls)
+	if retriever.searchCalls.Load() != 1 {
+		t.Fatalf("search calls after first request=%d want=1", retriever.searchCalls.Load())
 	}
 
 	second := postRPCWithHeaders(t, server.URL+cfg.MCPPath, sessionID, body, map[string]string{
@@ -294,8 +295,8 @@ func TestX402ToolsCall_SettleRetryReplaysCachedOutcomeWithoutReexecution(t *test
 	if strings.TrimSpace(second.Header.Get("PAYMENT-RESPONSE")) == "" {
 		t.Fatal("expected PAYMENT-RESPONSE header after successful retry settlement")
 	}
-	if retriever.searchCalls != 1 {
-		t.Fatalf("search calls after retry=%d want=1 (must replay cached outcome)", retriever.searchCalls)
+	if retriever.searchCalls.Load() != 1 {
+		t.Fatalf("search calls after retry=%d want=1 (must replay cached outcome)", retriever.searchCalls.Load())
 	}
 	if fac.settleCalls.Load() != 2 {
 		t.Fatalf("settle calls=%d want=2", fac.settleCalls.Load())
@@ -330,7 +331,8 @@ func postRPCWithHeaders(t *testing.T, url, sessionID, body string, headers map[s
 		req.Header.Set(k, v)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatalf("do request: %v", err)
 	}
@@ -444,11 +446,11 @@ func (f *facilitatorStub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 type countingSearchRetriever struct {
-	searchCalls int
+	searchCalls atomic.Int64
 }
 
 func (r *countingSearchRetriever) Search(_ context.Context, _ model.SearchQuery) ([]model.SearchHit, error) {
-	r.searchCalls++
+	r.searchCalls.Add(1)
 	return []model.SearchHit{}, nil
 }
 

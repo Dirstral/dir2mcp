@@ -1,7 +1,9 @@
 package mcp
 
 import (
+	"bufio"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +11,13 @@ import (
 
 	"dir2mcp/internal/config"
 )
+
+// badWriter implements io.Writer but always returns an error. It is used to
+// trigger a flush failure inside Server.Close during testing.
+
+type badWriter struct{}
+
+func (badWriter) Write(p []byte) (int, error) { return 0, errors.New("write failure") }
 
 func TestAppendPaymentLogCachingAndClose(t *testing.T) {
 	// create a temp state dir to hold the log
@@ -50,8 +59,46 @@ func TestAppendPaymentLogCachingAndClose(t *testing.T) {
 		if err := json.Unmarshal([]byte(line), &entry); err != nil {
 			t.Fatalf("line %d is not valid json: %v", i+1, err)
 		}
-		if entry["event"] == "" {
+		if entry["event"] == nil {
 			t.Fatalf("line %d missing event field", i+1)
 		}
+	}
+}
+
+func TestCloseErrorsPropagated(t *testing.T) {
+	// create a server and manually assign a writer that will return an error
+	// when flushed and a file that is already closed so Close() on it fails.
+	tmp := t.TempDir()
+	cfg := config.Default()
+	cfg.AuthMode = "none"
+
+	s := NewServer(cfg, nil)
+
+	// failing writer: underlying writer always returns an error.  Write a
+	// byte so that Flush() will attempt to write it and trigger the error.
+	s.paymentLogWriter = bufio.NewWriter(badWriter{})
+	_, _ = s.paymentLogWriter.Write([]byte("x"))
+
+	// prepare a file and close it immediately to force a close error later
+	f, err := os.Create(filepath.Join(tmp, "dummy"))
+	if err != nil {
+		t.Fatalf("failed to create dummy file: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("failed to close dummy file: %v", err)
+	}
+	// f is now closed; calling Close again yields an error
+	s.paymentLogFile = f
+
+	err = s.Close()
+	if err == nil {
+		t.Fatalf("expected error from Close when flush and file close fail")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "payment log flush") || !strings.Contains(msg, "payment log file close") {
+		t.Fatalf("unexpected combined error message: %s", msg)
+	}
+	if s.paymentLogWriter != nil || s.paymentLogFile != nil {
+		t.Fatalf("expected writer and file fields to be cleared after Close")
 	}
 }

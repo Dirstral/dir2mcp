@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"sync"
 	"testing"
 	"time"
 
@@ -24,7 +25,7 @@ func TestInitPaymentConfig_ModeOnIncompleteConfigDisablesGating(t *testing.T) {
 	}
 }
 
-func TestPrunePaymentOutcomesLocked_AppliesTTLAndCap(t *testing.T) {
+func TestCleanupPaymentOutcomes_AppliesTTLAndCap(t *testing.T) {
 	now := time.Now().UTC()
 
 	s := &Server{
@@ -54,5 +55,79 @@ func TestPrunePaymentOutcomesLocked_AppliesTTLAndCap(t *testing.T) {
 	}
 	if _, ok := s.paymentOutcomes["c"]; !ok {
 		t.Fatal("expected most recent outcome c to remain")
+	}
+}
+
+func TestLockForExecutionKey_SerializesAndCleansUpWithRefCounts(t *testing.T) {
+	s := &Server{execKeyMu: make(map[string]*keyMutex)}
+	key := "same-signature:same-params"
+
+	unlockA := s.lockForExecutionKey(key)
+
+	bAcquired := make(chan struct{})
+	bRelease := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		unlockB := s.lockForExecutionKey(key)
+		close(bAcquired)
+		<-bRelease
+		unlockB()
+	}()
+
+	// B has incremented ref and is waiting on A's lock.
+	time.Sleep(20 * time.Millisecond)
+	s.execMu.Lock()
+	km, ok := s.execKeyMu[key]
+	if !ok || km.ref != 2 {
+		s.execMu.Unlock()
+		ref := -1
+		if km != nil {
+			ref = km.ref
+		}
+		t.Fatalf("expected key mutex ref=2 while B waits, got ok=%v ref=%d", ok, ref)
+	}
+	s.execMu.Unlock()
+
+	unlockA()
+
+	select {
+	case <-bAcquired:
+	case <-time.After(time.Second):
+		t.Fatal("B did not acquire lock after A released")
+	}
+
+	cAcquired := make(chan struct{})
+	cRelease := make(chan struct{})
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		unlockC := s.lockForExecutionKey(key)
+		close(cAcquired)
+		<-cRelease
+		unlockC()
+	}()
+
+	// While B holds the lock, C must still be blocked on the same keyed mutex.
+	select {
+	case <-cAcquired:
+		t.Fatal("C acquired lock while B still held it; keyed exclusion broken")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(bRelease)
+	select {
+	case <-cAcquired:
+	case <-time.After(time.Second):
+		t.Fatal("C did not acquire lock after B released")
+	}
+	close(cRelease)
+	wg.Wait()
+
+	s.execMu.Lock()
+	defer s.execMu.Unlock()
+	if len(s.execKeyMu) != 0 {
+		t.Fatalf("expected key mutex map to be empty after all unlocks, got %d entries", len(s.execKeyMu))
 	}
 }

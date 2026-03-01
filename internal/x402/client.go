@@ -116,7 +116,6 @@ func (c *HTTPClient) do(ctx context.Context, operation, paymentSignature string,
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
-		retryable := true
 		code := CodePaymentFacilitatorUnavailable
 		if operation == "settle" {
 			code = CodePaymentSettlementUnavailable
@@ -125,7 +124,7 @@ func (c *HTTPClient) do(ctx context.Context, operation, paymentSignature string,
 			Operation: operation,
 			Code:      code,
 			Message:   "facilitator request failed",
-			Retryable: retryable,
+			Retryable: true,
 			Cause:     err,
 		}
 	}
@@ -133,7 +132,20 @@ func (c *HTTPClient) do(ctx context.Context, operation, paymentSignature string,
 		_ = resp.Body.Close()
 	}()
 
-	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		// reading the response failed; wrap in a FacilitatorError so callers
+		// can handle it like other transport-level failures.  This situation
+		// is unlikely but we treat it as retryable since it usually indicates
+		// a transient network or server problem.
+		return nil, &FacilitatorError{
+			Operation: operation,
+			Code:      CodePaymentFacilitatorUnavailable,
+			Message:   "failed to read facilitator response",
+			Retryable: true,
+			Cause:     err,
+		}
+	}
 	normalized := normalizeResponsePayload(respBody)
 
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {

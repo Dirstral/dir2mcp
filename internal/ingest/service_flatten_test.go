@@ -28,10 +28,6 @@ func TestFlattenJSONForIndexing_MapAndArray(t *testing.T) {
 			t.Errorf("expected flattened output to contain %q, got %q", frag, out)
 		}
 	}
-	if t.Failed() {
-		// ensure the test exits non-successfully after reporting all missing fragments
-		t.FailNow()
-	}
 }
 
 func TestFlattenJSONForIndexing_MarshalErrorFallback(t *testing.T) {

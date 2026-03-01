@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log"
 	"math"
 	"net/http"
 	"os"
@@ -36,6 +37,14 @@ const (
 	defaultSTTProvider    = "mistral"
 	defaultSTTModel       = "voxtral-mini-latest"
 	defaultChatModel      = mistral.DefaultChatModel
+
+	// maximum combined character count of schema+text+prompt instructions
+	// that will be sent to the Mistral client.  If an annotate request
+	// creates a longer prompt we reject it rather than relying on the
+	// provider to fail; this helps make errors predictable and avoids
+	// accidental OOMs or context-length errors coming back from the
+	// remote API.  The value is intentionally generous but still bounded.
+	maxMistralContextChars = 200000
 )
 
 var toolOrder = []string{
@@ -964,7 +973,7 @@ func (s *Server) handleTranscribeTool(ctx context.Context, args map[string]inter
 	if strings.TrimSpace(language) != "" {
 		retranscribe = true
 	}
-	transcript, transcribed, toolErr := s.ensureTranscriptForAudioDoc(ctx, doc, retranscribe, language)
+	transcript, transcribed, indexed, toolErr := s.ensureTranscriptForAudioDoc(ctx, doc, retranscribe, language)
 	if toolErr != nil {
 		return toolCallResult{}, toolErr
 	}
@@ -984,7 +993,7 @@ func (s *Server) handleTranscribeTool(ctx context.Context, args map[string]inter
 		"rel_path":    relPath,
 		"provider":    defaultSTTProvider,
 		"model":       defaultSTTModel,
-		"indexed":     true,
+		"indexed":     indexed,
 		"segments":    segments,
 		"transcribed": transcribed,
 	}
@@ -1057,7 +1066,18 @@ func (s *Server) handleAnnotateTool(ctx context.Context, args map[string]interfa
 		return toolCallResult{}, toolErr
 	}
 
-	schemaBytes, _ := json.Marshal(schemaJSON)
+	schemaBytes, err := json.Marshal(schemaJSON)
+	if err != nil {
+		// schemaJSON should be a valid object but if marshaling fails we
+		// can't safely include it in the prompt.  Fail early with a
+		// descriptive error rather than sending malformed JSON to the
+		// model.
+		return toolCallResult{}, &toolExecutionError{
+			Code:      "ANNOTATE_FAILED",
+			Message:   fmt.Sprintf("failed to marshal schema JSON: %v", err),
+			Retryable: false,
+		}
+	}
 	prompt := strings.Join([]string{
 		"Extract a JSON object that strictly conforms to this schema:",
 		string(schemaBytes),
@@ -1065,6 +1085,18 @@ func (s *Server) handleAnnotateTool(ctx context.Context, args map[string]interfa
 		"Document content:",
 		sourceText,
 	}, "\n\n")
+
+	// guard against overly large inputs that would blow past the model's
+	// context window.  We compute the rune count of the prompt because the
+	// provider limits are generally character‑based; using bytes could be
+	// slightly off when multi‑byte UTF‑8 is involved, but the constant is
+	// high enough that differences don't matter.  If the prompt is too long
+	// we fail with a mapped tool error rather than invoking client.Generate
+	// which would likely return a provider error.
+	if len([]rune(prompt)) > maxMistralContextChars {
+		return toolCallResult{}, mapToolErrorFromProvider("ANNOTATE_FAILED",
+			fmt.Errorf("prompt length %d exceeds max context %d", len([]rune(prompt)), maxMistralContextChars))
+	}
 
 	generated, genErr := client.Generate(ctx, prompt)
 	if genErr != nil {
@@ -1149,7 +1181,7 @@ func (s *Server) handleTranscribeAndAskTool(ctx context.Context, args map[string
 	if doc.DocType != "audio" {
 		return toolCallResult{}, &toolExecutionError{Code: "DOC_TYPE_UNSUPPORTED", Message: "document is not audio", Retryable: false}
 	}
-	_, transcribed, toolErr := s.ensureTranscriptForAudioDoc(ctx, doc, false, "")
+	_, transcribed, _, toolErr := s.ensureTranscriptForAudioDoc(ctx, doc, false, "")
 	if toolErr != nil {
 		return toolCallResult{}, toolErr
 	}
@@ -1401,16 +1433,16 @@ func (s *Server) lookupDocumentForTool(ctx context.Context, relPath string) (mod
 	return doc, nil
 }
 
-func (s *Server) ensureTranscriptForAudioDoc(ctx context.Context, doc model.Document, retranscribe bool, language string) (string, bool, *toolExecutionError) {
+func (s *Server) ensureTranscriptForAudioDoc(ctx context.Context, doc model.Document, retranscribe bool, language string) (string, bool, bool, *toolExecutionError) {
 	content, err := s.readDocumentContent(doc.RelPath)
 	if err != nil {
 		switch {
 		case errors.Is(err, os.ErrNotExist):
-			return "", false, &toolExecutionError{Code: "NOT_FOUND", Message: "file not found", Retryable: false}
+			return "", false, false, &toolExecutionError{Code: "NOT_FOUND", Message: "file not found", Retryable: false}
 		case errors.Is(err, model.ErrPathOutsideRoot):
-			return "", false, &toolExecutionError{Code: "PATH_OUTSIDE_ROOT", Message: err.Error(), Retryable: false}
+			return "", false, false, &toolExecutionError{Code: "PATH_OUTSIDE_ROOT", Message: err.Error(), Retryable: false}
 		default:
-			return "", false, &toolExecutionError{Code: "FORBIDDEN", Message: err.Error(), Retryable: false}
+			return "", false, false, &toolExecutionError{Code: "FORBIDDEN", Message: err.Error(), Retryable: false}
 		}
 	}
 
@@ -1422,34 +1454,43 @@ func (s *Server) ensureTranscriptForAudioDoc(ctx context.Context, doc model.Docu
 	if retranscribe {
 		cacheExisted = false
 		if rmErr := os.Remove(cachePath); rmErr != nil && !errors.Is(rmErr, fs.ErrNotExist) {
-			return "", false, &toolExecutionError{Code: "STORE_CORRUPT", Message: fmt.Sprintf("remove transcript cache: %v", rmErr), Retryable: false}
+			return "", false, false, &toolExecutionError{Code: "STORE_CORRUPT", Message: fmt.Sprintf("remove transcript cache: %v", rmErr), Retryable: false}
 		}
 	}
 
 	client, toolErr := s.newMistralClient()
 	if toolErr != nil {
-		return "", false, toolErr
+		return "", false, false, toolErr
 	}
 	if strings.TrimSpace(language) != "" {
 		client.DefaultTranscribeLanguage = strings.TrimSpace(language)
 	}
 	ing := ingest.NewService(s.cfg, s.store)
 	ing.SetTranscriber(client)
-	if genErr := ing.GenerateTranscriptRepresentation(ctx, doc, content); genErr != nil {
-		return "", false, mapToolErrorFromProvider("TRANSCRIBE_FAILED", genErr)
-	}
 
+	// generate transcript text first so we can accurately determine whether
+	// there is anything worth indexing.
 	transcript, readErr := ing.ReadOrComputeTranscript(ctx, doc, content)
 	if readErr != nil {
-		return "", false, mapToolErrorFromProvider("TRANSCRIBE_FAILED", readErr)
+		return "", false, false, mapToolErrorFromProvider("TRANSCRIBE_FAILED", readErr)
 	}
-	return transcript, !cacheExisted, nil
+
+	indexed := false
+	if strings.TrimSpace(transcript) != "" {
+		// only attempt to persist a representation when we actually have text
+		if genErr := ing.GenerateTranscriptRepresentation(ctx, doc, content); genErr != nil {
+			return "", false, false, mapToolErrorFromProvider("TRANSCRIBE_FAILED", genErr)
+		}
+		indexed = true
+	}
+
+	return transcript, !cacheExisted, indexed, nil
 }
 
 func (s *Server) sourceTextForAnnotation(ctx context.Context, doc model.Document) (string, string, *toolExecutionError) {
 	switch doc.DocType {
 	case "audio":
-		text, _, toolErr := s.ensureTranscriptForAudioDoc(ctx, doc, false, "")
+		text, _, _, toolErr := s.ensureTranscriptForAudioDoc(ctx, doc, false, "")
 		if toolErr != nil {
 			return "", "", toolErr
 		}
@@ -1587,15 +1628,19 @@ func mapToolErrorFromProvider(defaultCode string, err error) *toolExecutionError
 		}
 	}
 	if errors.Is(err, ingest.ErrTranscriptProviderFailure) {
+		// provider failure is retriable but we avoid returning raw details
+		log.Printf("transcript provider failure: %v", err)
 		return &toolExecutionError{
 			Code:      defaultCode,
-			Message:   err.Error(),
+			Message:   "transcript provider failure",
 			Retryable: true,
 		}
 	}
+	// generic fallback: log full error and return a sanitized message
+	log.Printf("tool error [%s]: %v", defaultCode, err)
 	return &toolExecutionError{
 		Code:      defaultCode,
-		Message:   err.Error(),
+		Message:   "internal server error",
 		Retryable: false,
 	}
 }
@@ -2053,17 +2098,46 @@ func transcribeAndAskInputSchema() map[string]interface{} {
 }
 
 func transcribeAndAskOutputSchema() map[string]interface{} {
-	schema := askOutputSchema()
-	properties, ok := schema["properties"].(map[string]interface{})
-	if !ok {
+	orig := askOutputSchema()
+	// make a shallow copy of the top‑level map
+	schema := make(map[string]interface{}, len(orig))
+	for k, v := range orig {
+		schema[k] = v
+	}
+
+	// copy properties map so we don't mutate orig
+	properties := make(map[string]interface{})
+	if origProps, ok := orig["properties"].(map[string]interface{}); ok {
+		for k, v := range origProps {
+			properties[k] = v
+		}
+	} else {
+		// unexpected shape; fallback to asking again which will create a
+		// new safe schema
 		return askOutputSchema()
 	}
+
 	properties["transcript_provider"] = map[string]interface{}{"type": "string", "enum": []string{"mistral", "elevenlabs"}}
 	properties["transcript_model"] = map[string]interface{}{"type": "string"}
 	properties["transcribed"] = map[string]interface{}{"type": "boolean"}
-	if required, ok := schema["required"].([]string); ok {
-		schema["required"] = append(required, "transcript_provider", "transcript_model", "transcribed")
+	schema["properties"] = properties
+
+	// handle required list; original is usually []string
+	var requiredSlice []string
+	if req, ok := orig["required"].([]string); ok {
+		requiredSlice = append([]string(nil), req...)
+	} else if reqIface, ok := orig["required"].([]interface{}); ok {
+		for _, v := range reqIface {
+			if s, ok := v.(string); ok {
+				requiredSlice = append(requiredSlice, s)
+			}
+		}
 	}
+	if len(requiredSlice) > 0 {
+		requiredSlice = append(requiredSlice, "transcript_provider", "transcript_model", "transcribed")
+		schema["required"] = requiredSlice
+	}
+
 	return schema
 }
 

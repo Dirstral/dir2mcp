@@ -1053,7 +1053,13 @@ func (s *Service) flattenJSONForIndexing(v interface{}) string {
 	walk("", v)
 	out := strings.TrimSpace(strings.Join(lines, "\n"))
 	if out == "" {
-		raw, _ := json.Marshal(v)
+		raw, err := json.Marshal(v)
+		if err != nil {
+			// log marshal failure so that debugging can surface problematic
+			// values; we don't abort since the caller just wants a string
+			// representation and returning an empty string is acceptable.
+			s.getLogger().Printf("flattenJSONForIndexing: fallback json.Marshal failed error=%v value=%#v", err, v)
+		}
 		return string(raw)
 	}
 	return out

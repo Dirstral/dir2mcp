@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"math/big"
 	"net"
 	"net/url"
 	"os"
@@ -781,7 +782,19 @@ func (c Config) ValidateX402(strict bool) error {
 		return fmt.Errorf("invalid x402 mode: %s", c.X402.Mode)
 	}
 
-	if mode == "off" || !c.X402.ToolsCallEnabled {
+	// if tools calls are disabled we only accept mode "off"; any other
+	// value implies an inconsistent configuration and should fail. this
+	// prevents a situation where Mode="required" but the gating flag is
+	// turned off, which would otherwise quietly bypass validation.
+	if !c.X402.ToolsCallEnabled {
+		if mode != "off" {
+			return fmt.Errorf("x402 mode %q requires ToolsCallEnabled=true", c.X402.Mode)
+		}
+		return nil
+	}
+	// at this point tools-call is enabled; if the mode is "off" we can
+	// short-circuit and skip the remaining checks.
+	if mode == "off" {
 		return nil
 	}
 
@@ -810,8 +823,14 @@ func (c Config) ValidateX402(strict bool) error {
 	if strings.TrimSpace(c.X402.ResourceBaseURL) == "" {
 		return fmt.Errorf("x402 resource base URL is required")
 	}
-	if strings.TrimSpace(c.X402.PriceAtomic) == "" {
+	priceStr := strings.TrimSpace(c.X402.PriceAtomic)
+	if priceStr == "" {
 		return fmt.Errorf("x402 price is required")
+	}
+	// ensure price is a non-negative integer
+	price := new(big.Int)
+	if _, ok := price.SetString(priceStr, 10); !ok || price.Sign() < 0 {
+		return fmt.Errorf("x402 price must be a non-negative integer")
 	}
 	if strings.TrimSpace(c.X402.Scheme) == "" {
 		return fmt.Errorf("x402 scheme is required")

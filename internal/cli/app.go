@@ -433,7 +433,8 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 		writef(a.stderr, "create state dir: %v\n", err)
 		return exitRootInaccessible
 	}
-	if !strings.EqualFold(strings.TrimSpace(cfg.X402.Mode), "off") {
+	mode := strings.TrimSpace(cfg.X402.Mode)
+	if mode != "" && !strings.EqualFold(mode, "off") {
 		if err := os.MkdirAll(filepath.Join(cfg.StateDir, "payments"), 0o755); err != nil {
 			writef(a.stderr, "create payments dir: %v\n", err)
 			return exitRootInaccessible

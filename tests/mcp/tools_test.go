@@ -104,7 +104,6 @@ func TestMCPToolsCallTranscribe_MissingRelPath(t *testing.T) {
 
 func TestMCPToolsCallTranscribe_ProviderFailureIsRetryable(t *testing.T) {
 	cfg, st, _ := setupMCPToolStore(t, "voice.wav", "audio", []byte("RIFF0000WAVEfmt data"))
-	cfg.AuthMode = "none"
 	cfg.MistralAPIKey = "test-key"
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -166,7 +165,6 @@ func TestMCPToolsCallTranscribe_ProviderFailureIsRetryable(t *testing.T) {
 
 func TestMCPToolsCallTranscribe_Success(t *testing.T) {
 	cfg, st, _ := setupMCPToolStore(t, "voice.wav", "audio", []byte("RIFF0000WAVEfmt data"))
-	cfg.AuthMode = "none"
 	cfg.MistralAPIKey = "test-key"
 	var gotLanguage string
 
@@ -228,11 +226,13 @@ func TestMCPToolsCallTranscribe_Success(t *testing.T) {
 	if got, ok := envelope.Result.StructuredContent["transcribed"].(bool); !ok || !got {
 		t.Fatalf("expected transcribed=true, got %#v", envelope.Result.StructuredContent["transcribed"])
 	}
+	if got, ok := envelope.Result.StructuredContent["indexed"].(bool); !ok || !got {
+		t.Fatalf("expected indexed=true, got %#v", envelope.Result.StructuredContent["indexed"])
+	}
 }
 
 func TestMCPToolsCallAnnotate_MissingSchema(t *testing.T) {
 	cfg, st, _ := setupMCPToolStore(t, "note.txt", "text", []byte("alpha note"))
-	cfg.AuthMode = "none"
 	server := httptest.NewServer(mcp.NewServer(cfg, nil, mcp.WithStore(st)).Handler())
 	defer server.Close()
 
@@ -244,7 +244,6 @@ func TestMCPToolsCallAnnotate_MissingSchema(t *testing.T) {
 
 func TestMCPToolsCallAnnotate_ProviderFailure(t *testing.T) {
 	cfg, st, _ := setupMCPToolStore(t, "note.txt", "text", []byte("alpha note"))
-	cfg.AuthMode = "none"
 	cfg.MistralAPIKey = "test-key"
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -268,7 +267,6 @@ func TestMCPToolsCallAnnotate_ProviderFailure(t *testing.T) {
 
 func TestMCPToolsCallAnnotate_Success(t *testing.T) {
 	cfg, st, _ := setupMCPToolStore(t, "note.txt", "text", []byte("alpha note"))
-	cfg.AuthMode = "none"
 	cfg.MistralAPIKey = "test-key"
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -316,6 +314,27 @@ func TestMCPToolsCallAnnotate_Success(t *testing.T) {
 	}
 }
 
+func TestMCPToolsCallAnnotate_PromptTooLarge(t *testing.T) {
+	cfg, st, _ := setupMCPToolStore(t, "note.txt", "text", []byte("small"))
+	cfg.AuthMode = "none"
+	cfg.MistralAPIKey = "test-key"
+
+	server := httptest.NewServer(mcp.NewServer(cfg, nil, mcp.WithStore(st)).Handler())
+	defer server.Close()
+
+	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
+	// create a ridiculously large schema to push prompt over our hard limit
+	bigSchema := map[string]interface{}{"foo": strings.Repeat("x", 250000)}
+	schemaBytes, err := json.Marshal(bigSchema)
+	if err != nil {
+		t.Fatalf("marshal schema: %v", err)
+	}
+	rpc := fmt.Sprintf(`{"jsonrpc":"2.0","id":40,"method":"tools/call","params":{"name":"dir2mcp.annotate","arguments":{"rel_path":"note.txt","schema_json":%s}}}`, string(schemaBytes))
+	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, rpc)
+	defer func() { _ = resp.Body.Close() }()
+	assertToolCallErrorCode(t, resp, "ANNOTATE_FAILED")
+}
+
 func TestMCPToolsCallTranscribeAndAsk_MissingQuestion(t *testing.T) {
 	cfg := config.Default()
 	cfg.AuthMode = "none"
@@ -331,7 +350,6 @@ func TestMCPToolsCallTranscribeAndAsk_MissingQuestion(t *testing.T) {
 
 func TestMCPToolsCallTranscribeAndAsk_Success(t *testing.T) {
 	cfg, st, _ := setupMCPToolStore(t, "voice.wav", "audio", []byte("RIFF0000WAVEfmt data"))
-	cfg.AuthMode = "none"
 	cfg.MistralAPIKey = "test-key"
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

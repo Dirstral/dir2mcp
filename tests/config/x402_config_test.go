@@ -80,6 +80,20 @@ x402_resource_base_url: https://resource.example.com
 	})
 }
 
+func TestValidateX402_ModeWithToolsDisabled(t *testing.T) {
+	cfg := config.Default()
+	cfg.X402.Mode = "required" // mode says we need X402
+	cfg.X402.ToolsCallEnabled = false
+	// other fields irrelevant because validation should fail early
+	err := cfg.ValidateX402(true)
+	if err == nil {
+		t.Fatal("expected validation error when tools call disabled but mode is not off")
+	}
+	if !strings.Contains(err.Error(), "ToolsCallEnabled") {
+		t.Fatalf("error message did not mention ToolsCallEnabled: %v", err)
+	}
+}
+
 func TestValidateX402_InvalidNetwork(t *testing.T) {
 	cfg := config.Default()
 	cfg.X402.Mode = "required" // enable validation path
@@ -98,5 +112,43 @@ func TestValidateX402_InvalidNetwork(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "CAIP-2") {
 		t.Fatalf("expected CAIP-2 validation error, got: %v", err)
+	}
+}
+
+func TestValidateX402_PriceMustBeNonNegativeInteger(t *testing.T) {
+	cfg := config.Default()
+	cfg.X402.Mode = "required"
+	cfg.X402.ToolsCallEnabled = true
+	cfg.X402.FacilitatorURL = "https://facilitator.example.com"
+	cfg.X402.ResourceBaseURL = "https://resource.example.com"
+	cfg.X402.Scheme = "exact"
+	cfg.X402.Network = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp" // valid CAIP-2
+	cfg.X402.Asset = "asset"
+	cfg.X402.PayTo = "payto"
+
+	for _, bad := range []string{"", "abc", "-100"} {
+		cfg.X402.PriceAtomic = bad
+		err := cfg.ValidateX402(true)
+		if err == nil {
+			t.Fatalf("price %q should have failed validation", bad)
+		}
+		if bad == "" {
+			if !strings.Contains(err.Error(), "required") {
+				t.Fatalf("empty price produced wrong error: %v", err)
+			}
+		} else {
+			if !strings.Contains(err.Error(), "non-negative integer") {
+				t.Fatalf("unexpected error message for price %q: %v", bad, err)
+			}
+		}
+	}
+
+	cfg.X402.PriceAtomic = "0"
+	if err := cfg.ValidateX402(true); err != nil {
+		t.Fatalf("expected price 0 to be valid, got %v", err)
+	}
+	cfg.X402.PriceAtomic = "12345"
+	if err := cfg.ValidateX402(true); err != nil {
+		t.Fatalf("expected positive price to be valid, got %v", err)
 	}
 }

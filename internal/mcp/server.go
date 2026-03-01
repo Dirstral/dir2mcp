@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -75,7 +76,7 @@ type Server struct {
 	// per-execution-key locks used to serialize payment handling for identical
 	// signatures+params.  Map is protected by execMu.
 	execMu    sync.Mutex
-	execKeyMu map[string]*sync.Mutex
+	execKeyMu map[string]*keyMutex
 
 	eventEmitter func(level, event string, data interface{})
 }
@@ -153,7 +154,7 @@ func NewServer(cfg config.Config, retriever model.Retriever, opts ...ServerOptio
 		paymentOutcomes: make(map[string]paymentExecutionOutcome),
 		paymentTTL:      paymentOutcomeTTL,
 		paymentMaxItems: paymentOutcomeMaxEntries,
-		execKeyMu:       make(map[string]*sync.Mutex),
+		execKeyMu:       make(map[string]*keyMutex),
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -702,17 +703,31 @@ func isOriginAllowed(origin string, allowlist []string) bool {
 
 // Close flushes and closes any cached payment log writer/file. It is safe to call
 // multiple times and may be used during server shutdown to ensure durability.
+//
+// The previous implementation ignored the error returned by Flush; this method
+// now captures that error and combines it with any error from closing the
+// underlying file. Both writer and file are cleared under the mutex regardless
+// of error, and a combined error is returned if either operation fails.
 func (s *Server) Close() error {
 	s.paymentLogMu.Lock()
 	defer s.paymentLogMu.Unlock()
+
+	var firstErr error
 	if s.paymentLogWriter != nil {
-		_ = s.paymentLogWriter.Flush()
+		if err := s.paymentLogWriter.Flush(); err != nil {
+			firstErr = fmt.Errorf("payment log flush: %w", err)
+		}
 		s.paymentLogWriter = nil
 	}
 	if s.paymentLogFile != nil {
-		err := s.paymentLogFile.Close()
+		if err := s.paymentLogFile.Close(); err != nil {
+			if firstErr != nil {
+				firstErr = fmt.Errorf("%v; payment log file close: %w", firstErr, err)
+			} else {
+				firstErr = fmt.Errorf("payment log file close: %w", err)
+			}
+		}
 		s.paymentLogFile = nil
-		return err
 	}
-	return nil
+	return firstErr
 }
