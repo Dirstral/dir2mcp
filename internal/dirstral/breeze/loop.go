@@ -107,34 +107,34 @@ func (p heuristicPlanner) Plan(input string) (TurnPlan, error) {
 			return TurnPlan{}, fmt.Errorf("usage: /open <rel_path>")
 		}
 		return TurnPlan{Steps: []PlanStep{{Tool: protocol.ToolNameOpenFile, Args: map[string]any{"rel_path": args[0]}}}}, nil
-	case strings.HasPrefix(trimmed, "/transcribe "):
+	case strings.HasPrefix(trimmed, "/transcribe_and_ask"):
+		args := strings.TrimSpace(strings.TrimPrefix(trimmed, "/transcribe_and_ask"))
+		parts := strings.Fields(args)
+		if len(parts) < 2 {
+			return TurnPlan{}, fmt.Errorf("usage: /transcribe_and_ask <rel_path> <question>")
+		}
+		path := parts[0]
+		question := strings.TrimSpace(strings.TrimPrefix(args, path))
+		return TurnPlan{Steps: []PlanStep{{Tool: protocol.ToolNameTranscribeAndAsk, Args: map[string]any{"rel_path": path, "question": question, "k": p.profile.AskTopK}}}}, nil
+	case strings.HasPrefix(trimmed, "/transcribe"):
 		path := strings.TrimSpace(strings.TrimPrefix(trimmed, "/transcribe"))
 		if path == "" {
 			return TurnPlan{}, fmt.Errorf("usage: /transcribe <rel_path>")
 		}
 		return TurnPlan{Steps: []PlanStep{{Tool: protocol.ToolNameTranscribe, Args: map[string]any{"rel_path": path}}}}, nil
-	case strings.HasPrefix(trimmed, "/annotate "):
+	case strings.HasPrefix(trimmed, "/annotate"):
 		args := strings.TrimSpace(strings.TrimPrefix(trimmed, "/annotate"))
-		parts := strings.SplitN(args, " ", 2)
+		parts := strings.Fields(args)
 		if len(parts) < 2 {
 			return TurnPlan{}, fmt.Errorf("usage: /annotate <rel_path> <schema_json>")
 		}
 		path := parts[0]
-		schemaStr := strings.TrimSpace(parts[1])
+		schemaStr := strings.TrimSpace(strings.TrimPrefix(args, path))
 		var schema map[string]any
 		if err := json.Unmarshal([]byte(schemaStr), &schema); err != nil {
 			return TurnPlan{}, fmt.Errorf("invalid schema json: %w", err)
 		}
 		return TurnPlan{Steps: []PlanStep{{Tool: protocol.ToolNameAnnotate, Args: map[string]any{"rel_path": path, "schema_json": schema}}}}, nil
-	case strings.HasPrefix(trimmed, "/transcribe_and_ask "):
-		args := strings.TrimSpace(strings.TrimPrefix(trimmed, "/transcribe_and_ask"))
-		parts := strings.SplitN(args, " ", 2)
-		if len(parts) < 2 {
-			return TurnPlan{}, fmt.Errorf("usage: /transcribe_and_ask <rel_path> <question>")
-		}
-		path := parts[0]
-		question := strings.TrimSpace(parts[1])
-		return TurnPlan{Steps: []PlanStep{{Tool: protocol.ToolNameTranscribeAndAsk, Args: map[string]any{"rel_path": path, "question": question, "k": p.profile.AskTopK}}}}, nil
 	default:
 		steps := make([]PlanStep, 0, 2)
 		if p.profile.UseSearchFirst {
