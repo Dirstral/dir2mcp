@@ -843,7 +843,7 @@ func pad2(n int) string {
 }
 
 func (c *Client) generateWithRetry(ctx context.Context, prompt string) (string, error) {
-	maxAttempts := c.MaxRetries
+	maxAttempts := c.MaxRetries + 1
 	if maxAttempts <= 0 {
 		maxAttempts = 1
 	}
