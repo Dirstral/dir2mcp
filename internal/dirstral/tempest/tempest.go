@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -58,6 +59,8 @@ func Run(ctx context.Context, opts Options) error {
 	return nil
 }
 
+// recordAudio writes a temporary WAV file and returns its path.
+// Callers are responsible for removing the returned file.
 func recordAudio(ctx context.Context, device string) (string, error) {
 	out := filepath.Join(os.TempDir(), fmt.Sprintf("dirstral-%d.wav", time.Now().UnixNano()))
 	var attempts [][]string
@@ -219,23 +222,79 @@ func listMacInputDevices() ([]string, error) {
 		}
 	}
 	lines := strings.Split(string(out), "\n")
-	devices := []string{}
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if !strings.Contains(line, "AVFoundation input device") {
-			continue
-		}
-		open := strings.Index(line, "] ")
-		if open == -1 || open+2 >= len(line) {
-			continue
-		}
-		name := strings.TrimSpace(line[open+2:])
-		if name != "" {
-			devices = append(devices, name)
-		}
+	devices := parseMacDevicesPrimary(lines)
+	if len(devices) == 0 {
+		devices = parseMacDevicesFallback(lines)
 	}
 	if len(devices) == 0 {
 		return nil, fmt.Errorf("no input devices found")
 	}
 	return devices, nil
+}
+
+func parseMacDevicesPrimary(lines []string) []string {
+	quotedName := regexp.MustCompile(`"([^"]+)"`)
+	indexedName := regexp.MustCompile(`\[(\d+)\]\s*(.+)$`)
+	devices := make([]string, 0)
+	seen := map[string]bool{}
+
+	for _, raw := range lines {
+		line := strings.TrimSpace(raw)
+		if !strings.Contains(line, "AVFoundation input device") {
+			continue
+		}
+
+		if match := quotedName.FindStringSubmatch(line); len(match) == 2 {
+			name := strings.TrimSpace(match[1])
+			if name != "" && !seen[name] {
+				seen[name] = true
+				devices = append(devices, name)
+			}
+			continue
+		}
+
+		if match := indexedName.FindStringSubmatch(line); len(match) == 3 {
+			name := strings.TrimSpace(match[2])
+			if name != "" && !seen[name] {
+				seen[name] = true
+				devices = append(devices, name)
+			}
+		}
+	}
+
+	return devices
+}
+
+func parseMacDevicesFallback(lines []string) []string {
+	devices := make([]string, 0)
+	seen := map[string]bool{}
+
+	for _, raw := range lines {
+		line := strings.TrimSpace(raw)
+		if !strings.Contains(strings.ToLower(line), "input device") {
+			continue
+		}
+
+		if idx := strings.LastIndex(line, "]"); idx >= 0 && idx+1 < len(line) {
+			line = strings.TrimSpace(line[idx+1:])
+		}
+		line = strings.TrimSpace(strings.Trim(line, `"'`))
+		if line == "" {
+			continue
+		}
+
+		if lower := strings.ToLower(line); strings.HasPrefix(lower, "avfoundation input device") {
+			line = strings.TrimSpace(line[len("avfoundation input device"):])
+		}
+		if line == "" {
+			continue
+		}
+
+		if !seen[line] {
+			seen[line] = true
+			devices = append(devices, line)
+		}
+	}
+
+	return devices
 }
