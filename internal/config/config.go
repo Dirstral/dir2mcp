@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"dir2mcp/internal/mistral"
 )
@@ -87,6 +88,13 @@ type Config struct {
 	// DIR2MCP_CHAT_MODEL also affects this value.
 	ChatModel string
 
+	// SessionInactivityTimeout defines how long a session may be idle before it
+	// is considered expired.  Zero means the default hardcoded value (24h).
+	SessionInactivityTimeout time.Duration
+	// SessionMaxLifetime sets an optional absolute upper bound on a session's
+	// lifespan regardless of activity.  Zero disables this limit.
+	SessionMaxLifetime time.Duration
+
 	X402 X402Config
 }
 
@@ -110,16 +118,19 @@ type fileConfig struct {
 	AllowedOrigins       []string
 	EmbedModelText       *string
 	EmbedModelCode       *string
-	X402Mode             *string
-	X402FacilitatorURL   *string
-	X402FacilitatorToken *string
-	X402ResourceBaseURL  *string
-	X402ToolsCallEnabled *bool
-	X402PriceAtomic      *string
-	X402Network          *string
-	X402Scheme           *string
-	X402Asset            *string
-	X402PayTo            *string
+	// session timings expressed as YAML duration strings
+	SessionInactivityTimeout *time.Duration `yaml:"session_inactivity_timeout"`
+	SessionMaxLifetime       *time.Duration `yaml:"session_max_lifetime"`
+	X402Mode                 *string
+	X402FacilitatorURL       *string
+	X402FacilitatorToken     *string
+	X402ResourceBaseURL      *string
+	X402ToolsCallEnabled     *bool
+	X402PriceAtomic          *string
+	X402Network              *string
+	X402Scheme               *string
+	X402Asset                *string
+	X402PayTo                *string
 }
 
 type persistedConfig struct {
@@ -136,6 +147,9 @@ type persistedConfig struct {
 	PathExcludes    []string `yaml:"path_excludes"`
 	SecretPatterns  []string `yaml:"secret_patterns"`
 	MistralBaseURL  string   `yaml:"mistral_base_url"`
+	// optional session timeouts expressed as YAML duration strings
+	SessionInactivityTimeout time.Duration `yaml:"session_inactivity_timeout"`
+	SessionMaxLifetime       time.Duration `yaml:"session_max_lifetime"`
 
 	ElevenLabsBaseURL    string   `yaml:"elevenlabs_base_url"`
 	ElevenLabsTTSVoiceID string   `yaml:"elevenlabs_tts_voice_id"`
@@ -174,6 +188,9 @@ func Default() Config {
 		AuthMode:        "auto",
 		RateLimitRPS:    60,
 		RateLimitBurst:  20,
+		// default session inactivity matches previous hardcoded sessionTTL (24h)
+		SessionInactivityTimeout: 24 * time.Hour,
+		SessionMaxLifetime:       0,
 		TrustedProxies: []string{
 			"127.0.0.1/32",
 			"::1/128",
@@ -269,6 +286,9 @@ func SaveFile(path string, cfg Config) error {
 		X402Scheme:           cfg.X402.Scheme,
 		X402Asset:            cfg.X402.Asset,
 		X402PayTo:            cfg.X402.PayTo,
+		// session settings
+		SessionInactivityTimeout: cfg.SessionInactivityTimeout,
+		SessionMaxLifetime:       cfg.SessionMaxLifetime,
 	}
 
 	raw, err := marshalConfigYAML(serializable)
@@ -378,6 +398,12 @@ func applyFileOverrides(cfg *Config, path string) error {
 	}
 	if fileCfg.MistralBaseURL != nil {
 		cfg.MistralBaseURL = *fileCfg.MistralBaseURL
+	}
+	if fileCfg.SessionInactivityTimeout != nil {
+		cfg.SessionInactivityTimeout = *fileCfg.SessionInactivityTimeout
+	}
+	if fileCfg.SessionMaxLifetime != nil {
+		cfg.SessionMaxLifetime = *fileCfg.SessionMaxLifetime
 	}
 	if fileCfg.ElevenLabsBaseURL != nil {
 		cfg.ElevenLabsBaseURL = *fileCfg.ElevenLabsBaseURL
@@ -563,6 +589,18 @@ func setFileScalarValue(cfg *fileConfig, key, value string) error {
 		cfg.EmbedModelText = strPtr(value)
 	case "embed_model_code":
 		cfg.EmbedModelCode = strPtr(value)
+	case "session_inactivity_timeout":
+		d, err := time.ParseDuration(value)
+		if err != nil {
+			return fmt.Errorf("invalid duration for %s", key)
+		}
+		cfg.SessionInactivityTimeout = &d
+	case "session_max_lifetime":
+		d, err := time.ParseDuration(value)
+		if err != nil {
+			return fmt.Errorf("invalid duration for %s", key)
+		}
+		cfg.SessionMaxLifetime = &d
 	case "x402_mode":
 		cfg.X402Mode = strPtr(value)
 	case "x402_facilitator_url":
@@ -667,6 +705,8 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeList("path_excludes", cfg.PathExcludes)
 	writeList("secret_patterns", cfg.SecretPatterns)
 	writeScalar("mistral_base_url", cfg.MistralBaseURL)
+	writeScalar("session_inactivity_timeout", cfg.SessionInactivityTimeout.String())
+	writeScalar("session_max_lifetime", cfg.SessionMaxLifetime.String())
 	writeScalar("elevenlabs_base_url", cfg.ElevenLabsBaseURL)
 	writeScalar("elevenlabs_tts_voice_id", cfg.ElevenLabsTTSVoiceID)
 	writeList("allowed_origins", cfg.AllowedOrigins)
@@ -749,6 +789,24 @@ func applyEnvOverrides(cfg *Config, overrideEnv map[string]string) {
 	}
 	if trustedProxies, ok := envLookup("DIR2MCP_TRUSTED_PROXIES", overrideEnv); ok {
 		cfg.TrustedProxies = MergeTrustedProxies(cfg.TrustedProxies, trustedProxies)
+	}
+	// session-related environment variables are durations parsed by
+	// time.ParseDuration.  invalid values are warned but not fatal.
+	if raw, ok := envLookup("DIR2MCP_SESSION_TIMEOUT", overrideEnv); ok && strings.TrimSpace(raw) != "" {
+		d, err := time.ParseDuration(raw)
+		if err != nil {
+			cfg.Warnings = append(cfg.Warnings, fmt.Errorf("invalid duration for DIR2MCP_SESSION_TIMEOUT: %q (%v)", raw, err))
+		} else {
+			cfg.SessionInactivityTimeout = d
+		}
+	}
+	if raw, ok := envLookup("DIR2MCP_SESSION_MAX_LIFETIME", overrideEnv); ok && strings.TrimSpace(raw) != "" {
+		d, err := time.ParseDuration(raw)
+		if err != nil {
+			cfg.Warnings = append(cfg.Warnings, fmt.Errorf("invalid duration for DIR2MCP_SESSION_MAX_LIFETIME: %q (%v)", raw, err))
+		} else {
+			cfg.SessionMaxLifetime = d
+		}
 	}
 	if raw, ok := envLookup("DIR2MCP_X402_MODE", overrideEnv); ok && strings.TrimSpace(raw) != "" {
 		cfg.X402.Mode = strings.TrimSpace(raw)

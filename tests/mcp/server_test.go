@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"dir2mcp/internal/config"
 	"dir2mcp/internal/mcp"
@@ -42,6 +43,91 @@ func TestMCPInitialize_AllowsOriginWithPortWhenAllowlistOmitsPort(t *testing.T) 
 	}
 	if strings.TrimSpace(resp.Header.Get("MCP-Session-Id")) == "" {
 		t.Fatal("expected MCP-Session-Id header on initialize response")
+	}
+}
+
+func TestSessionExpiration_InactivityHeader(t *testing.T) {
+	cfg := config.Default()
+	cfg.AuthMode = "none"
+	// keep values small but with enough buffer to avoid timer-granularity
+	// flakes in CI environments.
+	cfg.SessionInactivityTimeout = 20 * time.Millisecond
+	cfg.SessionMaxLifetime = 0
+
+	server := httptest.NewServer(mcp.NewServer(cfg, nil).Handler())
+	defer server.Close()
+
+	// initialize to obtain a session id
+	body := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`
+	req, _ := http.NewRequest(http.MethodPost, server.URL+cfg.MCPPath, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do initialize: %v", err)
+	}
+	sessionID := resp.Header.Get("MCP-Session-Id")
+	_ = resp.Body.Close()
+
+	// wait comfortably past inactivity window
+	time.Sleep(100 * time.Millisecond)
+
+	// send a non-initialize request so session validation runs
+	body2 := `{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`
+	req2, _ := http.NewRequest(http.MethodPost, server.URL+cfg.MCPPath, strings.NewReader(body2))
+	req2.Header.Set("Content-Type", "application/json")
+	req2.Header.Set("MCP-Session-Id", sessionID)
+	resp2, err := http.DefaultClient.Do(req2)
+	if err != nil {
+		t.Fatalf("do second req: %v", err)
+	}
+	defer func() { _ = resp2.Body.Close() }()
+
+	if resp2.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404 on expired session, got %d", resp2.StatusCode)
+	}
+	if resp2.Header.Get("X-MCP-Session-Expired") != "inactivity" {
+		t.Fatalf("expected inactivity header, got %q", resp2.Header.Get("X-MCP-Session-Expired"))
+	}
+}
+
+func TestSessionExpiration_MaxLifetimeHeader(t *testing.T) {
+	cfg := config.Default()
+	cfg.AuthMode = "none"
+	// keep values small but with enough buffer to avoid timer-granularity
+	// flakes in CI environments.
+	cfg.SessionInactivityTimeout = 1 * time.Hour
+	cfg.SessionMaxLifetime = 20 * time.Millisecond
+
+	server := httptest.NewServer(mcp.NewServer(cfg, nil).Handler())
+	defer server.Close()
+
+	body := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`
+	req, _ := http.NewRequest(http.MethodPost, server.URL+cfg.MCPPath, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do initialize: %v", err)
+	}
+	sessionID := resp.Header.Get("MCP-Session-Id")
+	_ = resp.Body.Close()
+
+	time.Sleep(100 * time.Millisecond)
+
+	body2 := `{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`
+	req2, _ := http.NewRequest(http.MethodPost, server.URL+cfg.MCPPath, strings.NewReader(body2))
+	req2.Header.Set("Content-Type", "application/json")
+	req2.Header.Set("MCP-Session-Id", sessionID)
+	resp2, err := http.DefaultClient.Do(req2)
+	if err != nil {
+		t.Fatalf("do second req: %v", err)
+	}
+	defer func() { _ = resp2.Body.Close() }()
+
+	if resp2.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404 on expired session, got %d", resp2.StatusCode)
+	}
+	if resp2.Header.Get("X-MCP-Session-Expired") != "max-lifetime" {
+		t.Fatalf("expected max-lifetime header, got %q", resp2.Header.Get("X-MCP-Session-Expired"))
 	}
 }
 

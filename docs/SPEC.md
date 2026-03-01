@@ -702,9 +702,24 @@ Server returns:
 
 * On initialize success, server assigns a session id and returns it in `MCP-Session-Id`.
 * Client must include `MCP-Session-Id` on subsequent requests.
-* Unknown session id:
+* Sessions are stateful resources with a defined lifecycle:
 
-  * server returns HTTP 404 (client must re-initialize).
+  * **Inactivity timeout:** a session SHOULD expire if the server has not seen any requests using that `MCP-Session-Id` for a configurable period. The reference implementation defaults to 24 hours of inactivity (matching the previous hardcoded `sessionTTL`), though some deployments may prefer shorter windows such as 30 minutes. Servers SHOULD expose a configuration parameter (e.g. `session_inactivity_timeout` as a YAML duration) so operators can adjust the value.
+  * **Absolute lifetime (optional):** servers MAY enforce a maximum absolute duration (e.g. 24 hours) after which the session expires regardless of activity. In the reference implementation this is governed by `session_max_lifetime` (YAML duration); a zero value disables the limit.
+  * **Cleanup/eviction:** expired sessions MUST be evicted or garbage‑collected from the server’s in‑memory or persisted session store. Cleanup can run lazily on access or via a periodic background task; the key requirement is that an expired `MCP-Session-Id` is treated as unknown.
+  * **Logging & visibility:** servers SHOULD log session expiration events, including the reason (inactivity vs. lifetime) and the session id. Responses may include a diagnostic header such as `X-MCP-Session-Expired: inactivity|max-lifetime`.
+
+* Unknown or expired session id:
+
+  * server returns HTTP 404. This is the same status used for any non‑existent session; clients SHOULD treat both cases identically even if a diagnostic header is present.
+  * client MUST re‑initialize by issuing a fresh `initialize` request. The previous id is discarded and a new `MCP-Session-Id` will be returned. Clients SHOULD treat a 404 as indicating that they should restart the flow rather than retrying.
+
+* **Production guidance:**
+
+  1. Choose default timeout values appropriate for your workload and security requirements. Public‑facing servers often use shorter inactivity timeouts to conserve resources.
+  2. Expose configuration knobs for both inactivity and absolute lifetime. Document defaults in your service README.
+  3. Surface expiration reasons in logs and, optionally, response headers to assist operators and clients.
+  4. Implement robust cleanup to avoid unbounded session growth; periodic eviction or TTL caches are recommended.
 
 ### 10.4 Notifications
 

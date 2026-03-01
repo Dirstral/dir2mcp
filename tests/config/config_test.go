@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"dir2mcp/internal/config"
 	"dir2mcp/tests/testutil"
@@ -155,6 +156,37 @@ func TestLoad_DefaultElevenLabsVoiceID(t *testing.T) {
 		}
 		if cfg.ElevenLabsTTSVoiceID != "JBFqnCBsd6RMkjVDRZzb" {
 			t.Fatalf("unexpected default elevenlabs voice id: %q", cfg.ElevenLabsTTSVoiceID)
+		}
+	})
+}
+
+func TestLoad_SessionTimeout_EnvAndYAML(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, ".dir2mcp.yaml")
+	writeFile(t, path, "session_inactivity_timeout: 1s\nsession_max_lifetime: 2s\n")
+	cfg, err := config.LoadFile(path)
+	if err != nil {
+		t.Fatalf("LoadFile failed: %v", err)
+	}
+	if cfg.SessionInactivityTimeout != time.Second {
+		t.Fatalf("unexpected inactivity timeout: %v", cfg.SessionInactivityTimeout)
+	}
+	if cfg.SessionMaxLifetime != 2*time.Second {
+		t.Fatalf("unexpected max lifetime: %v", cfg.SessionMaxLifetime)
+	}
+
+	testutil.WithWorkingDir(t, tmp, func() {
+		t.Setenv("DIR2MCP_SESSION_TIMEOUT", "3s")
+		t.Setenv("DIR2MCP_SESSION_MAX_LIFETIME", "4s")
+		cfg2, err := config.Load(path)
+		if err != nil {
+			t.Fatalf("Load failed: %v", err)
+		}
+		if cfg2.SessionInactivityTimeout != 3*time.Second {
+			t.Fatalf("env override inactivity timeout=%v want=3s", cfg2.SessionInactivityTimeout)
+		}
+		if cfg2.SessionMaxLifetime != 4*time.Second {
+			t.Fatalf("env override max lifetime=%v want=4s", cfg2.SessionMaxLifetime)
 		}
 	})
 }

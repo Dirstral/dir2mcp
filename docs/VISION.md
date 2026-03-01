@@ -92,7 +92,7 @@ Use case: defense/healthcare/finance compliance constraints.
 
 For true air-gapped mode, embeddings/OCR/transcription must run via local/on-prem connectors deployed inside the same air-gapped network boundary. Local/on-prem connectors implement the runtime interfaces `embed(text) -> vector`, `ocr(image) -> text`, and `transcribe(audio) -> text`; if required connectors are unavailable, the runtime must fall back to text-first retrieval/citation mode and disable OCR/transcription-dependent ingestion paths.
 
-Text-first retrieval/citation mode means retrieval is limited to existing text content already available to the index (plain text/code/docs, PDFs' extracted text if already present, and previously stored transcripts/OCR text), with embeddings generated through `embed(text)` when available. When `embed(text) -> vector` is unavailable, the fallback ranking algorithm is deterministic BM25 with `k1=1.5`, `b=0.75`, tokenization by Unicode word boundaries with lowercase normalization, configurable stop-word handling (default: remove common stop words), and tie-breaking by lexicographic document path order. OCR/transcription-dependent ingestion pipelines are disabled in this mode.
+Text-first retrieval/citation mode means retrieval is limited to existing text content already available to the index (plain text/code/docs, PDFs' extracted text if already present, and previously stored transcripts/OCR text), with embeddings generated through `embed(text)` when available. When `embed(text) -> vector` is unavailable, the fallback ranking algorithm is deterministic BM25 with `k1=1.5`, `b=0.75`, tokenization by Unicode word boundaries with lowercase normalization, configurable stop-word handling (default: remove common stop words using the standard **Lucene English** stop‑word list[^lucene]—implementations MAY instead choose “no stop words” when absolute determinism is required), and tie‑breaking by lexicographic document path order. OCR/transcription-dependent ingestion pipelines are disabled in this mode.
 
 "Required connectors" means only the connector types needed for modalities present in the current corpus segment (not all three universally):
 - `embed(text)` is required for vector retrieval on text content
@@ -102,6 +102,12 @@ Text-first retrieval/citation mode means retrieval is limited to existing text c
 Already-ingested OCR/transcription artifacts remain searchable during fallback, must be flagged as `derived`, and should be scheduled for re-validation once connector health is restored (optional outside regulated environments; required for use case #2). Entering fallback must emit a user-visible and logged warning with connector name(s) and timestamp for operator remediation.
 
 See **Connector interface contract (local/on-prem)** below for the full implementation contract.
+
+[^lucene]: The Lucene English stop‑word list is a widely used default set of roughly 33 short words
+(e.g. “a”, “an”, “the”, “and”, “or”, “but”, “if”, etc.).  Implementations may substitute
+another standard list (such as NLTK’s English stop words) or disable stop‑word
+filtering entirely when determinism is paramount.  The canonical Lucene list is
+published at <https://lucene.apache.org/core/analysis-common/8_11_0/org/apache/lucene/analysis/en/EnglishAnalyzer.html#stopwords>.
 
 ### 3) Agent sidecar for large repos
 Agents navigate a repository via `search`, `open_file`, and citations—without reading everything.  
@@ -170,7 +176,7 @@ Required fields:
 - `provider` (string): connector/provider identifier
 - `model` (string): selected model identifier
 - `version` (string): connector or model version string
-- `latency_ms` (number, may be integer or float): end-to-end latency in **milliseconds** (fractional values allowed to represent sub‑millisecond timings, e.g. `0.45`).  Implementations reporting sub‑ms precision should round or truncate consistently; values must be `>= 0` and may be conveyed as a float in the spec alongside `trace_or_request_id`.
+- `latency_ms` (number; integer or float accepted): end-to-end latency in **milliseconds** (fractional values allowed to represent sub‑millisecond timings, e.g. `0.45`).  Implementations reporting sub‑ms precision should round or truncate consistently; values must be `>= 0` and may be conveyed as a float in the spec alongside `trace_or_request_id`.
 - `trace_or_request_id` (string): request correlation or request identifier.  UUID‑v4 is **preferred** and should be used when available (e.g. `550e8400-e29b-41d4-a716-446655440000`), but arbitrary strings are allowed if a UUID cannot be generated (e.g. `req-12345`).  The connector **must** accept non‑UUID values and simply record them as provided; it may log or normalize the value but should not reject the metadata.  Consumers should tolerate non‑UUID identifiers but are encouraged to treat UUIDs specially for tracing and de‑duplication.
 Optional fields:
 - `token_or_compute_usage` (object): usage counters
@@ -191,7 +197,7 @@ Canonical example:
 	"provider": "internal-gpu-inference",
 	"model": "mistral-embed-v1",
 	"version": "2026.02.1",
-	"latency_ms": 47,
+	"latency_ms": 47.3,
 	"trace_or_request_id": "550e8400-e29b-41d4-a716-446655440000",
 	"token_or_compute_usage": {
 		"input_tokens": 312,
@@ -203,6 +209,8 @@ Canonical example:
 	}
 }
 ```
+
+Fractional `latency_ms` values are valid (for example sub-millisecond precision).
 
 Parser requirements:
 - connectors must return valid JSON for metadata envelopes; malformed JSON must produce structured connector errors (recommended: `ENVELOPE_MALFORMED_JSON (2003)`)
@@ -248,13 +256,43 @@ Reserved code ranges:
 	- `INTERNAL_ERROR (6001)`
 	- `PANIC_UNEXPECTED (6002)`
 
-Canonical HTTP status mappings:
-- transient/retryable (`1000-1999`) -> `503` for temporary overload/idempotent retry-later conditions, `502` for upstream/bad-gateway connector failures
-- auth/config (`2000-2999`) -> `401` for missing/invalid authentication, `403` for authenticated but forbidden/insufficient permissions or policy/config denial
-- capability unavailable (`3000-3999`) -> `422` for semantically unprocessable requests, `501` for unimplemented/nonexistent capabilities
-- client/input (`4000-4999`) -> `400` for malformed/invalid client request, `422` for semantically invalid but well-formed input
-- resource exhaustion (`5000-5999`) -> `429` for rate/quota exhaustion, `503` when capacity exhaustion is temporary service-side overload
-- internal/implementation (`6000-6999`) -> `500` for internal faults, `502` when fault is surfaced through an upstream connector boundary
+Canonical HTTP status mappings (explicit per-error recommendations):
+
+Each named connector error constant is paired with a single “recommended” HTTP
+status code.  The table below lists every constant defined in the taxonomy along
+with its associated status; implementers should return the annotated status for
+that error and may use the more general range guidance when new codes are
+introduced.
+
+| Error constant            | Code | HTTP status | Notes |
+|---------------------------|------|-------------|-------|
+| NETWORK_TIMEOUT           | 1001 | 503         | retryable/temporary |
+| UPSTREAM_UNAVAILABLE      | 1002 | 502         | bad‑gateway connector fault |
+| AUTH_INVALID_CREDENTIALS  | 2001 | 401         | invalid or missing authentication |
+| CONFIG_MISSING            | 2002 | 403         | authenticated but forbidden/config error |
+| CAPABILITY_NOT_SUPPORTED  | 3001 | 501         | unimplemented capability |
+| MODEL_NOT_AVAILABLE       | 3002 | 422         | semantically unprocessable request |
+| INVALID_REQUEST           | 4001 | 400         | malformed or invalid client input |
+| VALIDATION_FAILED         | 4002 | 422         | well‑formed but semantically invalid input |
+| RATE_LIMIT_EXCEEDED       | 5001 | 429         | rate/quota exhaustion |
+| QUOTA_EXCEEDED            | 5002 | 429         | rate/quota exhaustion |
+| INTERNAL_ERROR            | 6001 | 500         | internal server fault |
+| PANIC_UNEXPECTED          | 6002 | 500         | internal server fault |
+
+Generalized range guidelines (for new or unspecified codes):
+- transient/retryable (`1000-1999`) → `503` for temporary overload/idempotent
+  retry‑later conditions, `502` for upstream/bad‑gateway connector failures
+- auth/config (`2000-2999`) → `401` for missing/invalid authentication, `403`
+  for authenticated but forbidden/insufficient permissions or policy/config
+  denial
+- capability unavailable (`3000-3999`) → `422` for semantically unprocessable
+  requests, `501` for unimplemented/nonexistent capabilities
+- client/input (`4000-4999`) → `400` for malformed/invalid client request, `422`
+  for semantically invalid but well‑formed input
+- resource exhaustion (`5000-5999`) → `429` for rate/quota exhaustion, `503`
+  when capacity exhaustion is temporary service-side overload
+- internal/implementation (`6000-6999`) → `500` for internal faults, `502`
+  when fault is surfaced through an upstream connector boundary
 
 Propagation requirements:
 - connectors must return this structured error object in API error responses

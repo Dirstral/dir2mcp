@@ -49,6 +49,15 @@ const DefaultSearchK = 10
 // MaxSearchK is the highest allowed k value for search/ask requests.
 const MaxSearchK = 50
 
+// sessionInfo holds metadata tracked for each active session.  `created` is the
+// time the session was started; `lastSeen` is updated on each successful
+// request.  The server uses both values to enforce inactivity timeouts and
+// optional absolute lifetimes.
+type sessionInfo struct {
+	created  time.Time
+	lastSeen time.Time
+}
+
 type Server struct {
 	cfg       config.Config
 	authToken string
@@ -59,7 +68,11 @@ type Server struct {
 	tools     map[string]toolDefinition
 
 	sessionMu sync.RWMutex
-	sessions  map[string]time.Time
+	// sessions maps session IDs to metadata.  lastSeen is updated on each
+	// successful request; created represents the time the session was
+	// initialized.  We use both values to enforce inactivity timeouts and
+	// optional absolute lifetimes.
+	sessions map[string]sessionInfo
 
 	rateLimiter *ipRateLimiter
 
@@ -174,7 +187,7 @@ func NewServer(cfg config.Config, retriever model.Retriever, opts ...ServerOptio
 		cfg:             cfg,
 		authToken:       loadAuthToken(cfg),
 		retriever:       retriever,
-		sessions:        make(map[string]time.Time),
+		sessions:        make(map[string]sessionInfo),
 		paymentOutcomes: make(map[string]paymentExecutionOutcome),
 		paymentTTL:      paymentOutcomeTTL,
 		paymentMaxItems: paymentOutcomeMaxEntries,
@@ -351,7 +364,15 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 
 	if req.Method != "initialize" {
 		sessionID := strings.TrimSpace(r.Header.Get(sessionHeaderName))
-		if sessionID == "" || !s.hasActiveSession(sessionID, time.Now()) {
+		if sessionID == "" {
+			writeError(w, http.StatusNotFound, id, -32001, "session not found", "SESSION_NOT_FOUND", false)
+			return
+		}
+		if ok, reason := s.hasActiveSession(sessionID, time.Now()); !ok {
+			// optional diagnostic header
+			if reason != "" {
+				w.Header().Set("X-MCP-Session-Expired", reason)
+			}
 			writeError(w, http.StatusNotFound, id, -32001, "session not found", "SESSION_NOT_FOUND", false)
 			return
 		}
@@ -540,27 +561,46 @@ func writeResponse(w http.ResponseWriter, statusCode int, response rpcResponse) 
 	_ = json.NewEncoder(w).Encode(response)
 }
 
-func (s *Server) hasActiveSession(id string, now time.Time) bool {
+func (s *Server) hasActiveSession(id string, now time.Time) (bool, string) {
+	// returns (active, reason) reason is empty when active or unknown
+	// otherwise one of "inactivity" or "max-lifetime".
+
+	// pick configured timeouts or fall back to constant defaults
+	inactivity := sessionTTL
+	if s.cfg.SessionInactivityTimeout > 0 {
+		inactivity = s.cfg.SessionInactivityTimeout
+	}
+	maxLife := s.cfg.SessionMaxLifetime
+
 	s.sessionMu.Lock()
 	defer s.sessionMu.Unlock()
 
-	lastSeen, ok := s.sessions[id]
+	si, ok := s.sessions[id]
 	if !ok {
-		return false
+		return false, ""
 	}
-	if now.Sub(lastSeen) > sessionTTL {
+	if now.Sub(si.lastSeen) > inactivity {
 		delete(s.sessions, id)
-		return false
+		log.Printf("session %s expired due to inactivity", id)
+		return false, "inactivity"
+	}
+	if maxLife > 0 && now.Sub(si.created) > maxLife {
+		delete(s.sessions, id)
+		log.Printf("session %s expired due to max lifetime", id)
+		return false, "max-lifetime"
 	}
 
-	s.sessions[id] = now
-	return true
+	// update lastSeen
+	si.lastSeen = now
+	s.sessions[id] = si
+	return true, ""
 }
 
 func (s *Server) storeSession(id string) {
 	s.sessionMu.Lock()
 	defer s.sessionMu.Unlock()
-	s.sessions[id] = time.Now()
+	now := time.Now()
+	s.sessions[id] = sessionInfo{created: now, lastSeen: now}
 }
 
 func (s *Server) runSessionCleanup(ctx context.Context) {
@@ -592,11 +632,22 @@ func (s *Server) runRateLimitCleanup(ctx context.Context) {
 }
 
 func (s *Server) cleanupExpiredSessions(now time.Time) {
+	// mirror the logic from hasActiveSession but without logging or updating
+	inactivity := sessionTTL
+	if s.cfg.SessionInactivityTimeout > 0 {
+		inactivity = s.cfg.SessionInactivityTimeout
+	}
+	maxLife := s.cfg.SessionMaxLifetime
+
 	s.sessionMu.Lock()
 	defer s.sessionMu.Unlock()
 
-	for id, lastSeen := range s.sessions {
-		if now.Sub(lastSeen) > sessionTTL {
+	for id, si := range s.sessions {
+		if now.Sub(si.lastSeen) > inactivity {
+			delete(s.sessions, id)
+			continue
+		}
+		if maxLife > 0 && now.Sub(si.created) > maxLife {
 			delete(s.sessions, id)
 		}
 	}

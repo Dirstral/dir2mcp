@@ -119,6 +119,69 @@ A marketplace needs a standard way to describe endpoints.
 
 In x402 v2, Bazaar discovery is treated as an extension layer: facilitator services index extension metadata and expose it through discovery endpoints (for example `GET {facilitator_url}/discovery/resources`).
 
+For concreteness, the Bazaar/CDP discovery metadata specification (https://docs.cdp.coinbase.com/x402/bazaar) defines a JSON Schema for the descriptor payload returned by that endpoint. The schema covers the sections listed below – service identity, capabilities, operational guarantees, policy, metering and trust – and is the authoritative reference implementers should follow. A minimal illustrative snippet looks like:
+
+```json
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "MCP Endpoint Descriptor",
+  "type": "object",
+  "properties": {
+    "identity": {
+      "type": "object",
+      "properties": {
+        "name": {"type": "string"},
+        "description": {"type": "string"},
+        "version": {"type": "string"},
+        "support_url": {"type": "string", "format": "uri"}
+      },
+      "required": ["name","description"]
+    },
+    "capabilities": {
+      "type": "object",
+      "properties": {
+        "tools": {
+          "type": "array",
+          "items": {"type":"object","properties":{"name":{"type":"string"},"schema":{"type":"object"}}}
+        },
+        "source_types": {"type": "array","items": {"type":"string"}},
+        "citation_formats": {"type": "array","items": {"type":"string"}}
+      }
+    },
+    "operational_guarantees": {
+      "type": "object",
+      "properties": {
+        "max_request_size": {"type": "integer"},
+        "max_concurrency": {"type": "integer"},
+        "latency_ms": {"type": "object","properties":{"p50":{"type":"integer"},"p95":{"type":"integer"}}}
+      }
+    },
+    "policy": {
+      "type": "object",
+      "properties": {
+        "export_restrictions": {"type":"string"},
+        "log_retention_days": {"type":"integer"}
+      }
+    },
+    "metering": {
+      "type": "object",
+      "properties": {
+        "billing_unit": {"type":"string"},
+        "price_schedule": {"type":"string"}
+      }
+    },
+    "trust": {
+      "type": "object",
+      "properties": {
+        "schema_hash": {"type":"string"},
+        "signature": {"type":"string"}
+      }
+    }
+  },
+  "required": ["identity","capabilities"]
+}
+```
+
 ### Suggested endpoint descriptor fields
 - Service identity:
   - name, description, version
@@ -141,7 +204,7 @@ In x402 v2, Bazaar discovery is treated as an extension layer: facilitator servi
   - signatures/attestation (future)
   - audit hash of tool schemas (future)
 
-A good future direction is for `dir2mcp` to generate an endpoint descriptor automatically from a running server.
+A good future direction is for `dir2mcp` to generate an endpoint descriptor automatically from a running server, and the generated manifest SHOULD conform to the Bazaar/CDP discovery metadata schema described above.
 
 ---
 
