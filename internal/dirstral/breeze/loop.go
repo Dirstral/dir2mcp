@@ -107,7 +107,7 @@ func (p heuristicPlanner) Plan(input string) (TurnPlan, error) {
 			return TurnPlan{}, fmt.Errorf("usage: /open <rel_path>")
 		}
 		return TurnPlan{Steps: []PlanStep{{Tool: protocol.ToolNameOpenFile, Args: map[string]any{"rel_path": args[0]}}}}, nil
-	case strings.HasPrefix(trimmed, "/transcribe_and_ask"):
+	case trimmed == "/transcribe_and_ask" || strings.HasPrefix(trimmed, "/transcribe_and_ask "):
 		args := strings.TrimSpace(strings.TrimPrefix(trimmed, "/transcribe_and_ask"))
 		parts := strings.Fields(args)
 		if len(parts) < 2 {
@@ -116,13 +116,13 @@ func (p heuristicPlanner) Plan(input string) (TurnPlan, error) {
 		path := parts[0]
 		question := strings.TrimSpace(strings.TrimPrefix(args, path))
 		return TurnPlan{Steps: []PlanStep{{Tool: protocol.ToolNameTranscribeAndAsk, Args: map[string]any{"rel_path": path, "question": question, "k": p.profile.AskTopK}}}}, nil
-	case strings.HasPrefix(trimmed, "/transcribe"):
+	case trimmed == "/transcribe" || strings.HasPrefix(trimmed, "/transcribe "):
 		path := strings.TrimSpace(strings.TrimPrefix(trimmed, "/transcribe"))
 		if path == "" {
 			return TurnPlan{}, fmt.Errorf("usage: /transcribe <rel_path>")
 		}
 		return TurnPlan{Steps: []PlanStep{{Tool: protocol.ToolNameTranscribe, Args: map[string]any{"rel_path": path}}}}, nil
-	case strings.HasPrefix(trimmed, "/annotate"):
+	case trimmed == "/annotate" || strings.HasPrefix(trimmed, "/annotate "):
 		args := strings.TrimSpace(strings.TrimPrefix(trimmed, "/annotate"))
 		parts := strings.Fields(args)
 		if len(parts) < 2 {
@@ -282,6 +282,15 @@ func citationsFor(tool string, sc map[string]any) []string {
 		path := asString(sc["rel_path"])
 		span, _ := sc["span"].(map[string]any)
 		add(mcp.CitationForSpan(path, span))
+		if segments, ok := sc["segments"].([]any); ok {
+			for _, s := range segments {
+				if seg, ok := s.(map[string]any); ok {
+					if segmentSpan, ok := seg["span"].(map[string]any); ok {
+						add(mcp.CitationForSpan(path, segmentSpan))
+					}
+				}
+			}
+		}
 	case protocol.ToolNameAsk, protocol.ToolNameTranscribeAndAsk:
 		citations, _ := sc["citations"].([]any)
 		for _, it := range citations {
