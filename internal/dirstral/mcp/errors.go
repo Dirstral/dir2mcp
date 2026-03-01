@@ -67,16 +67,16 @@ func ActionableMessageFromError(err error) string {
 func canonicalCodeFromText(text string) string {
 	upper := strings.ToUpper(text)
 
-	if strings.Contains(upper, CanonicalCodeUnauthorized) || strings.Contains(upper, "UNAUTHENTICATED") {
+	if containsCanonicalPhrase(upper, CanonicalCodeUnauthorized) || containsCanonicalPhrase(upper, "UNAUTHENTICATED") {
 		return CanonicalCodeUnauthorized
 	}
-	if strings.Contains(upper, CanonicalCodeSessionNotFound) || strings.Contains(upper, "SESSION NOT FOUND") {
+	if containsCanonicalPhrase(upper, CanonicalCodeSessionNotFound) || containsCanonicalPhrase(upper, "SESSION NOT FOUND") {
 		return CanonicalCodeSessionNotFound
 	}
-	if strings.Contains(upper, CanonicalCodeIndexNotReady) || strings.Contains(upper, "INDEX NOT READY") {
+	if containsCanonicalPhrase(upper, CanonicalCodeIndexNotReady) || containsCanonicalPhrase(upper, "INDEX NOT READY") {
 		return CanonicalCodeIndexNotReady
 	}
-	if strings.Contains(upper, CanonicalCodeFileNotFound) || strings.Contains(upper, "FILE NOT FOUND") {
+	if containsCanonicalPhrase(upper, CanonicalCodeFileNotFound) || containsCanonicalPhrase(upper, "FILE NOT FOUND") {
 		return CanonicalCodeFileNotFound
 	}
 	if containsAny(upper,
@@ -115,9 +115,40 @@ func canonicalCodeFromText(text string) string {
 
 func containsAny(value string, patterns ...string) bool {
 	for _, pattern := range patterns {
-		if strings.Contains(value, pattern) {
+		if containsCanonicalPhrase(value, pattern) {
 			return true
 		}
 	}
 	return false
+}
+
+func containsCanonicalPhrase(value, phrase string) bool {
+	valueTokens := canonicalTokens(value)
+	phraseTokens := canonicalTokens(phrase)
+	if len(phraseTokens) == 0 || len(valueTokens) < len(phraseTokens) {
+		return false
+	}
+	for i := 0; i <= len(valueTokens)-len(phraseTokens); i++ {
+		matched := true
+		for j := range phraseTokens {
+			if valueTokens[i+j] != phraseTokens[j] {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return true
+		}
+	}
+	return false
+}
+
+func canonicalTokens(value string) []string {
+	normalized := strings.NewReplacer("_", " ", "-", " ").Replace(strings.ToUpper(strings.TrimSpace(value)))
+	if normalized == "" {
+		return nil
+	}
+	return strings.FieldsFunc(normalized, func(r rune) bool {
+		return (r < 'A' || r > 'Z') && (r < '0' || r > '9')
+	})
 }
