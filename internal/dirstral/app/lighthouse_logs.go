@@ -107,7 +107,6 @@ func (m *logModel) refreshContent() {
 	if info.Size() == m.lastSize {
 		return
 	}
-	m.lastSize = info.Size()
 
 	data, err := os.ReadFile(m.logPath)
 	if err != nil {
@@ -117,6 +116,7 @@ func (m *logModel) refreshContent() {
 		}
 		return
 	}
+	m.lastSize = info.Size()
 
 	m.content = TailLogLines(string(data), logMaxLines)
 	if m.ready {
