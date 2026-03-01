@@ -38,10 +38,7 @@ type Engine struct {
 
 // NewEngine creates a retrieval engine backed by the on-disk state.
 func NewEngine(stateDir, rootDir string, cfg *config.Config) (*Engine, error) {
-	effective := config.Default()
-	if cfg != nil {
-		effective = *cfg
-	}
+	effective := mergeEngineConfig(config.Default(), cfg)
 	if trimmed := strings.TrimSpace(stateDir); trimmed != "" {
 		effective.StateDir = trimmed
 	}
@@ -107,6 +104,82 @@ func NewEngine(stateDir, rootDir string, cfg *config.Config) (*Engine, error) {
 		},
 		askTimeout: defaultEngineAskTimeout,
 	}, nil
+}
+
+func mergeEngineConfig(base config.Config, override *config.Config) config.Config {
+	if override == nil {
+		return base
+	}
+
+	merged := base
+	if v := strings.TrimSpace(override.RootDir); v != "" {
+		merged.RootDir = v
+	}
+	if v := strings.TrimSpace(override.StateDir); v != "" {
+		merged.StateDir = v
+	}
+	if v := strings.TrimSpace(override.ListenAddr); v != "" {
+		merged.ListenAddr = v
+	}
+	if v := strings.TrimSpace(override.MCPPath); v != "" {
+		merged.MCPPath = v
+	}
+	if v := strings.TrimSpace(override.ProtocolVersion); v != "" {
+		merged.ProtocolVersion = v
+	}
+	if override.Public {
+		merged.Public = true
+	}
+	if v := strings.TrimSpace(override.AuthMode); v != "" {
+		merged.AuthMode = v
+	}
+	if override.RateLimitRPS > 0 {
+		merged.RateLimitRPS = override.RateLimitRPS
+	}
+	if override.RateLimitBurst > 0 {
+		merged.RateLimitBurst = override.RateLimitBurst
+	}
+	if len(override.TrustedProxies) > 0 {
+		merged.TrustedProxies = append([]string(nil), override.TrustedProxies...)
+	}
+	if len(override.PathExcludes) > 0 {
+		merged.PathExcludes = append([]string(nil), override.PathExcludes...)
+	}
+	if len(override.SecretPatterns) > 0 {
+		merged.SecretPatterns = append([]string(nil), override.SecretPatterns...)
+	}
+	if v := strings.TrimSpace(override.ResolvedAuthToken); v != "" {
+		merged.ResolvedAuthToken = v
+	}
+	if v := strings.TrimSpace(override.MistralAPIKey); v != "" {
+		merged.MistralAPIKey = v
+	}
+	if v := strings.TrimSpace(override.MistralBaseURL); v != "" {
+		merged.MistralBaseURL = v
+	}
+	if v := strings.TrimSpace(override.ElevenLabsAPIKey); v != "" {
+		merged.ElevenLabsAPIKey = v
+	}
+	if v := strings.TrimSpace(override.ElevenLabsBaseURL); v != "" {
+		merged.ElevenLabsBaseURL = v
+	}
+	if v := strings.TrimSpace(override.ElevenLabsTTSVoiceID); v != "" {
+		merged.ElevenLabsTTSVoiceID = v
+	}
+	if len(override.AllowedOrigins) > 0 {
+		merged.AllowedOrigins = append([]string(nil), override.AllowedOrigins...)
+	}
+	if v := strings.TrimSpace(override.EmbedModelText); v != "" {
+		merged.EmbedModelText = v
+	}
+	if v := strings.TrimSpace(override.EmbedModelCode); v != "" {
+		merged.EmbedModelCode = v
+	}
+	if v := strings.TrimSpace(override.ChatModel); v != "" {
+		merged.ChatModel = v
+	}
+
+	return merged
 }
 
 // Close releases resources.
