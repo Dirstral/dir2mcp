@@ -15,21 +15,21 @@ import (
 	"dir2mcp/internal/store"
 )
 
-type issue54NoopStore struct{}
+type commandTestNoopStore struct{}
 
-func (s *issue54NoopStore) Init(context.Context) error { return nil }
-func (s *issue54NoopStore) UpsertDocument(context.Context, model.Document) error {
+func (s *commandTestNoopStore) Init(context.Context) error { return nil }
+func (s *commandTestNoopStore) UpsertDocument(context.Context, model.Document) error {
 	return nil
 }
-func (s *issue54NoopStore) GetDocumentByPath(context.Context, string) (model.Document, error) {
+func (s *commandTestNoopStore) GetDocumentByPath(context.Context, string) (model.Document, error) {
 	return model.Document{}, model.ErrNotImplemented
 }
-func (s *issue54NoopStore) ListFiles(context.Context, string, string, int, int) ([]model.Document, int64, error) {
+func (s *commandTestNoopStore) ListFiles(context.Context, string, string, int, int) ([]model.Document, int64, error) {
 	return []model.Document{}, 0, nil
 }
-func (s *issue54NoopStore) Close() error { return nil }
+func (s *commandTestNoopStore) Close() error { return nil }
 
-type issue54RetrieverStub struct {
+type commandTestRetrieverStub struct {
 	askResult model.AskResult
 	askErr    error
 
@@ -44,7 +44,7 @@ type issue54RetrieverStub struct {
 	lastSearchQuery model.SearchQuery
 }
 
-func (s *issue54RetrieverStub) Search(_ context.Context, q model.SearchQuery) ([]model.SearchHit, error) {
+func (s *commandTestRetrieverStub) Search(_ context.Context, q model.SearchQuery) ([]model.SearchHit, error) {
 	s.searchCalled = true
 	s.lastSearchQuery = q
 	if s.searchErr != nil {
@@ -53,7 +53,7 @@ func (s *issue54RetrieverStub) Search(_ context.Context, q model.SearchQuery) ([
 	return append([]model.SearchHit(nil), s.searchHits...), nil
 }
 
-func (s *issue54RetrieverStub) Ask(_ context.Context, question string, q model.SearchQuery) (model.AskResult, error) {
+func (s *commandTestRetrieverStub) Ask(_ context.Context, question string, q model.SearchQuery) (model.AskResult, error) {
 	s.askCalled = true
 	s.lastAskQuestion = question
 	s.lastAskQuery = q
@@ -63,11 +63,11 @@ func (s *issue54RetrieverStub) Ask(_ context.Context, question string, q model.S
 	return s.askResult, nil
 }
 
-func (s *issue54RetrieverStub) OpenFile(_ context.Context, _ string, _ model.Span, _ int) (string, error) {
+func (s *commandTestRetrieverStub) OpenFile(_ context.Context, _ string, _ model.Span, _ int) (string, error) {
 	return "", model.ErrNotImplemented
 }
 
-func (s *issue54RetrieverStub) Stats(_ context.Context) (model.Stats, error) {
+func (s *commandTestRetrieverStub) Stats(_ context.Context) (model.Stats, error) {
 	return model.Stats{}, model.ErrNotImplemented
 }
 
@@ -328,7 +328,7 @@ func TestAskAnswerModeWithFlagsAndCitations(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("MISTRAL_API_KEY", "test-key")
 
-	stub := &issue54RetrieverStub{
+	stub := &commandTestRetrieverStub{
 		askResult: model.AskResult{
 			Question: "what is alpha?",
 			Answer:   "alpha is documented in [docs/a.md]",
@@ -344,7 +344,7 @@ func TestAskAnswerModeWithFlagsAndCitations(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	app := cli.NewAppWithIOAndHooks(&stdout, &stderr, cli.RuntimeHooks{
-		NewStore: func(config.Config) model.Store { return &issue54NoopStore{} },
+		NewStore: func(config.Config) model.Store { return &commandTestNoopStore{} },
 		NewRetriever: func(config.Config, model.Store) model.Retriever {
 			return stub
 		},
@@ -394,14 +394,14 @@ func TestAskSearchOnlyCallsSearch(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("MISTRAL_API_KEY", "test-key")
 
-	stub := &issue54RetrieverStub{
+	stub := &commandTestRetrieverStub{
 		searchHits: []model.SearchHit{
 			{ChunkID: 10, RelPath: "docs/a.md", DocType: "md", RepType: "raw_text", Score: 0.9, Snippet: "alpha"},
 		},
 	}
 	var stdout, stderr bytes.Buffer
 	app := cli.NewAppWithIOAndHooks(&stdout, &stderr, cli.RuntimeHooks{
-		NewStore: func(config.Config) model.Store { return &issue54NoopStore{} },
+		NewStore: func(config.Config) model.Store { return &commandTestNoopStore{} },
 		NewRetriever: func(config.Config, model.Store) model.Retriever {
 			return stub
 		},
@@ -429,7 +429,7 @@ func TestAskJSONOutput(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("MISTRAL_API_KEY", "test-key")
 
-	stub := &issue54RetrieverStub{
+	stub := &commandTestRetrieverStub{
 		askResult: model.AskResult{
 			Question:         "q",
 			Answer:           "a",
@@ -440,7 +440,7 @@ func TestAskJSONOutput(t *testing.T) {
 	}
 	var stdout, stderr bytes.Buffer
 	app := cli.NewAppWithIOAndHooks(&stdout, &stderr, cli.RuntimeHooks{
-		NewStore: func(config.Config) model.Store { return &issue54NoopStore{} },
+		NewStore: func(config.Config) model.Store { return &commandTestNoopStore{} },
 		NewRetriever: func(config.Config, model.Store) model.Retriever {
 			return stub
 		},
@@ -478,7 +478,7 @@ func TestAskNoContextResponse(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("MISTRAL_API_KEY", "test-key")
 
-	stub := &issue54RetrieverStub{
+	stub := &commandTestRetrieverStub{
 		askResult: model.AskResult{
 			Question: "q",
 			Answer:   "No relevant context found in the indexed corpus.",
@@ -486,7 +486,7 @@ func TestAskNoContextResponse(t *testing.T) {
 	}
 	var stdout, stderr bytes.Buffer
 	app := cli.NewAppWithIOAndHooks(&stdout, &stderr, cli.RuntimeHooks{
-		NewStore: func(config.Config) model.Store { return &issue54NoopStore{} },
+		NewStore: func(config.Config) model.Store { return &commandTestNoopStore{} },
 		NewRetriever: func(config.Config, model.Store) model.Retriever {
 			return stub
 		},
