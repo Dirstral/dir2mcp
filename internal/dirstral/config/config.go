@@ -11,16 +11,17 @@ import (
 	"strings"
 
 	coreconfig "dir2mcp/internal/config"
+	"dir2mcp/internal/protocol"
 	"github.com/BurntSushi/toml"
 	"github.com/joho/godotenv"
 )
 
 const (
 	DefaultHostListen   = "127.0.0.1:8087"
-	DefaultHostMCPPath  = "/mcp"
-	DefaultMCPURL       = "http://127.0.0.1:8087/mcp"
-	DefaultMCPTransport = "streamable-http"
-	DefaultModel        = "mistral-small-latest"
+	DefaultHostMCPPath  = protocol.DefaultMCPPath
+	DefaultMCPURL       = "http://" + protocol.DefaultListenAddr + protocol.DefaultMCPPath
+	DefaultMCPTransport = protocol.DefaultTransport
+	DefaultModel        = protocol.DefaultModel
 )
 
 var DefaultProtocolVersion = coreconfig.DefaultProtocolVersion
@@ -105,7 +106,7 @@ func StateDir() (string, error) {
 		return "", err
 	}
 	dir := filepath.Join(base, "dirstral")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}
 	return dir, nil
@@ -239,6 +240,8 @@ func SaveSecret(key, value string) error {
 	existing, err := godotenv.Read(path)
 	if err == nil {
 		env = existing
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("reading %s: %w", path, err)
 	}
 	env[key] = value
 	if err := writeDotEnvFile(path, env); err != nil {
@@ -257,6 +260,8 @@ func DeleteSecret(key string) error {
 	existing, err := godotenv.Read(path)
 	if err == nil {
 		env = existing
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("reading %s: %w", path, err)
 	}
 	delete(env, key)
 	if err := writeDotEnvFile(path, env); err != nil {
@@ -266,6 +271,23 @@ func DeleteSecret(key string) error {
 		return fmt.Errorf("unsetting %s: %w", key, err)
 	}
 	return nil
+}
+
+// LoadSecret returns the stored secret value from ~/.config/dirstral/.env.local.
+// It returns an empty string when the file or key does not exist.
+func LoadSecret(key string) (string, error) {
+	path, err := secretEnvLocalPath()
+	if err != nil {
+		return "", err
+	}
+	env, err := godotenv.Read(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", nil
+		}
+		return "", fmt.Errorf("reading %s: %w", path, err)
+	}
+	return strings.TrimSpace(env[key]), nil
 }
 
 // fieldDef describes a configurable field for EffectiveFields.
