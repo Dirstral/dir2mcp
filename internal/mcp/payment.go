@@ -2,6 +2,8 @@ package mcp
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -13,6 +15,16 @@ import (
 
 	"dir2mcp/internal/x402"
 )
+
+type paymentExecutionOutcome struct {
+	StatusCode      int
+	Result          *toolCallResult
+	RPCError        *rpcError
+	RequiresSettle  bool
+	Settled         bool
+	PaymentResponse string
+	UpdatedAt       time.Time
+}
 
 func (s *Server) initPaymentConfig() {
 	mode := x402.NormalizeMode(s.cfg.X402.Mode)
@@ -58,10 +70,14 @@ func (s *Server) handleToolsCallRequest(ctx context.Context, w http.ResponseWrit
 		s.writePaymentChallenge(w, id, x402.CodePaymentRequired, "payment required", false)
 		return
 	}
+	executionKey := paymentExecutionKey(paymentSignature, rawParams)
+	if s.replayCachedPaymentOutcomeIfAny(ctx, w, id, paymentSignature, executionKey) {
+		return
+	}
 
 	verifyResponse, err := s.x402Client.Verify(ctx, paymentSignature, s.x402Requirement)
 	if err != nil {
-		s.handlePaymentFailure(w, id, "verify", err)
+		s.handlePaymentFailure(w, id, "verify", err, executionKey)
 		return
 	}
 	s.emitPaymentEvent("info", "payment_verified", map[string]interface{}{
@@ -71,8 +87,20 @@ func (s *Server) handleToolsCallRequest(ctx context.Context, w http.ResponseWrit
 		"response": json.RawMessage(verifyResponse),
 	})
 
+	if s.replayCachedPaymentOutcomeIfAny(ctx, w, id, paymentSignature, executionKey) {
+		return
+	}
+
 	result, statusCode, rpcErr := s.processToolsCall(ctx, rawParams)
+	outcome := paymentExecutionOutcome{
+		StatusCode: statusCode,
+		UpdatedAt:  time.Now().UTC(),
+	}
 	if rpcErr != nil {
+		outcome.RPCError = cloneRPCError(rpcErr)
+		outcome.RequiresSettle = false
+		outcome.Settled = true
+		s.setPaymentExecutionOutcome(executionKey, outcome)
 		writeResponse(w, statusCode, rpcResponse{
 			JSONRPC: "2.0",
 			ID:      id,
@@ -80,6 +108,10 @@ func (s *Server) handleToolsCallRequest(ctx context.Context, w http.ResponseWrit
 		})
 		return
 	}
+	outcome.Result = &result
+	outcome.RequiresSettle = !result.IsError
+	outcome.Settled = result.IsError
+	s.setPaymentExecutionOutcome(executionKey, outcome)
 	if result.IsError {
 		writeResult(w, statusCode, id, result)
 		return
@@ -87,12 +119,12 @@ func (s *Server) handleToolsCallRequest(ctx context.Context, w http.ResponseWrit
 
 	settleResponse, err := s.x402Client.Settle(ctx, paymentSignature, s.x402Requirement)
 	if err != nil {
-		s.handlePaymentFailure(w, id, "settle", err)
+		s.handlePaymentFailure(w, id, "settle", err, executionKey)
 		return
 	}
 
-	w.Header().Set(x402.HeaderPaymentResponse, string(settleResponse))
-	writeResult(w, statusCode, id, result)
+	outcome = s.markPaymentExecutionSettled(executionKey, string(settleResponse))
+	s.replayPaymentExecutionOutcome(w, id, outcome)
 
 	s.emitPaymentEvent("info", "payment_settled", map[string]interface{}{
 		"response": json.RawMessage(settleResponse),
@@ -102,7 +134,7 @@ func (s *Server) handleToolsCallRequest(ctx context.Context, w http.ResponseWrit
 	})
 }
 
-func (s *Server) handlePaymentFailure(w http.ResponseWriter, id interface{}, operation string, err error) {
+func (s *Server) handlePaymentFailure(w http.ResponseWriter, id interface{}, operation string, err error, executionKey string) {
 	facErr, ok := err.(*x402.FacilitatorError)
 	if !ok {
 		code := x402.CodePaymentFacilitatorUnavailable
@@ -116,6 +148,14 @@ func (s *Server) handlePaymentFailure(w http.ResponseWriter, id interface{}, ope
 			Message:    "payment processing failed",
 			Retryable:  true,
 			Cause:      err,
+		}
+	}
+	if operation == "settle" {
+		if outcome, ok := s.getPaymentExecutionOutcome(executionKey); ok {
+			if !outcome.RequiresSettle || outcome.Settled {
+				s.replayPaymentExecutionOutcome(w, id, outcome)
+				return
+			}
 		}
 	}
 
@@ -157,6 +197,101 @@ func (s *Server) handlePaymentFailure(w http.ResponseWriter, id interface{}, ope
 		return
 	}
 	writeError(w, statusCode, id, -32000, facErr.Message, facErr.Code, facErr.Retryable)
+}
+
+func paymentExecutionKey(paymentSignature string, rawParams json.RawMessage) string {
+	sum := sha256.Sum256(rawParams)
+	return paymentSignature + ":" + hex.EncodeToString(sum[:])
+}
+
+func (s *Server) replayCachedPaymentOutcomeIfAny(ctx context.Context, w http.ResponseWriter, id interface{}, paymentSignature, executionKey string) bool {
+	outcome, ok := s.getPaymentExecutionOutcome(executionKey)
+	if !ok {
+		return false
+	}
+	if !outcome.RequiresSettle || outcome.Settled {
+		s.replayPaymentExecutionOutcome(w, id, outcome)
+		return true
+	}
+
+	settleResponse, settleErr := s.x402Client.Settle(ctx, paymentSignature, s.x402Requirement)
+	if settleErr != nil {
+		s.handlePaymentFailure(w, id, "settle", settleErr, executionKey)
+		return true
+	}
+	outcome = s.markPaymentExecutionSettled(executionKey, string(settleResponse))
+	s.replayPaymentExecutionOutcome(w, id, outcome)
+
+	s.emitPaymentEvent("info", "payment_settled", map[string]interface{}{
+		"response": json.RawMessage(settleResponse),
+		"replay":   true,
+	})
+	s.appendPaymentLog("payment_settled", map[string]interface{}{
+		"response": json.RawMessage(settleResponse),
+		"replay":   true,
+	})
+	return true
+}
+
+func (s *Server) getPaymentExecutionOutcome(key string) (paymentExecutionOutcome, bool) {
+	if strings.TrimSpace(key) == "" {
+		return paymentExecutionOutcome{}, false
+	}
+	s.paymentMu.RLock()
+	defer s.paymentMu.RUnlock()
+	outcome, ok := s.paymentOutcomes[key]
+	return outcome, ok
+}
+
+func (s *Server) setPaymentExecutionOutcome(key string, outcome paymentExecutionOutcome) {
+	if strings.TrimSpace(key) == "" {
+		return
+	}
+	s.paymentMu.Lock()
+	defer s.paymentMu.Unlock()
+	s.paymentOutcomes[key] = outcome
+}
+
+func (s *Server) markPaymentExecutionSettled(key, paymentResponse string) paymentExecutionOutcome {
+	s.paymentMu.Lock()
+	defer s.paymentMu.Unlock()
+	outcome := s.paymentOutcomes[key]
+	outcome.Settled = true
+	outcome.PaymentResponse = strings.TrimSpace(paymentResponse)
+	outcome.UpdatedAt = time.Now().UTC()
+	s.paymentOutcomes[key] = outcome
+	return outcome
+}
+
+func cloneRPCError(err *rpcError) *rpcError {
+	if err == nil {
+		return nil
+	}
+	cloned := *err
+	if err.Data != nil {
+		data := *err.Data
+		cloned.Data = &data
+	}
+	return &cloned
+}
+
+func (s *Server) replayPaymentExecutionOutcome(w http.ResponseWriter, id interface{}, outcome paymentExecutionOutcome) {
+	if strings.TrimSpace(outcome.PaymentResponse) != "" {
+		w.Header().Set(x402.HeaderPaymentResponse, outcome.PaymentResponse)
+	}
+	if outcome.RPCError != nil {
+		writeResponse(w, outcome.StatusCode, rpcResponse{
+			JSONRPC: "2.0",
+			ID:      id,
+			Error:   cloneRPCError(outcome.RPCError),
+		})
+		return
+	}
+	if outcome.Result != nil {
+		writeResult(w, outcome.StatusCode, id, *outcome.Result)
+		return
+	}
+	writeError(w, http.StatusServiceUnavailable, id, -32603, "cached payment outcome unavailable", "INTERNAL_ERROR", true)
 }
 
 func (s *Server) writePaymentChallenge(w http.ResponseWriter, id interface{}, code, message string, retryable bool) {

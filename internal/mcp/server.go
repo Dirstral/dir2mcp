@@ -55,6 +55,8 @@ type Server struct {
 	x402Requirement x402.Requirement
 	x402Enabled     bool
 	paymentLogPath  string
+	paymentMu       sync.RWMutex
+	paymentOutcomes map[string]paymentExecutionOutcome
 
 	eventEmitter func(level, event string, data interface{})
 }
@@ -125,10 +127,11 @@ func WithEventEmitter(fn func(level, event string, data interface{})) ServerOpti
 
 func NewServer(cfg config.Config, retriever model.Retriever, opts ...ServerOption) *Server {
 	s := &Server{
-		cfg:       cfg,
-		authToken: loadAuthToken(cfg),
-		retriever: retriever,
-		sessions:  make(map[string]time.Time),
+		cfg:             cfg,
+		authToken:       loadAuthToken(cfg),
+		retriever:       retriever,
+		sessions:        make(map[string]time.Time),
+		paymentOutcomes: make(map[string]paymentExecutionOutcome),
 	}
 	for _, opt := range opts {
 		if opt != nil {

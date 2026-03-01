@@ -2,6 +2,7 @@ package tests
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 
 	"dir2mcp/internal/config"
 	"dir2mcp/internal/mcp"
+	"dir2mcp/internal/model"
 )
 
 func TestX402ToolsCall_UnpaidReturns402WithPaymentRequiredHeader(t *testing.T) {
@@ -226,6 +228,56 @@ func TestX402ToolsCall_FacilitatorBearerTokenForwarded(t *testing.T) {
 	}
 }
 
+func TestX402ToolsCall_SettleRetryReplaysCachedOutcomeWithoutReexecution(t *testing.T) {
+	fac := newFacilitatorStub(t)
+	fac.verifyStatus = http.StatusOK
+	fac.settleStatuses = []int{http.StatusServiceUnavailable, http.StatusOK}
+	fac.settleBodies = []string{
+		`{"message":"settlement unavailable"}`,
+		`{"ok":true,"txHash":"abc123"}`,
+	}
+	facServer := httptest.NewServer(fac)
+	defer facServer.Close()
+
+	cfg := x402EnabledTestConfig("https://resource.example.com")
+	cfg.AuthMode = "none"
+	cfg.X402.FacilitatorURL = facServer.URL
+
+	retriever := &countingSearchRetriever{}
+	server := httptest.NewServer(mcp.NewServer(cfg, retriever).Handler())
+	defer server.Close()
+
+	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
+	body := `{"jsonrpc":"2.0","id":201,"method":"tools/call","params":{"name":"dir2mcp.search","arguments":{"query":"foo"}}}`
+
+	first := postRPCWithHeaders(t, server.URL+cfg.MCPPath, sessionID, body, map[string]string{
+		"PAYMENT-SIGNATURE": "stable-payment-signature",
+	})
+	defer func() { _ = first.Body.Close() }()
+	assertRPCErrorCodeAndRetryable(t, first, http.StatusServiceUnavailable, "PAYMENT_SETTLEMENT_UNAVAILABLE", true)
+	if retriever.searchCalls != 1 {
+		t.Fatalf("search calls after first request=%d want=1", retriever.searchCalls)
+	}
+
+	second := postRPCWithHeaders(t, server.URL+cfg.MCPPath, sessionID, body, map[string]string{
+		"PAYMENT-SIGNATURE": "stable-payment-signature",
+	})
+	defer func() { _ = second.Body.Close() }()
+	if second.StatusCode != http.StatusOK {
+		payload, _ := io.ReadAll(second.Body)
+		t.Fatalf("status=%d want=%d body=%s", second.StatusCode, http.StatusOK, string(payload))
+	}
+	if strings.TrimSpace(second.Header.Get("PAYMENT-RESPONSE")) == "" {
+		t.Fatal("expected PAYMENT-RESPONSE header after successful retry settlement")
+	}
+	if retriever.searchCalls != 1 {
+		t.Fatalf("search calls after retry=%d want=1 (must replay cached outcome)", retriever.searchCalls)
+	}
+	if fac.settleCalls != 2 {
+		t.Fatalf("settle calls=%d want=2", fac.settleCalls)
+	}
+}
+
 func x402EnabledTestConfig(resourceBaseURL string) config.Config {
 	cfg := config.Default()
 	cfg.X402.Mode = "on"
@@ -302,6 +354,8 @@ type facilitatorStub struct {
 	settleStatus          int
 	verifyBody            string
 	settleBody            string
+	settleStatuses        []int
+	settleBodies          []string
 	verifyCalls           int
 	settleCalls           int
 	expectedAuthorization string
@@ -333,11 +387,48 @@ func (f *facilitatorStub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(f.verifyStatus)
 		_, _ = w.Write([]byte(f.verifyBody))
 	case "/v2/x402/settle":
+		status := f.settleStatus
+		body := f.settleBody
+		if len(f.settleStatuses) > 0 {
+			idx := f.settleCalls
+			if idx >= len(f.settleStatuses) {
+				idx = len(f.settleStatuses) - 1
+			}
+			status = f.settleStatuses[idx]
+		}
+		if len(f.settleBodies) > 0 {
+			idx := f.settleCalls
+			if idx >= len(f.settleBodies) {
+				idx = len(f.settleBodies) - 1
+			}
+			body = f.settleBodies[idx]
+		}
 		f.settleCalls++
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(f.settleStatus)
-		_, _ = w.Write([]byte(f.settleBody))
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(body))
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+type countingSearchRetriever struct {
+	searchCalls int
+}
+
+func (r *countingSearchRetriever) Search(_ context.Context, _ model.SearchQuery) ([]model.SearchHit, error) {
+	r.searchCalls++
+	return []model.SearchHit{}, nil
+}
+
+func (r *countingSearchRetriever) Ask(_ context.Context, _ string, _ model.SearchQuery) (model.AskResult, error) {
+	return model.AskResult{}, model.ErrNotImplemented
+}
+
+func (r *countingSearchRetriever) OpenFile(_ context.Context, _ string, _ model.Span, _ int) (string, error) {
+	return "", model.ErrNotImplemented
+}
+
+func (r *countingSearchRetriever) Stats(_ context.Context) (model.Stats, error) {
+	return model.Stats{}, model.ErrNotImplemented
 }
