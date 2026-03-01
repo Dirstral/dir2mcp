@@ -43,9 +43,12 @@ const (
 )
 
 const (
-	authTokenEnvVar    = "DIR2MCP_AUTH_TOKEN"
-	connectionFileName = "connection.json"
-	secretTokenName    = "secret.token"
+	authTokenEnvVar = "DIR2MCP_AUTH_TOKEN"
+	// environment variable for the x402 facilitator bearer token; CLI honors
+	// this value (but it is *not* persisted to disk) in addition to flags.
+	x402FacilitatorTokenEnvVar = "DIR2MCP_X402_FACILITATOR_TOKEN"
+	connectionFileName         = "connection.json"
+	secretTokenName            = "secret.token"
 )
 
 var commands = map[string]struct{}{
@@ -95,12 +98,14 @@ type globalOptions struct {
 
 type upOptions struct {
 	globalOptions
-	readOnly                  bool
-	public                    bool
-	forceInsecure             bool
-	x402Mode                  string
-	x402FacilitatorURL        string
+	readOnly           bool
+	public             bool
+	forceInsecure      bool
+	x402Mode           string
+	x402FacilitatorURL string
+	// token values may come from a flag, environment variable, or file path
 	x402FacilitatorToken      string
+	x402FacilitatorTokenFile  string
 	x402ResourceBaseURL       string
 	x402Network               string
 	x402Price                 string
@@ -356,7 +361,17 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	if strings.TrimSpace(opts.x402FacilitatorURL) != "" {
 		cfg.X402.FacilitatorURL = strings.TrimSpace(opts.x402FacilitatorURL)
 	}
-	if strings.TrimSpace(opts.x402FacilitatorToken) != "" {
+	// precedence: file path > env var > flag
+	if opts.x402FacilitatorTokenFile != "" {
+		data, err := os.ReadFile(opts.x402FacilitatorTokenFile)
+		if err != nil {
+			writef(a.stderr, "failed to read x402 facilitator token file: %v\n", err)
+			return exitConfigInvalid
+		}
+		cfg.X402.FacilitatorToken = strings.TrimSpace(string(data))
+	} else if token := strings.TrimSpace(os.Getenv(x402FacilitatorTokenEnvVar)); token != "" {
+		cfg.X402.FacilitatorToken = token
+	} else if strings.TrimSpace(opts.x402FacilitatorToken) != "" {
 		cfg.X402.FacilitatorToken = strings.TrimSpace(opts.x402FacilitatorToken)
 	}
 	if strings.TrimSpace(opts.x402ResourceBaseURL) != "" {
@@ -1372,7 +1387,8 @@ func parseUpOptions(global globalOptions, args []string) (upOptions, error) {
 	fs.BoolVar(&opts.forceInsecure, "force-insecure", false, "allow public mode without auth (unsafe)")
 	fs.StringVar(&opts.x402Mode, "x402", "", "x402 mode: off|on|required")
 	fs.StringVar(&opts.x402FacilitatorURL, "x402-facilitator-url", "", "x402 facilitator base URL")
-	fs.StringVar(&opts.x402FacilitatorToken, "x402-facilitator-token", "", "x402 facilitator bearer token")
+	fs.StringVar(&opts.x402FacilitatorToken, "x402-facilitator-token", "", "x402 facilitator bearer token (insecure; token may also be provided via env or file)")
+	fs.StringVar(&opts.x402FacilitatorTokenFile, "x402-facilitator-token-file", "", "path to file containing x402 facilitator bearer token")
 	fs.StringVar(&opts.x402ResourceBaseURL, "x402-resource-base-url", "", "x402 resource base URL")
 	fs.StringVar(&opts.x402Network, "x402-network", "", "x402 network (CAIP-2)")
 	fs.StringVar(&opts.x402Price, "x402-price", "", "x402 atomic price per call")

@@ -748,7 +748,7 @@ func (s *Service) StoreAnnotationRepresentations(ctx context.Context, doc model.
 	}
 	jsonText := string(jsonBytes)
 
-	flattened := flattenJSONForIndexing(annotation)
+	flattened := s.flattenJSONForIndexing(annotation)
 	preview := flattened
 	if runes := []rune(preview); len(runes) > 240 {
 		preview = string(runes[:240]) + "..."
@@ -1003,7 +1003,12 @@ func (s *Service) ReadOrComputeTranscript(ctx context.Context, doc model.Documen
 	return s.readOrComputeTranscript(ctx, doc, content)
 }
 
-func flattenJSONForIndexing(v interface{}) string {
+// flattenJSONForIndexing walks an arbitrary JSON-like structure and
+// builds a string suitable for indexing. When a value cannot be marshaled we
+// log the failure to the provided logger and continue; previously this helper
+// used the package-global log.Printf which made testing and customization
+// difficult.
+func (s *Service) flattenJSONForIndexing(v interface{}) string {
 	var lines []string
 	var walk func(prefix string, value interface{})
 	walk = func(prefix string, value interface{}) {
@@ -1037,7 +1042,7 @@ func flattenJSONForIndexing(v interface{}) string {
 				// so that other entries aren't dropped. include prefix, the
 				// value being marshaled and a reference to json.Marshal in the
 				// message so the source is obvious when debugging.
-				log.Printf("flattenJSONForIndexing: json.Marshal failed for prefix=%q type=%T error=%v (lines so far=%d)",
+				s.getLogger().Printf("flattenJSONForIndexing: json.Marshal failed for prefix=%q type=%T error=%v (lines so far=%d)",
 					prefix, typed, err, len(lines))
 				return
 			}

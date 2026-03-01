@@ -619,6 +619,8 @@ func TestUpPublicAuthNoneAllowedWithForceInsecure(t *testing.T) {
 func TestUpX402RequiredMissingFieldsFailsFast(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("MISTRAL_API_KEY", "test-key")
+	// ensure previous tests don't leak auth token
+	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -648,6 +650,8 @@ func TestUpX402RequiredMissingFieldsFailsFast(t *testing.T) {
 func TestUpX402OnAllowsMissingFields(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("MISTRAL_API_KEY", "test-key")
+	// ensure no leftover auth token influences behaviour
+	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -661,11 +665,33 @@ func TestUpX402OnAllowsMissingFields(t *testing.T) {
 			"up",
 			"--x402", "on",
 			"--listen", "127.0.0.1:0",
+			"--json",
 		})
 		if code != 0 {
 			t.Fatalf("unexpected exit code: got=%d stderr=%s", code, stderr.String())
 		}
 	})
+
+	// verify server_started event in NDJSON output
+	lines := scanLines(t, stdout.String())
+	if len(lines) == 0 {
+		t.Fatal("expected NDJSON output")
+	}
+
+	found := false
+	for _, line := range lines {
+		var ev map[string]interface{}
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			t.Fatalf("invalid NDJSON line: %q err=%v", line, err)
+		}
+		if ev["event"] != "server_started" {
+			continue
+		}
+		found = true
+	}
+	if !found {
+		t.Fatal("missing server_started event")
+	}
 }
 
 func TestUpPublicRespectsExplicitListen(t *testing.T) {

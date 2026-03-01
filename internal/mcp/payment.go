@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"net/http"
@@ -79,6 +81,12 @@ func (s *Server) handleToolsCallRequest(ctx context.Context, w http.ResponseWrit
 		return
 	}
 	executionKey := paymentExecutionKey(paymentSignature, rawParams)
+
+	// hold a per-key lock to serialize check/execute/set actions and avoid
+	// races when the same signature+params are processed concurrently.
+	unlock := s.lockForExecutionKey(executionKey)
+	defer unlock()
+
 	if s.replayCachedPaymentOutcomeIfAny(ctx, w, id, paymentSignature, executionKey) {
 		return
 	}
@@ -241,6 +249,26 @@ func (s *Server) replayCachedPaymentOutcomeIfAny(ctx context.Context, w http.Res
 	return true
 }
 
+// lockForExecutionKey returns an unlock function for the mutex associated with the
+// given executionKey.  The caller must call the returned function when the
+// critical section is complete.  If the key is empty, a no-op unlock is
+// returned.
+func (s *Server) lockForExecutionKey(key string) func() {
+	if strings.TrimSpace(key) == "" {
+		return func() {}
+	}
+	// ensure a mutex exists for the key
+	s.execMu.Lock()
+	mu, ok := s.execKeyMu[key]
+	if !ok {
+		mu = &sync.Mutex{}
+		s.execKeyMu[key] = mu
+	}
+	s.execMu.Unlock()
+	mu.Lock()
+	return mu.Unlock
+}
+
 func (s *Server) getPaymentExecutionOutcome(key string) (paymentExecutionOutcome, bool) {
 	if strings.TrimSpace(key) == "" {
 		return paymentExecutionOutcome{}, false
@@ -260,14 +288,26 @@ func (s *Server) setPaymentExecutionOutcome(key string, outcome paymentExecution
 	defer s.paymentMu.Unlock()
 	now := time.Now().UTC()
 	s.prunePaymentOutcomesLocked(now)
+
+	// compare-and-swap: only write if there is no existing finalized outcome.
+	existing, ok := s.paymentOutcomes[key]
+	if ok && !existing.UpdatedAt.IsZero() {
+		// already completed by another goroutine; skip overwrite.
+		return
+	}
+
 	s.paymentOutcomes[key] = outcome
-	s.prunePaymentOutcomesLocked(now)
 }
 
 func (s *Server) markPaymentExecutionSettled(key, paymentResponse string) paymentExecutionOutcome {
 	s.paymentMu.Lock()
 	defer s.paymentMu.Unlock()
-	outcome := s.paymentOutcomes[key]
+	outcome, ok := s.paymentOutcomes[key]
+	if !ok {
+		// nothing to settle; avoid creating a partial entry
+		s.emitPaymentEvent("warn", "payment_outcome_missing", map[string]interface{}{"key": key})
+		return paymentExecutionOutcome{}
+	}
 	outcome.Settled = true
 	outcome.PaymentResponse = strings.TrimSpace(paymentResponse)
 	outcome.UpdatedAt = time.Now().UTC()
@@ -327,10 +367,7 @@ func (s *Server) appendPaymentLog(event string, data map[string]interface{}) {
 	if strings.TrimSpace(s.paymentLogPath) == "" {
 		return
 	}
-	if err := os.MkdirAll(filepath.Dir(s.paymentLogPath), 0o755); err != nil {
-		s.emitPaymentLogWarning(err)
-		return
-	}
+
 	entry := map[string]interface{}{
 		"ts":    time.Now().UTC().Format(time.RFC3339Nano),
 		"event": event,
@@ -341,18 +378,94 @@ func (s *Server) appendPaymentLog(event string, data map[string]interface{}) {
 		s.emitPaymentLogWarning(err)
 		return
 	}
+
+	// attempt to use cached writer
+	s.paymentLogMu.Lock()
+	writer := s.paymentLogWriter
+	file := s.paymentLogFile
+	s.paymentLogMu.Unlock()
+
+	if writer != nil && file != nil {
+		if _, err := writer.Write(raw); err != nil {
+			s.emitPaymentLogWarning(err)
+			return
+		}
+		if _, err := writer.WriteString("\n"); err != nil {
+			s.emitPaymentLogWarning(err)
+			return
+		}
+		if err := writer.Flush(); err != nil {
+			s.emitPaymentLogWarning(err)
+		}
+		return
+	}
+
+	// initialize cache if possible
+	s.paymentLogMu.Lock()
+	if s.paymentLogWriter == nil || s.paymentLogFile == nil {
+		if err := os.MkdirAll(filepath.Dir(s.paymentLogPath), 0o755); err != nil {
+			s.paymentLogMu.Unlock()
+			s.emitPaymentLogWarning(err)
+			// fallback to open-per-call behavior
+			f, err2 := os.OpenFile(s.paymentLogPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+			if err2 != nil {
+				s.emitPaymentLogWarning(err2)
+				return
+			}
+			if _, err2 := fmt.Fprintf(f, "%s\n", raw); err2 != nil {
+				s.emitPaymentLogWarning(err2)
+			}
+			_ = f.Close()
+			return
+		}
+		f, err := os.OpenFile(s.paymentLogPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+		if err != nil {
+			s.paymentLogMu.Unlock()
+			s.emitPaymentLogWarning(err)
+			// fallback
+			f2, err2 := os.OpenFile(s.paymentLogPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+			if err2 != nil {
+				s.emitPaymentLogWarning(err2)
+				return
+			}
+			if _, err2 := fmt.Fprintf(f2, "%s\n", raw); err2 != nil {
+				s.emitPaymentLogWarning(err2)
+			}
+			_ = f2.Close()
+			return
+		}
+		w := bufio.NewWriter(f)
+		s.paymentLogFile = f
+		s.paymentLogWriter = w
+		writer = w
+	}
+	s.paymentLogMu.Unlock()
+
+	if writer != nil {
+		if _, err := writer.Write(raw); err != nil {
+			s.emitPaymentLogWarning(err)
+			return
+		}
+		if _, err := writer.WriteString("\n"); err != nil {
+			s.emitPaymentLogWarning(err)
+			return
+		}
+		if err := writer.Flush(); err != nil {
+			s.emitPaymentLogWarning(err)
+		}
+		return
+	}
+
+	// should not reach here, but safe fallback as last resort
 	f, err := os.OpenFile(s.paymentLogPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
 		s.emitPaymentLogWarning(err)
 		return
 	}
-
 	if _, err := fmt.Fprintf(f, "%s\n", raw); err != nil {
 		s.emitPaymentLogWarning(err)
 	}
-	if err := f.Close(); err != nil {
-		s.emitPaymentLogWarning(err)
-	}
+	_ = f.Close()
 }
 
 func (s *Server) emitPaymentLogWarning(err error) {
@@ -360,9 +473,8 @@ func (s *Server) emitPaymentLogWarning(err error) {
 		return
 	}
 	s.emitPaymentEvent("warning", "payment_log_write_failed", map[string]interface{}{
-		"level": "warning",
-		"msg":   "payment log write failed",
-		"path":  s.paymentLogPath,
-		"err":   err.Error(),
+		"msg":  "payment log write failed",
+		"path": s.paymentLogPath,
+		"err":  err.Error(),
 	})
 }

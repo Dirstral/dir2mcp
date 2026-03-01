@@ -158,6 +158,41 @@ func TestLoad_DefaultElevenLabsVoiceID(t *testing.T) {
 	})
 }
 
+func TestLoad_X402FacilitatorTokenEnvOnly(t *testing.T) {
+	tmp := t.TempDir()
+
+	testutil.WithWorkingDir(t, tmp, func() {
+		// write a config file containing the sensitive field; it should be ignored
+		writeFile(t, filepath.Join(tmp, ".dir2mcp.yaml"), "x402_facilitator_token: should-not-be-used\n")
+		// no environment variable set -> token stays empty
+		cfg, err := config.Load("")
+		if err != nil {
+			t.Fatalf("Load failed: %v", err)
+		}
+		if cfg.X402.FacilitatorToken != "" {
+			t.Fatalf("expected empty token when config file provides it, got %q", cfg.X402.FacilitatorToken)
+		}
+		// environment variable should take precedence
+		t.Setenv("DIR2MCP_X402_FACILITATOR_TOKEN", "envval")
+		cfg2, err := config.Load("")
+		if err != nil {
+			t.Fatalf("Load failed: %v", err)
+		}
+		if cfg2.X402.FacilitatorToken != "envval" {
+			t.Fatalf("expected envval, got %q", cfg2.X402.FacilitatorToken)
+		}
+		// clearing the env var causes the loader to return to defaults (no token)
+		t.Setenv("DIR2MCP_X402_FACILITATOR_TOKEN", "")
+		cfg3, err := config.Load("")
+		if err != nil {
+			t.Fatalf("Load failed: %v", err)
+		}
+		if cfg3.X402.FacilitatorToken != "" {
+			t.Fatalf("expected token to be empty after env cleared, got %q", cfg3.X402.FacilitatorToken)
+		}
+	})
+}
+
 func TestLoad_AllowedOriginsEnvAppendsToDefaults(t *testing.T) {
 	tmp := t.TempDir()
 

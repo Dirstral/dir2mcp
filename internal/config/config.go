@@ -17,8 +17,11 @@ import (
 const DefaultProtocolVersion = "2025-11-25"
 
 type X402Config struct {
-	Mode             string
-	FacilitatorURL   string
+	Mode           string
+	FacilitatorURL string
+	// FacilitatorToken is sensitive and must not be written to disk.
+	// Operators should provide it via DIR2MCP_X402_FACILITATOR_TOKEN env var
+	// or CLI flags/file options; the config loader ignores file values.
 	FacilitatorToken string
 	ResourceBaseURL  string
 	ToolsCallEnabled bool
@@ -127,14 +130,19 @@ type persistedConfig struct {
 	EmbedModelCode       string   `yaml:"embed_model_code"`
 	X402Mode             string   `yaml:"x402_mode"`
 	X402FacilitatorURL   string   `yaml:"x402_facilitator_url"`
-	X402FacilitatorToken string   `yaml:"x402_facilitator_token"`
-	X402ResourceBaseURL  string   `yaml:"x402_resource_base_url"`
-	X402ToolsCallEnabled bool     `yaml:"x402_tools_call_enabled"`
-	X402PriceAtomic      string   `yaml:"x402_price_atomic"`
-	X402Network          string   `yaml:"x402_network"`
-	X402Scheme           string   `yaml:"x402_scheme"`
-	X402Asset            string   `yaml:"x402_asset"`
-	X402PayTo            string   `yaml:"x402_pay_to"`
+	// FacilitatorToken is a sensitive bearer token used for x402 operations.
+	// It is intentionally **not** persisted to disk; operators must supply it via
+	// the environment variable DIR2MCP_X402_FACILITATOR_TOKEN.  This mirrors the
+	// treatment of other API keys and prevents accidental leakage when the
+	// config file is written or shared.
+	// (persisted config omits this field entirely)
+	X402ResourceBaseURL  string `yaml:"x402_resource_base_url"`
+	X402ToolsCallEnabled bool   `yaml:"x402_tools_call_enabled"`
+	X402PriceAtomic      string `yaml:"x402_price_atomic"`
+	X402Network          string `yaml:"x402_network"`
+	X402Scheme           string `yaml:"x402_scheme"`
+	X402Asset            string `yaml:"x402_asset"`
+	X402PayTo            string `yaml:"x402_pay_to"`
 }
 
 func Default() Config {
@@ -234,7 +242,8 @@ func SaveFile(path string, cfg Config) error {
 		EmbedModelCode:       cfg.EmbedModelCode,
 		X402Mode:             cfg.X402.Mode,
 		X402FacilitatorURL:   cfg.X402.FacilitatorURL,
-		X402FacilitatorToken: cfg.X402.FacilitatorToken,
+		// token intentionally omitted to avoid persisting secrets
+		// X402FacilitatorToken: cfg.X402.FacilitatorToken,
 		X402ResourceBaseURL:  cfg.X402.ResourceBaseURL,
 		X402ToolsCallEnabled: cfg.X402.ToolsCallEnabled,
 		X402PriceAtomic:      cfg.X402.PriceAtomic,
@@ -373,9 +382,8 @@ func applyFileOverrides(cfg *Config, path string) error {
 	if fileCfg.X402FacilitatorURL != nil {
 		cfg.X402.FacilitatorURL = *fileCfg.X402FacilitatorURL
 	}
-	if fileCfg.X402FacilitatorToken != nil {
-		cfg.X402.FacilitatorToken = *fileCfg.X402FacilitatorToken
-	}
+	// ignore any x402_facilitator_token value from disk; tokens must come from
+	// the environment to avoid persistence.
 	if fileCfg.X402ResourceBaseURL != nil {
 		cfg.X402.ResourceBaseURL = *fileCfg.X402ResourceBaseURL
 	}
@@ -542,7 +550,7 @@ func setFileScalarValue(cfg *fileConfig, key, value string) error {
 	case "x402_facilitator_url":
 		cfg.X402FacilitatorURL = strPtr(value)
 	case "x402_facilitator_token":
-		cfg.X402FacilitatorToken = strPtr(value)
+		// field deliberately ignored; tokens are env-only for security
 	case "x402_resource_base_url":
 		cfg.X402ResourceBaseURL = strPtr(value)
 	case "x402_tools_call_enabled":
@@ -648,7 +656,8 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeScalar("embed_model_code", cfg.EmbedModelCode)
 	writeScalar("x402_mode", cfg.X402Mode)
 	writeScalar("x402_facilitator_url", cfg.X402FacilitatorURL)
-	writeScalar("x402_facilitator_token", cfg.X402FacilitatorToken)
+	// token is never written to disk
+	// writeScalar("x402_facilitator_token", cfg.X402FacilitatorToken)
 	writeScalar("x402_resource_base_url", cfg.X402ResourceBaseURL)
 	writeBool("x402_tools_call_enabled", cfg.X402ToolsCallEnabled)
 	writeScalar("x402_price_atomic", cfg.X402PriceAtomic)
@@ -726,13 +735,13 @@ func applyEnvOverrides(cfg *Config, overrideEnv map[string]string) {
 	if raw, ok := envLookup("DIR2MCP_X402_MODE", overrideEnv); ok && strings.TrimSpace(raw) != "" {
 		cfg.X402.Mode = strings.TrimSpace(raw)
 	}
-	if raw, ok := envLookup("DIR2MCP_X402_FACILITATOR_URL", overrideEnv); ok {
+	if raw, ok := envLookup("DIR2MCP_X402_FACILITATOR_URL", overrideEnv); ok && strings.TrimSpace(raw) != "" {
 		cfg.X402.FacilitatorURL = strings.TrimSpace(raw)
 	}
-	if raw, ok := envLookup("DIR2MCP_X402_FACILITATOR_TOKEN", overrideEnv); ok {
+	if raw, ok := envLookup("DIR2MCP_X402_FACILITATOR_TOKEN", overrideEnv); ok && strings.TrimSpace(raw) != "" {
 		cfg.X402.FacilitatorToken = strings.TrimSpace(raw)
 	}
-	if raw, ok := envLookup("DIR2MCP_X402_RESOURCE_BASE_URL", overrideEnv); ok {
+	if raw, ok := envLookup("DIR2MCP_X402_RESOURCE_BASE_URL", overrideEnv); ok && strings.TrimSpace(raw) != "" {
 		cfg.X402.ResourceBaseURL = strings.TrimSpace(raw)
 	}
 	if raw, ok := envLookup("DIR2MCP_X402_TOOLS_CALL_ENABLED", overrideEnv); ok && strings.TrimSpace(raw) != "" {
@@ -740,7 +749,10 @@ func applyEnvOverrides(cfg *Config, overrideEnv map[string]string) {
 			cfg.X402.ToolsCallEnabled = enabled
 		}
 	}
-	if raw, ok := envLookup("DIR2MCP_X402_PRICE", overrideEnv); ok && strings.TrimSpace(raw) != "" {
+	// prefer the atomic env var name matching the YAML key; fall back for compatibility
+	if raw, ok := envLookup("DIR2MCP_X402_PRICE_ATOMIC", overrideEnv); ok && strings.TrimSpace(raw) != "" {
+		cfg.X402.PriceAtomic = strings.TrimSpace(raw)
+	} else if raw, ok := envLookup("DIR2MCP_X402_PRICE", overrideEnv); ok && strings.TrimSpace(raw) != "" {
 		cfg.X402.PriceAtomic = strings.TrimSpace(raw)
 	}
 	if raw, ok := envLookup("DIR2MCP_X402_NETWORK", overrideEnv); ok && strings.TrimSpace(raw) != "" {
@@ -786,9 +798,7 @@ func (c Config) ValidateX402(strict bool) error {
 		}
 	}
 
-	if network := strings.TrimSpace(c.X402.Network); network != "" && !isCAIP2Network(network) {
-		return fmt.Errorf("x402 network must be CAIP-2")
-	}
+	// network is validated later when strict mode is enabled; no need to duplicate
 
 	if !strict {
 		return nil

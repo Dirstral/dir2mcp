@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
@@ -65,6 +66,16 @@ type Server struct {
 	paymentOutcomes map[string]paymentExecutionOutcome
 	paymentTTL      time.Duration
 	paymentMaxItems int
+
+	// cached writer used by appendPaymentLog. protected by paymentLogMu.
+	paymentLogMu     sync.Mutex
+	paymentLogFile   *os.File
+	paymentLogWriter *bufio.Writer
+
+	// per-execution-key locks used to serialize payment handling for identical
+	// signatures+params.  Map is protected by execMu.
+	execMu    sync.Mutex
+	execKeyMu map[string]*sync.Mutex
 
 	eventEmitter func(level, event string, data interface{})
 }
@@ -142,6 +153,7 @@ func NewServer(cfg config.Config, retriever model.Retriever, opts ...ServerOptio
 		paymentOutcomes: make(map[string]paymentExecutionOutcome),
 		paymentTTL:      paymentOutcomeTTL,
 		paymentMaxItems: paymentOutcomeMaxEntries,
+		execKeyMu:       make(map[string]*sync.Mutex),
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -206,6 +218,9 @@ func (s *Server) RunOnListener(ctx context.Context, ln net.Listener) error {
 	if ln == nil {
 		return errors.New("nil listener passed to RunOnListener")
 	}
+	// make sure any cached payment-log resources are flushed when the server
+	// stops; the deferred call is harmless if nothing was opened.
+	defer func() { _ = s.Close() }() // ignore error per errcheck
 
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -683,4 +698,21 @@ func isOriginAllowed(origin string, allowlist []string) bool {
 		}
 	}
 	return false
+}
+
+// Close flushes and closes any cached payment log writer/file. It is safe to call
+// multiple times and may be used during server shutdown to ensure durability.
+func (s *Server) Close() error {
+	s.paymentLogMu.Lock()
+	defer s.paymentLogMu.Unlock()
+	if s.paymentLogWriter != nil {
+		_ = s.paymentLogWriter.Flush()
+		s.paymentLogWriter = nil
+	}
+	if s.paymentLogFile != nil {
+		err := s.paymentLogFile.Close()
+		s.paymentLogFile = nil
+		return err
+	}
+	return nil
 }

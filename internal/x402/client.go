@@ -98,11 +98,13 @@ func (c *HTTPClient) do(ctx context.Context, operation, paymentSignature string,
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(rawBody))
 	if err != nil {
+		// request construction failures are programming/validation issues; not
+		// retryable since a retry will never succeed.
 		return nil, &FacilitatorError{
 			Operation: operation,
 			Code:      CodePaymentFacilitatorUnavailable,
 			Message:   "failed to create facilitator request",
-			Retryable: true,
+			Retryable: false,
 			Cause:     err,
 		}
 	}

@@ -212,6 +212,8 @@ TOKEN="${DIR2MCP_AUTH_TOKEN:-$(cat .dir2mcp/secret.token)}"
 ```bash
 INIT_HEADERS="$(mktemp)"
 INIT_BODY="$(mktemp)"
+# ensure temporary headers/body files are removed on exit or interrupt
+trap 'rm -f "$INIT_HEADERS" "$INIT_BODY"' EXIT
 curl -sS -D "$INIT_HEADERS" -o "$INIT_BODY" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $TOKEN" \

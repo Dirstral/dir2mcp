@@ -1,6 +1,7 @@
 package tests
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -28,13 +29,13 @@ func TestLoad_EnvOverridesX402(t *testing.T) {
 			t.Fatalf("X402.Mode=%q want=%q", cfg.X402.Mode, "on")
 		}
 		if cfg.X402.FacilitatorURL != "https://facilitator.example.com" {
-			t.Fatalf("X402.FacilitatorURL=%q", cfg.X402.FacilitatorURL)
+			t.Fatalf("X402.FacilitatorURL=%q want=%q", cfg.X402.FacilitatorURL, "https://facilitator.example.com")
 		}
 		if cfg.X402.ResourceBaseURL != "https://resource.example.com" {
-			t.Fatalf("X402.ResourceBaseURL=%q", cfg.X402.ResourceBaseURL)
+			t.Fatalf("X402.ResourceBaseURL=%q want=%q", cfg.X402.ResourceBaseURL, "https://resource.example.com")
 		}
 		if cfg.X402.Network != "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp" {
-			t.Fatalf("X402.Network=%q", cfg.X402.Network)
+			t.Fatalf("X402.Network=%q want=%q", cfg.X402.Network, "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp")
 		}
 		if cfg.X402.Asset != "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" {
 			t.Fatalf("X402.Asset=%q want=%q", cfg.X402.Asset, "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v")
@@ -45,9 +46,43 @@ func TestLoad_EnvOverridesX402(t *testing.T) {
 	})
 }
 
-func TestValidateX402_StrictRequiresCAIP2Network(t *testing.T) {
+func TestLoad_EnvOverridesX402_EmptyIgnored(t *testing.T) {
+	tmp := t.TempDir()
+
+	testutil.WithWorkingDir(t, tmp, func() {
+		// start with a config file specifying non-empty values
+		yaml := `x402_facilitator_url: https://facilitator.example.com
+x402_resource_base_url: https://resource.example.com
+` // token is sensitive and ignored by config file
+		writeFile(t, filepath.Join(tmp, ".dir2mcp.yaml"), yaml)
+
+		// set environment variables to empty or whitespace
+		t.Setenv("DIR2MCP_X402_FACILITATOR_URL", "")
+		t.Setenv("DIR2MCP_X402_FACILITATOR_TOKEN", "  ")
+		t.Setenv("DIR2MCP_X402_RESOURCE_BASE_URL", "   ")
+
+		// load config file so that file values are applied
+		cfg, err := config.Load(".dir2mcp.yaml")
+		if err != nil {
+			t.Fatalf("Load failed: %v", err)
+		}
+
+		// blank env values should not override config file values (or default for token)
+		if cfg.X402.FacilitatorURL != "https://facilitator.example.com" {
+			t.Fatalf("expected facilitator URL to remain unchanged, got %q", cfg.X402.FacilitatorURL)
+		}
+		if cfg.X402.ResourceBaseURL != "https://resource.example.com" {
+			t.Fatalf("expected resource base URL to remain unchanged, got %q", cfg.X402.ResourceBaseURL)
+		}
+		if cfg.X402.FacilitatorToken != "" {
+			t.Fatalf("expected facilitator token to stay empty, got %q", cfg.X402.FacilitatorToken)
+		}
+	})
+}
+
+func TestValidateX402_InvalidNetwork(t *testing.T) {
 	cfg := config.Default()
-	cfg.X402.Mode = "required"
+	cfg.X402.Mode = "required" // enable validation path
 	cfg.X402.ToolsCallEnabled = true
 	cfg.X402.FacilitatorURL = "https://facilitator.example.com"
 	cfg.X402.ResourceBaseURL = "https://resource.example.com"

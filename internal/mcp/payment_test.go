@@ -11,7 +11,12 @@ func TestInitPaymentConfig_ModeOnIncompleteConfigDisablesGating(t *testing.T) {
 	cfg := config.Default()
 	cfg.X402.Mode = "on"
 	cfg.X402.ToolsCallEnabled = true
-	// Intentionally incomplete x402 config.
+	// Intentionally incomplete X402 config for TestInitPaymentConfig_ModeOnIncompleteConfigDisablesGating.
+	// We enable mode=on and tools call but omit all required fields such as payment address,
+	// network/chain ID, and any merchant ID or API key that NewServer's X402 validation
+	// would normally require. The cfg.X402 struct passed to NewServer here has only
+	// Mode and ToolsCallEnabled set; nothing else is populated, which should keep
+	// x402Enabled=false and gating disabled despite the mode being "on".
 
 	s := NewServer(cfg, nil)
 	if s.x402Enabled {

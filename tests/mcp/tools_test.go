@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -169,13 +170,16 @@ func TestMCPToolsCallTranscribe_Success(t *testing.T) {
 	cfg.MistralAPIKey = "test-key"
 	var gotLanguage string
 
+	// use a channel to propagate handler errors back to the main goroutine
+	errCh := make(chan error, 1)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/audio/transcriptions" {
 			http.NotFound(w, r)
 			return
 		}
 		if err := r.ParseMultipartForm(8 << 20); err != nil {
-			t.Fatalf("parse multipart form: %v", err)
+			errCh <- fmt.Errorf("parse multipart form: %v", err)
+			return
 		}
 		gotLanguage = r.FormValue("language")
 		_, _ = io.Copy(io.Discard, r.Body)
@@ -192,6 +196,12 @@ func TestMCPToolsCallTranscribe_Success(t *testing.T) {
 	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
 	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":32,"method":"tools/call","params":{"name":"dir2mcp.transcribe","arguments":{"rel_path":"voice.wav","timestamps":true,"language":"fr"}}}`)
 	defer func() { _ = resp.Body.Close() }()
+	// check if the upstream handler encountered an error
+	select {
+	case err := <-errCh:
+		t.Fatalf("upstream handler error: %v", err)
+	default:
+	}
 	if resp.StatusCode != http.StatusOK {
 		payload, _ := io.ReadAll(resp.Body)
 		t.Fatalf("status=%d want=%d body=%s", resp.StatusCode, http.StatusOK, string(payload))

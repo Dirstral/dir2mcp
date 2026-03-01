@@ -32,6 +32,28 @@ type Requirement struct {
 	Resource string
 }
 
+// X402Payload represents the JSON object returned in the PAYMENT-REQUIRED header.
+// It mirrors the previous map structure but provides compile-time safety.
+//
+// Consumers depend on the field names to match the existing keys, so the tags
+// are chosen accordingly.
+type X402Payload struct {
+	X402Version int           `json:"x402Version"`
+	Accept      []AcceptEntry `json:"accepts"`
+}
+
+// AcceptEntry describes a single acceptable payment requirement.
+// The json tags match the keys previously used in the map literal.
+type AcceptEntry struct {
+	Scheme            string `json:"scheme"`
+	Network           string `json:"network"`
+	Amount            string `json:"amount"`
+	MaxAmountRequired string `json:"maxAmountRequired"`
+	Asset             string `json:"asset"`
+	PayTo             string `json:"payTo"`
+	Resource          string `json:"resource"`
+}
+
 func (r Requirement) Validate() error {
 	if strings.TrimSpace(r.Scheme) == "" {
 		return fmt.Errorf("x402 scheme is required")
@@ -64,21 +86,24 @@ func BuildPaymentRequiredHeaderValue(req Requirement) (string, error) {
 		return "", err
 	}
 
-	payload := map[string]interface{}{
-		"x402Version": 2,
-		"accepts": []map[string]interface{}{
+	// assemble a typed payload rather than a loose map; this aids
+	// compile-time checking and prevents inadvertent typos.
+	p := X402Payload{
+		X402Version: 2,
+		Accept: []AcceptEntry{
 			{
-				"scheme":            strings.TrimSpace(req.Scheme),
-				"network":           strings.TrimSpace(req.Network),
-				"amount":            strings.TrimSpace(req.Amount),
-				"maxAmountRequired": strings.TrimSpace(req.Amount),
-				"asset":             strings.TrimSpace(req.Asset),
-				"payTo":             strings.TrimSpace(req.PayTo),
-				"resource":          strings.TrimSpace(req.Resource),
+				Scheme:            strings.TrimSpace(req.Scheme),
+				Network:           strings.TrimSpace(req.Network),
+				Amount:            strings.TrimSpace(req.Amount),
+				MaxAmountRequired: strings.TrimSpace(req.Amount),
+				Asset:             strings.TrimSpace(req.Asset),
+				PayTo:             strings.TrimSpace(req.PayTo),
+				Resource:          strings.TrimSpace(req.Resource),
 			},
 		},
 	}
-	raw, err := json.Marshal(payload)
+
+	raw, err := json.Marshal(p)
 	if err != nil {
 		return "", err
 	}

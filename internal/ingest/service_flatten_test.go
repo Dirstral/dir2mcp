@@ -6,7 +6,10 @@ import (
 )
 
 func TestFlattenJSONForIndexing_MapAndArray(t *testing.T) {
-	out := flattenJSONForIndexing(map[string]interface{}{
+	// service instance is only used for its logging helper; tests don't
+	// actually inspect the logger output.
+	s := &Service{}
+	out := s.flattenJSONForIndexing(map[string]interface{}{
 		"summary": "alpha",
 		"topics":  []interface{}{"x", "y"},
 		"meta": map[string]interface{}{
@@ -22,14 +25,19 @@ func TestFlattenJSONForIndexing_MapAndArray(t *testing.T) {
 	}
 	for _, frag := range wantContains {
 		if !strings.Contains(out, frag) {
-			t.Fatalf("expected flattened output to contain %q, got %q", frag, out)
+			t.Errorf("expected flattened output to contain %q, got %q", frag, out)
 		}
+	}
+	if t.Failed() {
+		// ensure the test exits non-successfully after reporting all missing fragments
+		t.FailNow()
 	}
 }
 
 func TestFlattenJSONForIndexing_MarshalErrorFallback(t *testing.T) {
 	// Unsupported value (channel) cannot be JSON-marshaled.
-	out := flattenJSONForIndexing(make(chan int))
+	s := &Service{}
+	out := s.flattenJSONForIndexing(make(chan int))
 	if out != "" {
 		t.Fatalf("expected empty output for marshal-error fallback, got %q", out)
 	}

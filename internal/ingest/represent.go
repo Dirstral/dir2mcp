@@ -373,7 +373,7 @@ func splitTranscriptSegmentWithTiming(text string, startMS, endMS int) []chunkSe
 			partEnd = partStart + 1
 		}
 		out = append(out, chunkSegment{
-			Text: strings.TrimSpace(part.Text),
+			Text: part.Text,
 			Span: model.Span{
 				Kind:    "time",
 				StartMS: partStart,

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"dir2mcp/internal/config"
@@ -90,11 +91,11 @@ func TestX402ToolsCall_PaidRetrySucceedsAndReturnsPaymentResponse(t *testing.T) 
 	if strings.TrimSpace(resp.Header.Get("PAYMENT-RESPONSE")) == "" {
 		t.Fatal("expected PAYMENT-RESPONSE header on successful paid call")
 	}
-	if fac.verifyCalls != 1 {
-		t.Fatalf("verify calls=%d want=1", fac.verifyCalls)
+	if fac.verifyCalls.Load() != 1 {
+		t.Fatalf("verify calls=%d want=1", fac.verifyCalls.Load())
 	}
-	if fac.settleCalls != 1 {
-		t.Fatalf("settle calls=%d want=1", fac.settleCalls)
+	if fac.settleCalls.Load() != 1 {
+		t.Fatalf("settle calls=%d want=1", fac.settleCalls.Load())
 	}
 }
 
@@ -145,8 +146,8 @@ func TestX402ToolsCall_VerifyInvalidReturns402WithChallenge(t *testing.T) {
 	if strings.TrimSpace(resp.Header.Get("PAYMENT-REQUIRED")) == "" {
 		t.Fatal("expected PAYMENT-REQUIRED header on 402 verify failure")
 	}
-	if fac.settleCalls != 0 {
-		t.Fatalf("settle calls=%d want=0", fac.settleCalls)
+	if fac.settleCalls.Load() != 0 {
+		t.Fatalf("settle calls=%d want=0", fac.settleCalls.Load())
 	}
 }
 
@@ -171,11 +172,11 @@ func TestX402ToolsCall_ToolErrorDoesNotSettle(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 
 	assertToolCallErrorCode(t, resp, "METHOD_NOT_FOUND")
-	if fac.verifyCalls != 1 {
-		t.Fatalf("verify calls=%d want=1", fac.verifyCalls)
+	if fac.verifyCalls.Load() != 1 {
+		t.Fatalf("verify calls=%d want=1", fac.verifyCalls.Load())
 	}
-	if fac.settleCalls != 0 {
-		t.Fatalf("settle calls=%d want=0", fac.settleCalls)
+	if fac.settleCalls.Load() != 0 {
+		t.Fatalf("settle calls=%d want=0", fac.settleCalls.Load())
 	}
 }
 
@@ -246,8 +247,8 @@ func TestX402ToolsCall_FacilitatorBearerTokenForwarded(t *testing.T) {
 		payload, _ := io.ReadAll(resp.Body)
 		t.Fatalf("status=%d want=%d body=%s", resp.StatusCode, http.StatusOK, string(payload))
 	}
-	if fac.lastAuthorization != "Bearer facilitator-token" {
-		t.Fatalf("authorization header=%q want=%q", fac.lastAuthorization, "Bearer facilitator-token")
+	if got, _ := fac.lastAuthorization.Load().(string); got != "Bearer facilitator-token" {
+		t.Fatalf("authorization header=%q want=%q", got, "Bearer facilitator-token")
 	}
 }
 
@@ -296,8 +297,8 @@ func TestX402ToolsCall_SettleRetryReplaysCachedOutcomeWithoutReexecution(t *test
 	if retriever.searchCalls != 1 {
 		t.Fatalf("search calls after retry=%d want=1 (must replay cached outcome)", retriever.searchCalls)
 	}
-	if fac.settleCalls != 2 {
-		t.Fatalf("settle calls=%d want=2", fac.settleCalls)
+	if fac.settleCalls.Load() != 2 {
+		t.Fatalf("settle calls=%d want=2", fac.settleCalls.Load())
 	}
 }
 
@@ -380,33 +381,39 @@ type facilitatorStub struct {
 	settleBody            string
 	settleStatuses        []int
 	settleBodies          []string
-	verifyCalls           int
-	settleCalls           int
+	verifyCalls           atomic.Int64
+	settleCalls           atomic.Int64
 	expectedAuthorization string
-	lastAuthorization     string
+	lastAuthorization     atomic.Value // stores string
 }
 
 func newFacilitatorStub(t *testing.T) *facilitatorStub {
-	return &facilitatorStub{
+	f := &facilitatorStub{
 		t:            t,
 		verifyStatus: http.StatusOK,
 		settleStatus: http.StatusOK,
 		verifyBody:   `{"ok":true}`,
 		settleBody:   `{"ok":true}`,
 	}
+	// initialize atomic values
+	f.lastAuthorization.Store("")
+	return f
 }
 
 func (f *facilitatorStub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	f.lastAuthorization = r.Header.Get("Authorization")
-	if f.expectedAuthorization != "" && f.lastAuthorization != f.expectedAuthorization {
-		w.WriteHeader(http.StatusUnauthorized)
-		_, _ = w.Write([]byte(`{"message":"unauthorized"}`))
-		return
+	// update authorization atomically
+	f.lastAuthorization.Store(r.Header.Get("Authorization"))
+	if f.expectedAuthorization != "" {
+		if got, _ := f.lastAuthorization.Load().(string); got != f.expectedAuthorization {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"message":"unauthorized"}`))
+			return
+		}
 	}
 
 	switch r.URL.Path {
 	case "/v2/x402/verify":
-		f.verifyCalls++
+		f.verifyCalls.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(f.verifyStatus)
 		_, _ = w.Write([]byte(f.verifyBody))
@@ -414,20 +421,20 @@ func (f *facilitatorStub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		status := f.settleStatus
 		body := f.settleBody
 		if len(f.settleStatuses) > 0 {
-			idx := f.settleCalls
+			idx := int(f.settleCalls.Load())
 			if idx >= len(f.settleStatuses) {
 				idx = len(f.settleStatuses) - 1
 			}
 			status = f.settleStatuses[idx]
 		}
 		if len(f.settleBodies) > 0 {
-			idx := f.settleCalls
+			idx := int(f.settleCalls.Load())
 			if idx >= len(f.settleBodies) {
 				idx = len(f.settleBodies) - 1
 			}
 			body = f.settleBodies[idx]
 		}
-		f.settleCalls++
+		f.settleCalls.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
 		_, _ = w.Write([]byte(body))
