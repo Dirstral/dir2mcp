@@ -1945,12 +1945,12 @@ func collectDocumentStatusCounts(ctx context.Context, st model.Store) (documentS
 			}
 
 			switch strings.ToLower(strings.TrimSpace(doc.Status)) {
+			case "indexed", "ok":
+				counts.Indexed++
 			case "skipped":
 				counts.Skipped++
 			case "error":
 				counts.Errors++
-			default:
-				counts.Indexed++
 			}
 		}
 
