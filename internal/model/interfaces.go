@@ -23,6 +23,13 @@ type Retriever interface {
 	Ask(ctx context.Context, question string, query SearchQuery) (AskResult, error)
 	OpenFile(ctx context.Context, relPath string, span Span, maxChars int) (string, error)
 	Stats(ctx context.Context) (Stats, error)
+
+	// IndexingComplete returns true if the underlying index has finished
+	// processing new documents.  Callers previously had to invoke Ask and read
+	// the flag from the resulting AskResult; this accessor provides a lightweight
+	// alternative.  Implementations may always return true if they cannot
+	// determine the state.
+	IndexingComplete(ctx context.Context) (bool, error)
 }
 
 type Ingestor interface {

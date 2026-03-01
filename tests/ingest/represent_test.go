@@ -238,6 +238,54 @@ func TestChunkCodeByLines(t *testing.T) {
 	}
 }
 
+func TestChunkTranscriptByTimeLineEndingNormalization(t *testing.T) {
+	// Ensure both CRLF and lone CR are treated as line breaks when chunking.
+	input := "[00:00] first\r[00:05] second\r\n[00:10] third"
+	chunks := ingest.ChunkTranscriptByTime(input)
+	if len(chunks) != 3 {
+		t.Fatalf("expected 3 chunks, got %d", len(chunks))
+	}
+	if chunks[0].Text != "first" || chunks[1].Text != "second" || chunks[2].Text != "third" {
+		t.Errorf("unexpected chunk texts: %+v", chunks)
+	}
+}
+
+func TestChunkTranscriptByTimeBracketMatching(t *testing.T) {
+	// Malformed timestamps should not be recognized; we expect a single
+	// fallback chunk containing the original text.
+	cases := []struct {
+		input    string
+		wantText string
+	}{
+		{"[00:00 missing", "[00:00 missing"},
+		{"00:00] stray", "00:00] stray"},
+	}
+	for _, tt := range cases {
+		chunks := ingest.ChunkTranscriptByTime(tt.input)
+		if len(chunks) != 1 {
+			t.Fatalf("expected 1 chunk for %q, got %d", tt.input, len(chunks))
+		}
+		if chunks[0].Text != tt.wantText {
+			t.Errorf("unexpected text for %q: %q", tt.input, chunks[0].Text)
+		}
+	}
+
+	// A well-formed timestamp remains recognized so we know the regex still
+	// works when brackets are properly paired.
+	valid := "[01:02:03] good"
+	chunks := ingest.ChunkTranscriptByTime(valid)
+	if len(chunks) != 1 || chunks[0].Text != "good" {
+		t.Errorf("valid timestamp not parsed correctly: %+v", chunks)
+	}
+
+	// Unbracketed timestamps should still be recognized.
+	bare := "00:07 bare format works"
+	chunks = ingest.ChunkTranscriptByTime(bare)
+	if len(chunks) != 1 || chunks[0].Text != "bare format works" {
+		t.Errorf("bare timestamp not parsed correctly: %+v", chunks)
+	}
+}
+
 func TestChunkTextByChars(t *testing.T) {
 	content := strings.Repeat("abcdefghijklmnopqrstuvwxyz", 200)
 	chunks := ingest.ChunkTextByChars(content, 250, 25, 50)
@@ -301,10 +349,13 @@ func (s *fakeRepStore) InsertChunkWithSpans(_ context.Context, chunk model.Chunk
 		return 0, fmt.Errorf("expected at least one span")
 	}
 
+	// assign ID before storing so callers can correlate
+	chunk.ChunkID = uint64(len(s.chunks) + 1)
+
 	// record the chunk and all provided spans so later assertions can examine them
 	s.chunks = append(s.chunks, chunk)
 	s.spans = append(s.spans, spans...)
-	return int64(len(s.chunks)), nil
+	return int64(chunk.ChunkID), nil
 }
 
 func (s *fakeRepStore) SoftDeleteChunksFromOrdinal(_ context.Context, repID int64, fromOrdinal int) error {

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"dir2mcp/internal/config"
@@ -594,7 +595,10 @@ func TestMCPToolsCallAsk_SearchOnly(t *testing.T) {
 	cfg.AuthMode = "none"
 
 	hits := []model.SearchHit{{ChunkID: 99, RelPath: "foo/bar.go", Snippet: "snippet"}}
-	retriever := &askAudioRetrieverStub{searchHits: hits}
+	retriever := &askAudioRetrieverStub{
+		searchHits:       hits,
+		indexingComplete: true,
+	}
 	server := httptest.NewServer(mcp.NewServer(cfg, retriever).Handler())
 	defer server.Close()
 
@@ -635,6 +639,15 @@ func TestMCPToolsCallAsk_SearchOnly(t *testing.T) {
 	}
 	if envelope.Result.StructuredContent["question"] != "q?" {
 		t.Fatalf("question field passed through: %#v", envelope.Result.StructuredContent["question"])
+	}
+	if got, ok := envelope.Result.StructuredContent["indexing_complete"].(bool); !ok || !got {
+		t.Fatalf("expected indexing_complete=true, got %#v", envelope.Result.StructuredContent["indexing_complete"])
+	}
+	if !retriever.searchCalled.Load() {
+		t.Fatal("expected Search to be called")
+	}
+	if retriever.askCalled.Load() {
+		t.Fatal("did not expect Ask to be called after optimization")
 	}
 }
 
@@ -762,9 +775,20 @@ type askAudioRetrieverStub struct {
 	// callback to compute a custom question string.
 	EchoQuestion bool
 	OnAsk        func(question string) string
+
+	// tracking for assertions (read from HTTP handler goroutines)
+	searchCalled atomic.Bool
+	askCalled    atomic.Bool
+
+	// indexing state for the new accessor
+	// this field is only written during initialization and then read by
+	// handlers, so it does not currently need to be atomic.  keep as a
+	// plain bool for now.
+	indexingComplete bool
 }
 
 func (s *askAudioRetrieverStub) Search(_ context.Context, q model.SearchQuery) ([]model.SearchHit, error) {
+	s.searchCalled.Store(true)
 	if s.OnSearch != nil {
 		return s.OnSearch(q)
 	}
@@ -778,6 +802,7 @@ func (s *askAudioRetrieverStub) Search(_ context.Context, q model.SearchQuery) (
 }
 
 func (s *askAudioRetrieverStub) Ask(_ context.Context, question string, _ model.SearchQuery) (model.AskResult, error) {
+	s.askCalled.Store(true)
 	if s.askErr != nil {
 		return model.AskResult{}, s.askErr
 	}
@@ -798,6 +823,14 @@ func (s *askAudioRetrieverStub) OpenFile(_ context.Context, _ string, _ model.Sp
 func (s *askAudioRetrieverStub) Stats(_ context.Context) (model.Stats, error) {
 	return model.Stats{}, model.ErrNotImplemented
 }
+
+func (s *askAudioRetrieverStub) IndexingComplete(_ context.Context) (bool, error) {
+	return s.indexingComplete, nil
+}
+
+// compile-time assertion that askAudioRetrieverStub satisfies the Retriever
+// interface; helps catch missing methods during refactoring.
+var _ model.Retriever = (*askAudioRetrieverStub)(nil)
 
 type fakeTTSSynthesizer struct {
 	audio []byte

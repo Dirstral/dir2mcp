@@ -25,6 +25,7 @@ type Service struct {
 	indexingState *appstate.IndexingState
 	repGen        *RepresentationGenerator
 	ocr           model.OCR
+	transcriber   model.Transcriber
 
 	// optional logger for diagnostics; defaults to log.Default() when nil.
 	// Tests can provide their own logger to avoid mutating global state.
@@ -48,6 +49,10 @@ type Service struct {
 	// hook invoked instead of enforceOCRCachePolicy; useful for tests that
 	// want to simulate a failure without touching the filesystem. nil means
 	// use the normal method.
+	//
+	// Despite the OCR-prefixed names, these cache controls are intentionally
+	// shared by OCR and transcript caches. Transcript writes call the same
+	// write counter/hook so both cache trees follow one policy and cadence.
 	ocrCacheEnforce func(string) error
 
 	// mutex protecting all of the OCR cache configuration fields and the
@@ -68,6 +73,10 @@ type Service struct {
 	ocrCacheWrites     int
 	ocrCachePruneEvery int
 }
+
+// ErrTranscriptProviderFailure marks failures originating from the transcript
+// provider call itself (as opposed to persistence/cache write failures).
+var ErrTranscriptProviderFailure = errors.New("transcript provider failure")
 
 type documentDeleteMarker interface {
 	MarkDocumentDeleted(ctx context.Context, relPath string) error
@@ -115,6 +124,10 @@ func (s *Service) SetOCR(ocr model.OCR) {
 	s.ocr = ocr
 }
 
+func (s *Service) SetTranscriber(transcriber model.Transcriber) {
+	s.transcriber = transcriber
+}
+
 // ProcessDocument exposes single-document processing for external tests.
 func (s *Service) ProcessDocument(ctx context.Context, f DiscoveredFile, secretPatterns []*regexp.Regexp, forceReindex bool) error {
 	return s.processDocument(ctx, f, secretPatterns, forceReindex, nil)
@@ -156,9 +169,10 @@ func (s *Service) SetOCRCacheEnforceHook(fn func(string) error) {
 	s.ocrCacheEnforce = fn
 }
 
-// markOCRCacheWrite increments the write counter and reports whether policy
-// enforcement should run for this write. When enforcement is due, the counter
-// is reset so the next N writes are free of scans.
+// markOCRCacheWrite increments the shared cache write counter (used by both
+// OCR and transcript caches) and reports whether policy enforcement should run
+// for this write. When enforcement is due, the counter is reset so the next N
+// writes are free of scans.
 func (s *Service) markOCRCacheWrite() bool {
 	s.ocrCacheMu.Lock()
 	defer s.ocrCacheMu.Unlock()
@@ -592,6 +606,19 @@ func (s *Service) generateRepresentations(ctx context.Context, doc model.Documen
 		}
 		s.addRepresentations(1)
 	}
+	if doc.DocType == "audio" && s.transcriber != nil {
+		if err := s.generateTranscriptRepresentation(ctx, doc, content); err != nil {
+			// Provider/transient failures should not fail the entire ingest run.
+			// Persistence/cache failures should still propagate.
+			if errors.Is(err, ErrTranscriptProviderFailure) {
+				s.getLogger().Printf("transcription skipped for %s: %v", doc.RelPath, err)
+				s.addErrors(1)
+				return nil
+			}
+			return err
+		}
+		s.addRepresentations(1)
+	}
 	return nil
 }
 
@@ -658,10 +685,52 @@ func (s *Service) GenerateOCRMarkdownRepresentation(ctx context.Context, doc mod
 	return s.generateOCRMarkdownRepresentation(ctx, doc, content)
 }
 
-// enforceOCRCachePolicy scans cacheDir and removes entries that violate
+func (s *Service) generateTranscriptRepresentation(ctx context.Context, doc model.Document, content []byte) error {
+	if s.repGen == nil || s.transcriber == nil {
+		return nil
+	}
+
+	transcriptText, err := s.readOrComputeTranscript(ctx, doc, content)
+	if err != nil {
+		return err
+	}
+
+	transcriptText = strings.TrimSpace(transcriptText)
+	if transcriptText == "" {
+		return nil
+	}
+
+	rep := model.Representation{
+		DocID:       doc.DocID,
+		RepType:     RepTypeTranscript,
+		RepHash:     computeRepHash([]byte(transcriptText)),
+		CreatedUnix: time.Now().Unix(),
+		Deleted:     false,
+	}
+	repID, err := s.repGen.store.UpsertRepresentation(ctx, rep)
+	if err != nil {
+		return fmt.Errorf("upsert transcript representation: %w", err)
+	}
+
+	segments := chunkTranscriptByTime(transcriptText)
+	if len(segments) == 0 {
+		return nil
+	}
+	if err := s.repGen.upsertChunksForRepresentation(ctx, repID, "text", segments); err != nil {
+		return fmt.Errorf("persist transcript chunks: %w", err)
+	}
+	return nil
+}
+
+// GenerateTranscriptRepresentation exposes transcript generation for tests.
+func (s *Service) GenerateTranscriptRepresentation(ctx context.Context, doc model.Document, content []byte) error {
+	return s.generateTranscriptRepresentation(ctx, doc, content)
+}
+
+// enforceCachePolicy scans cacheDir and removes entries that violate
 // the configured size or age limits.  It's safe to call even if neither
 // policy is enabled; in that case it is a no-op.
-func (s *Service) enforceOCRCachePolicy(cacheDir string) error {
+func (s *Service) enforceCachePolicy(cacheDir string) error {
 	// read the limits and any associated hooks under a read lock. we copy them
 	// to locals so the rest of the logic can run without holding the lock for
 	// the entire scan, which could be slow.
@@ -678,7 +747,7 @@ func (s *Service) enforceOCRCachePolicy(cacheDir string) error {
 		if os.IsNotExist(err) {
 			return nil
 		}
-		return fmt.Errorf("read ocr cache dir: %w", err)
+		return fmt.Errorf("read cache dir %s: %w", cacheDir, err)
 	}
 
 	type fileInfo struct {
@@ -704,7 +773,7 @@ func (s *Service) enforceOCRCachePolicy(cacheDir string) error {
 		if err != nil {
 			// log failure so that operators can investigate; include the
 			// entry name since that is the only identifier available here.
-			s.getLogger().Printf("enforceOCRCachePolicy: failed to stat %s: %v", e.Name(), err)
+			s.getLogger().Printf("enforceCachePolicy: failed to stat %s: %v", e.Name(), err)
 			// a stat error typically means the entry is corrupt or otherwise
 			// unreadable. retaining such files in the cache is unhelpful and
 			// may prevent enforcement from making progress (e.g. if the file is
@@ -715,7 +784,7 @@ func (s *Service) enforceOCRCachePolicy(cacheDir string) error {
 			// expectations of our regression tests.
 			if rmErr := os.Remove(p); rmErr != nil && !os.IsNotExist(rmErr) {
 				// removal failure is unfortunate but not fatal; log and continue.
-				s.getLogger().Printf("enforceOCRCachePolicy: failed to remove stat-error file %s: %v", p, rmErr)
+				s.getLogger().Printf("enforceCachePolicy: failed to remove stat-error file %s: %v", p, rmErr)
 			}
 			continue
 		}
@@ -730,7 +799,7 @@ func (s *Service) enforceOCRCachePolicy(cacheDir string) error {
 		for _, f := range files {
 			if f.info.ModTime().Before(cutoff) {
 				if err := os.Remove(f.path); err != nil && !os.IsNotExist(err) {
-					return fmt.Errorf("prune ocr cache ttl remove %s: %w", f.path, err)
+					return fmt.Errorf("prune cache ttl: remove %s in %s: %w", f.path, cacheDir, err)
 				}
 				total -= f.info.Size()
 				continue
@@ -750,7 +819,7 @@ func (s *Service) enforceOCRCachePolicy(cacheDir string) error {
 				break
 			}
 			if err := os.Remove(f.path); err != nil && !os.IsNotExist(err) {
-				return fmt.Errorf("prune ocr cache size remove %s: %w", f.path, err)
+				return fmt.Errorf("prune cache size: remove %s in %s: %w", f.path, cacheDir, err)
 			}
 			total -= f.info.Size()
 		}
@@ -761,7 +830,7 @@ func (s *Service) enforceOCRCachePolicy(cacheDir string) error {
 
 // EnforceOCRCachePolicy exposes cache policy enforcement for tests.
 func (s *Service) EnforceOCRCachePolicy(cacheDir string) error {
-	return s.enforceOCRCachePolicy(cacheDir)
+	return s.enforceCachePolicy(cacheDir)
 }
 
 func (s *Service) readOrComputeOCR(ctx context.Context, doc model.Document, content []byte) (string, error) {
@@ -799,13 +868,13 @@ func (s *Service) readOrComputeOCR(ctx context.Context, doc model.Document, cont
 		if enforceHook != nil {
 			err = enforceHook(cacheDir)
 		} else {
-			err = s.enforceOCRCachePolicy(cacheDir)
+			err = s.enforceCachePolicy(cacheDir)
 		}
 		if err != nil {
 			// enforcement failure should not prevent the caller from
 			// receiving the OCR result. log and continue instead of
 			// returning an error; the cache write has already succeeded.
-			s.getLogger().Printf("enforceOCRCachePolicy(%s) failed: %v", cacheDir, err)
+			s.getLogger().Printf("enforceCachePolicy(%s) failed: %v", cacheDir, err)
 		}
 	}
 	return string(ocrBytes), nil
@@ -814,4 +883,53 @@ func (s *Service) readOrComputeOCR(ctx context.Context, doc model.Document, cont
 // ReadOrComputeOCR exposes OCR cache lookup/computation for tests.
 func (s *Service) ReadOrComputeOCR(ctx context.Context, doc model.Document, content []byte) (string, error) {
 	return s.readOrComputeOCR(ctx, doc, content)
+}
+
+func (s *Service) readOrComputeTranscript(ctx context.Context, doc model.Document, content []byte) (string, error) {
+	if s.transcriber == nil {
+		return "", errors.New("transcriber not configured")
+	}
+
+	cacheDir := filepath.Join(s.cfg.StateDir, "cache", "transcribe")
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		return "", fmt.Errorf("create transcript cache dir: %w", err)
+	}
+
+	cachePath := filepath.Join(cacheDir, computeContentHash(content)+".txt")
+	if cached, err := os.ReadFile(cachePath); err == nil {
+		return string(cached), nil
+	}
+
+	transcript, err := s.transcriber.Transcribe(ctx, doc.RelPath, content)
+	if err != nil {
+		return "", fmt.Errorf("%w: transcribe %s: %w", ErrTranscriptProviderFailure, doc.RelPath, err)
+	}
+
+	transcriptBytes := []byte(strings.ReplaceAll(strings.ReplaceAll(transcript, "\r\n", "\n"), "\r", "\n"))
+	if err := os.WriteFile(cachePath, transcriptBytes, 0o644); err != nil {
+		return "", fmt.Errorf("write transcript cache: %w", err)
+	}
+	shouldEnforceAfterWrite := s.markOCRCacheWrite()
+	if shouldEnforceAfterWrite {
+		// Reuse the same cache-policy limits/hooks as OCR for now so transcript
+		// cache growth is bounded under the same operational policy.
+		s.ocrCacheMu.RLock()
+		enforceHook := s.ocrCacheEnforce
+		s.ocrCacheMu.RUnlock()
+		var err error
+		if enforceHook != nil {
+			err = enforceHook(cacheDir)
+		} else {
+			err = s.enforceCachePolicy(cacheDir)
+		}
+		if err != nil {
+			s.getLogger().Printf("enforceCachePolicy(%s) failed: %v", cacheDir, err)
+		}
+	}
+	return string(transcriptBytes), nil
+}
+
+// ReadOrComputeTranscript exposes transcript cache lookup/computation for tests.
+func (s *Service) ReadOrComputeTranscript(ctx context.Context, doc model.Document, content []byte) (string, error) {
+	return s.readOrComputeTranscript(ctx, doc, content)
 }
