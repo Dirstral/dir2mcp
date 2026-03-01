@@ -111,16 +111,46 @@ func StateDir() (string, error) {
 	return dir, nil
 }
 
+func secretEnvLocalPath() (string, error) {
+	dir, err := StateDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, ".env.local"), nil
+}
+
+func dotEnvPaths(name string) []string {
+	if strings.TrimSpace(name) != ".env.local" {
+		return []string{name}
+	}
+	paths := make([]string, 0, 2)
+	if secretPath, err := secretEnvLocalPath(); err == nil {
+		paths = append(paths, secretPath)
+	}
+	paths = append(paths, name)
+	return paths
+}
+
+func writeDotEnvFile(path string, env map[string]string) error {
+	content, err := godotenv.Marshal(env)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(content), 0o600)
+}
+
 func loadDotEnvPrecedence() error {
-	for _, name := range []string{".env", ".env.local"} {
-		values, err := godotenv.Read(name)
-		if err != nil {
-			continue
-		}
-		for k, v := range values {
-			if _, exists := os.LookupEnv(k); !exists {
-				if setErr := os.Setenv(k, v); setErr != nil {
-					return setErr
+	for _, name := range []string{".env.local", ".env"} {
+		for _, path := range dotEnvPaths(name) {
+			values, err := godotenv.Read(path)
+			if err != nil {
+				continue
+			}
+			for k, v := range values {
+				if _, exists := os.LookupEnv(k); !exists {
+					if setErr := os.Setenv(k, v); setErr != nil {
+						return setErr
+					}
 				}
 			}
 		}
@@ -197,33 +227,39 @@ func Save(cfg Config) error {
 	return os.WriteFile(path, buf.Bytes(), 0o644)
 }
 
-// SaveSecret writes a key=value pair into .env.local.
+// SaveSecret writes a key=value pair into ~/.config/dirstral/.env.local.
 // If the key already exists it is updated; otherwise it is appended.
 // The environment variable is also set in the current process.
 func SaveSecret(key, value string) error {
-	const path = ".env.local"
+	path, err := secretEnvLocalPath()
+	if err != nil {
+		return err
+	}
 	env := map[string]string{}
 	existing, err := godotenv.Read(path)
 	if err == nil {
 		env = existing
 	}
 	env[key] = value
-	if err := godotenv.Write(env, path); err != nil {
+	if err := writeDotEnvFile(path, env); err != nil {
 		return fmt.Errorf("writing %s: %w", path, err)
 	}
 	return os.Setenv(key, value)
 }
 
-// DeleteSecret removes a key from .env.local and unsets it in the process env.
+// DeleteSecret removes a key from ~/.config/dirstral/.env.local and unsets it in the process env.
 func DeleteSecret(key string) error {
-	const path = ".env.local"
+	path, err := secretEnvLocalPath()
+	if err != nil {
+		return err
+	}
 	env := map[string]string{}
 	existing, err := godotenv.Read(path)
 	if err == nil {
 		env = existing
 	}
 	delete(env, key)
-	if err := godotenv.Write(env, path); err != nil {
+	if err := writeDotEnvFile(path, env); err != nil {
 		return fmt.Errorf("writing %s: %w", path, err)
 	}
 	if err := os.Unsetenv(key); err != nil {
@@ -292,11 +328,24 @@ func fieldValueFromConfig(cfg Config, key string) string {
 // readDotFile reads a dotenv file and returns its key-value pairs.
 // Returns nil map if the file does not exist.
 func readDotFile(name string) map[string]string {
-	vals, err := godotenv.Read(name)
-	if err != nil {
+	out := map[string]string{}
+	found := false
+	for _, path := range dotEnvPaths(name) {
+		vals, err := godotenv.Read(path)
+		if err != nil {
+			continue
+		}
+		found = true
+		for key, value := range vals {
+			if _, exists := out[key]; !exists {
+				out[key] = value
+			}
+		}
+	}
+	if !found {
 		return nil
 	}
-	return vals
+	return out
 }
 
 // EffectiveFields returns info about each configurable field including
