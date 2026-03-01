@@ -432,3 +432,7 @@ func (r *countingSearchRetriever) OpenFile(_ context.Context, _ string, _ model.
 func (r *countingSearchRetriever) Stats(_ context.Context) (model.Stats, error) {
 	return model.Stats{}, model.ErrNotImplemented
 }
+
+func (r *countingSearchRetriever) IndexingComplete(_ context.Context) (bool, error) {
+	return true, nil
+}
