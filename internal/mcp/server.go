@@ -297,7 +297,7 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 	if s.rateLimiter != nil {
 		if !s.rateLimiter.allow(realIP(r, s.rateLimiter)) {
 			w.Header().Set("Retry-After", "1")
-			writeError(w, http.StatusTooManyRequests, nil, -32000, "rate limit exceeded", protocol.ErrorCodeRateLimited, true)
+			writeError(w, http.StatusTooManyRequests, nil, -32000, "rate limit exceeded", protocol.ErrorCodeRateLimitExceeded, true)
 			return
 		}
 	}
