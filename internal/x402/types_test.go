@@ -78,7 +78,7 @@ func TestIsCAIP2Network(t *testing.T) {
 
 	valid := []string{
 		"eip155:1",
-		"solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+		"solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
 		"foo:bar",
 		"a:1",
 	}

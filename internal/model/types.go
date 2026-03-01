@@ -1,6 +1,9 @@
 package model
 
-import "fmt"
+import (
+	"encoding/json"
+	"fmt"
+)
 
 type Document struct {
 	DocID       int64
@@ -155,30 +158,91 @@ type AskResult struct {
 }
 
 type CorpusStats struct {
-	DocCounts       map[string]int64
-	TotalDocs       int64
-	Scanned         int64
-	Indexed         int64
-	Skipped         int64
-	Deleted         int64
-	Representations int64
-	ChunksTotal     int64
-	EmbeddedOK      int64
-	Errors          int64
+	DocCounts       map[string]int64 `json:"doc_counts"`
+	TotalDocs       int64            `json:"total_docs"`
+	Scanned         int64            `json:"scanned"`
+	Indexed         int64            `json:"indexed"`
+	Skipped         int64            `json:"skipped"`
+	Deleted         int64            `json:"deleted"`
+	Representations int64            `json:"representations"`
+	ChunksTotal     int64            `json:"chunks_total"`
+	EmbeddedOK      int64            `json:"embedded_ok"`
+	Errors          int64            `json:"errors"`
+	Unknown         int64            `json:"unknown"`
+}
+
+// MarshalJSON ensures that a nil DocCounts map is encoded as an empty object
+// rather than null. This protects clients that expect an object and simplifies
+// callers by avoiding repeated nil-checking before marshaling.
+//
+// Both value and pointer receivers will use this method, so callers may pass
+// either form to json.Marshal. Stats defines its own MarshalJSON below which
+// takes precedence over the promoted method, so embedding does not interfere
+// with the outer struct's metadata fields.
+func (c CorpusStats) MarshalJSON() ([]byte, error) {
+	// Use an alias to avoid infinite recursion when calling json.Marshal.
+	type alias CorpusStats
+	if c.DocCounts == nil {
+		// make a non-nil map so encoding/json treats it as {} instead of null
+		c.DocCounts = make(map[string]int64)
+	}
+	return json.Marshal(alias(c))
 }
 
 type Stats struct {
-	Root            string
-	StateDir        string
-	ProtocolVersion string
-	DocCounts       map[string]int64
-	TotalDocs       int64
-	Scanned         int64
-	Indexed         int64
-	Skipped         int64
-	Deleted         int64
-	Representations int64
-	ChunksTotal     int64
-	EmbeddedOK      int64
-	Errors          int64
+	// metadata fields are kept explicitly so that they remain at the top
+	// level when encoded to JSON.
+	Root            string `json:"root"`
+	StateDir        string `json:"state_dir"`
+	ProtocolVersion string `json:"protocol_version"`
+
+	// embed corpus statistics so that the various lifecycle counters are
+	// promoted.
+	//
+	// NOTE: the default behaviour of encoding/json would *not* magically
+	// flatten the embedded fields when the embedded type defines its own
+	// MarshalJSON method. In that case the encoder would call
+	// CorpusStats.MarshalJSON and include only the encoded result of the
+	// embedded struct, dropping the outer metadata fields. To retain a
+	// flat representation we implement Stats.MarshalJSON (below) which
+	// explicitly merges the metadata fields with the promoted CorpusStats
+	// fields.  This custom encoder is what actually provides the flattened
+	// JSON output, not the default encoder behavior.
+	CorpusStats
+}
+
+// MarshalJSON ensures that the metadata fields (root, state_dir,
+// protocol_version) are serialized along with the flattened corpus
+// statistics. It also guards against a nil DocCounts map so callers needn't
+// worry about preinitializing the map prior to encoding.
+//
+// We cannot rely on the generic alias trick here because the embedded
+// CorpusStats type has its own MarshalJSON method.  An alias type would
+// still carry that method, causing json.Marshal to invoke CorpusStats's
+// encoder and drop the metadata fields.  Instead we build a temporary struct
+// that mirrors the exported JSON representation without any method set.
+func (s Stats) MarshalJSON() ([]byte, error) {
+	// ensure a non-nil map for the usual reason
+	if s.DocCounts == nil {
+		s.DocCounts = make(map[string]int64)
+	}
+	// Use an alias to strip methods from CorpusStats, then anonymously embed it
+	// so json encoding flattens all corpus fields automatically.  The alias is
+	// exported (capitalized) to avoid any risk of encoding/json treating an
+	// unexported anonymous field as ignored when reflecting on the temporary
+	// struct.
+	type CorpusStatsFields CorpusStats
+	type plain struct {
+		Root            string `json:"root"`
+		StateDir        string `json:"state_dir"`
+		ProtocolVersion string `json:"protocol_version"`
+		CorpusStatsFields
+	}
+	a := plain{
+		Root:              s.Root,
+		StateDir:          s.StateDir,
+		ProtocolVersion:   s.ProtocolVersion,
+		CorpusStatsFields: CorpusStatsFields(s.CorpusStats),
+	}
+	return json.Marshal(a)
 }

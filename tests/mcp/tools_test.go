@@ -691,6 +691,12 @@ func TestMCPToolsCallStats_ReturnsStructuredContent(t *testing.T) {
 		t.Fatalf("unexpected protocol_version: %#v", envelope.Result.StructuredContent["protocol_version"])
 	}
 
+	if got, ok := envelope.Result.StructuredContent["doc_counts_available"].(bool); !ok {
+		t.Fatalf("expected doc_counts_available boolean, got %#v", envelope.Result.StructuredContent["doc_counts_available"])
+	} else if got {
+		t.Fatalf("expected doc_counts_available=false when retriever missing, got true")
+	}
+
 	indexingRaw, ok := envelope.Result.StructuredContent["indexing"].(map[string]interface{})
 	if !ok {
 		t.Fatalf("expected indexing object, got %#v", envelope.Result.StructuredContent["indexing"])
@@ -719,16 +725,18 @@ func TestMCPToolsCallStats_UsesRetrieverStats(t *testing.T) {
 			Root:            "/repo",
 			StateDir:        "/repo/.dir2mcp",
 			ProtocolVersion: cfg.ProtocolVersion,
-			DocCounts:       map[string]int64{"code": 2, "md": 1},
-			TotalDocs:       3,
-			Scanned:         4,
-			Indexed:         2,
-			Skipped:         1,
-			Deleted:         1,
-			Representations: 6,
-			ChunksTotal:     8,
-			EmbeddedOK:      7,
-			Errors:          1,
+			CorpusStats: model.CorpusStats{
+				DocCounts:       map[string]int64{"code": 2, "md": 1},
+				TotalDocs:       3,
+				Scanned:         4,
+				Indexed:         2,
+				Skipped:         1,
+				Deleted:         1,
+				Representations: 6,
+				ChunksTotal:     8,
+				EmbeddedOK:      7,
+				Errors:          1,
+			},
 		},
 	}
 
@@ -771,6 +779,11 @@ func TestMCPToolsCallStats_UsesRetrieverStats(t *testing.T) {
 	}
 	if docCounts["code"] != float64(2) || docCounts["md"] != float64(1) {
 		t.Fatalf("unexpected doc_counts payload: %#v", docCounts)
+	}
+	if got, ok := envelope.Result.StructuredContent["doc_counts_available"].(bool); !ok {
+		t.Fatalf("expected doc_counts_available boolean, got %#v", envelope.Result.StructuredContent["doc_counts_available"])
+	} else if !got {
+		t.Fatalf("expected doc_counts_available=true when retriever provided stats, got %v", got)
 	}
 
 	indexingRaw, ok := envelope.Result.StructuredContent["indexing"].(map[string]interface{})

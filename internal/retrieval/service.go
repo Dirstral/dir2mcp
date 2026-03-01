@@ -629,7 +629,7 @@ func (s *Service) Stats(ctx context.Context) (model.Stats, error) {
 		Root:            rootDir,
 		StateDir:        stateDir,
 		ProtocolVersion: protocolVersion,
-		DocCounts:       map[string]int64{},
+		CorpusStats:     model.CorpusStats{DocCounts: map[string]int64{}},
 	}
 	if st == nil {
 		return out, nil

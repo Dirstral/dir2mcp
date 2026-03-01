@@ -671,7 +671,7 @@ func TestUpX402RequiredMissingFieldsFailsFast(t *testing.T) {
 			"up",
 			"--x402", "required",
 			"--x402-resource-base-url", "https://resource.example.com",
-			"--x402-network", "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+			"--x402-network", "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
 			"--x402-asset", "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
 			"--x402-pay-to", "8N5A4rQU8vJrQmH3iiA7kE4m1df4WeyueXQqGb4G9tTj",
 			// Intentionally missing --x402-facilitator-url.

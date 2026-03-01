@@ -1,7 +1,9 @@
 package tests
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,7 +15,7 @@ import (
 
 func TestEngineAsk_WithEmptyIndexReturnsFallback(t *testing.T) {
 	server := newFakeMistralEmbeddingServer()
-	defer server.Close()
+	t.Cleanup(server.Close)
 
 	stateDir := t.TempDir()
 	rootDir := t.TempDir()
@@ -22,13 +24,13 @@ func TestEngineAsk_WithEmptyIndexReturnsFallback(t *testing.T) {
 	cfg.MistralAPIKey = "test-api-key"
 	cfg.MistralBaseURL = server.URL
 
-	engine, err := retrieval.NewEngine(stateDir, rootDir, &cfg)
+	engine, err := retrieval.NewEngine(context.Background(), stateDir, rootDir, &cfg)
 	if err != nil {
 		t.Fatalf("NewEngine failed: %v", err)
 	}
 	t.Cleanup(engine.Close)
 
-	result, err := engine.Ask("what changed?", retrieval.AskOptions{K: 3})
+	result, err := engine.AskWithContext(context.Background(), "what changed?", retrieval.AskOptions{K: 3})
 	if err != nil {
 		t.Fatalf("Ask failed: %v", err)
 	}
@@ -43,9 +45,12 @@ func TestEngineAsk_WithEmptyIndexReturnsFallback(t *testing.T) {
 	}
 }
 
-func TestEngineAsk_RejectsEmptyQuestion(t *testing.T) {
+func newTestEngine(t *testing.T) *retrieval.Engine {
+	t.Helper()
+
+	// spin up a fake mistral embeddings service for the engine to call
 	server := newFakeMistralEmbeddingServer()
-	defer server.Close()
+	t.Cleanup(server.Close)
 
 	stateDir := t.TempDir()
 	rootDir := t.TempDir()
@@ -54,13 +59,32 @@ func TestEngineAsk_RejectsEmptyQuestion(t *testing.T) {
 	cfg.MistralAPIKey = "test-api-key"
 	cfg.MistralBaseURL = server.URL
 
-	engine, err := retrieval.NewEngine(stateDir, rootDir, &cfg)
+	engine, err := retrieval.NewEngine(context.Background(), stateDir, rootDir, &cfg)
 	if err != nil {
 		t.Fatalf("NewEngine failed: %v", err)
 	}
+	// Close currently returns no error, so we can pass it directly to Cleanup
 	t.Cleanup(engine.Close)
 
-	_, err = engine.Ask("   ", retrieval.AskOptions{})
+	return engine
+}
+
+func TestEngineAsk_WithTODOContext(t *testing.T) {
+	engine := newTestEngine(t)
+
+	result, err := engine.AskWithContext(context.TODO(), "what changed?", retrieval.AskOptions{K: 1})
+	if err != nil {
+		t.Fatalf("AskWithContext(context.TODO()) failed: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil AskResult")
+	}
+}
+
+func TestEngineAsk_RejectsEmptyQuestion(t *testing.T) {
+	engine := newTestEngine(t)
+
+	_, err := engine.AskWithContext(context.Background(), "   ", retrieval.AskOptions{})
 	if err == nil {
 		t.Fatal("expected validation error for empty question")
 	}
@@ -71,12 +95,32 @@ func TestEngineAsk_RejectsEmptyQuestion(t *testing.T) {
 
 func TestEngineAsk_ZeroValueEngineReportsNotInitialized(t *testing.T) {
 	var engine retrieval.Engine
-	_, err := engine.Ask("q", retrieval.AskOptions{})
+	_, err := engine.AskWithContext(context.Background(), "q", retrieval.AskOptions{})
 	if err == nil {
 		t.Fatal("expected error from zero-value engine")
 	}
 	if !strings.Contains(err.Error(), "not initialized") {
 		t.Fatalf("unexpected zero-value engine error: %v", err)
+	}
+}
+
+func TestEngineAsk_ContextCanceled(t *testing.T) {
+	engine := newTestEngine(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := engine.AskWithContext(ctx, "foo", retrieval.AskOptions{})
+	if err == nil {
+		t.Fatal("expected error when context already canceled")
+	}
+	// we should wrap the cancellation with a clear message; the caller may also
+	// see a deadline exceeded or the underlying context.Canceled, but wrapping
+	// allows callers to inspect the error text if they don't use errors.Is.
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "ask canceled") {
+		t.Fatalf("expected wrapped cancellation message, got: %v", err)
 	}
 }
 

@@ -16,7 +16,7 @@ func TestLoad_EnvOverridesX402(t *testing.T) {
 		t.Setenv("DIR2MCP_X402_MODE", "on")
 		t.Setenv("DIR2MCP_X402_FACILITATOR_URL", "https://facilitator.example.com")
 		t.Setenv("DIR2MCP_X402_RESOURCE_BASE_URL", "https://resource.example.com")
-		t.Setenv("DIR2MCP_X402_NETWORK", "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp")
+		t.Setenv("DIR2MCP_X402_NETWORK", "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d")
 		t.Setenv("DIR2MCP_X402_ASSET", "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v")
 		t.Setenv("DIR2MCP_X402_PAY_TO", "8N5A4rQU8vJrQmH3iiA7kE4m1df4WeyueXQqGb4G9tTj")
 
@@ -34,8 +34,8 @@ func TestLoad_EnvOverridesX402(t *testing.T) {
 		if cfg.X402.ResourceBaseURL != "https://resource.example.com" {
 			t.Fatalf("X402.ResourceBaseURL=%q want=%q", cfg.X402.ResourceBaseURL, "https://resource.example.com")
 		}
-		if cfg.X402.Network != "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp" {
-			t.Fatalf("X402.Network=%q want=%q", cfg.X402.Network, "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp")
+		if cfg.X402.Network != "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d" {
+			t.Fatalf("X402.Network=%q want=%q", cfg.X402.Network, "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d")
 		}
 		if cfg.X402.Asset != "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" {
 			t.Fatalf("X402.Asset=%q want=%q", cfg.X402.Asset, "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v")
@@ -127,7 +127,7 @@ func TestValidateX402_StripsTrailingSlashes(t *testing.T) {
 	cfg.X402.FacilitatorToken = "token"
 	cfg.X402.PriceAtomic = "100"
 	cfg.X402.Scheme = "exact"
-	cfg.X402.Network = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"
+	cfg.X402.Network = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d"
 	cfg.X402.Asset = "asset"
 	cfg.X402.PayTo = "payto"
 
@@ -177,7 +177,7 @@ func TestValidateX402_PriceMustBePositiveInteger(t *testing.T) {
 		cp.X402.ResourceBaseURL = "https://resource.example.com"
 		cp.X402.FacilitatorToken = "token"
 		cp.X402.Scheme = "exact"
-		cp.X402.Network = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp" // valid CAIP-2
+		cp.X402.Network = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d" // valid CAIP-2
 		cp.X402.Asset = "asset"
 		cp.X402.PayTo = "payto"
 		return cp
@@ -237,7 +237,7 @@ func TestValidateX402_InvalidScheme(t *testing.T) {
 	cfg.X402.FacilitatorToken = "token"
 	cfg.X402.PriceAtomic = "1000"
 	cfg.X402.Scheme = "not-allowed"
-	cfg.X402.Network = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"
+	cfg.X402.Network = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d"
 	cfg.X402.Asset = "asset"
 	cfg.X402.PayTo = "payto"
 

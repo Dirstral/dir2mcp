@@ -205,6 +205,9 @@ type ndjsonEmitter struct {
 	out     io.Writer
 }
 
+// corpusSnapshot is a point-in-time summary of the indexed corpus written to
+// corpus.json in the state directory. See corpusIndexing for field semantics,
+// including the sentinel value used for unavailable counters.
 type corpusSnapshot struct {
 	Timestamp    string           `json:"ts"`
 	Indexing     corpusIndexing   `json:"indexing"`
@@ -214,6 +217,10 @@ type corpusSnapshot struct {
 	CacheableFor string           `json:"cacheable_for,omitempty"`
 }
 
+// corpusIndexing holds indexing progress counters. Representations,
+// ChunksTotal, and EmbeddedOK carry -1 when not available — for example on
+// the ListFiles-only fallback path where those metrics cannot be derived from
+// the store. Consumers should treat -1 as "unknown", not as an error.
 type corpusIndexing struct {
 	Mode            string `json:"mode"`
 	Running         bool   `json:"running"`
@@ -225,6 +232,7 @@ type corpusIndexing struct {
 	ChunksTotal     int64  `json:"chunks_total"`
 	EmbeddedOK      int64  `json:"embedded_ok"`
 	Errors          int64  `json:"errors"`
+	Unknown         int64  `json:"unknown"`
 }
 
 func NewApp() *App {
@@ -668,7 +676,7 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	}
 
 	ingestErrCh := make(chan error, 1)
-	go runCorpusWriter(runCtx, cfg.StateDir, st, indexingState, a.stderr)
+	go runCorpusWriter(runCtx, cfg.StateDir, st, indexingState, a.stderr, emitter)
 
 	if opts.readOnly {
 		close(ingestErrCh)
@@ -704,11 +712,11 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 		case ingestErr, ok := <-ingestErrCh:
 			if !ok {
 				ingestErrCh = nil
-				_ = writeCorpusSnapshot(runCtx, cfg.StateDir, st, indexingState)
+				_ = writeCorpusSnapshot(runCtx, cfg.StateDir, st, indexingState, a.stderr, emitter)
 				continue
 			}
 			if ingestErr == nil {
-				_ = writeCorpusSnapshot(runCtx, cfg.StateDir, st, indexingState)
+				_ = writeCorpusSnapshot(runCtx, cfg.StateDir, st, indexingState, a.stderr, emitter)
 				continue
 			}
 			writef(a.stderr, "ingestion failed: %v\n", ingestErr)
@@ -863,7 +871,8 @@ func (a *App) runStatus(ctx context.Context, global globalOptions, args []string
 			writef(a.stderr, "initialize metadata store: %v\n", initErr)
 			return exitIndexLoadFailure
 		}
-		snapshot, err = buildCorpusSnapshot(ctx, st, nil)
+		emitter := newNDJSONEmitter(a.stdout, global.jsonOutput)
+		snapshot, err = buildCorpusSnapshot(ctx, st, nil, a.stderr, emitter)
 		if err != nil {
 			writef(a.stderr, "build status snapshot: %v\n", err)
 			return exitGeneric
@@ -889,7 +898,7 @@ func (a *App) runStatus(ctx context.Context, global globalOptions, args []string
 	writef(a.stdout, "Timestamp: %s\n", snapshot.Timestamp)
 	writeln(a.stdout)
 	writeln(a.stdout, "Indexing:")
-	writef(a.stdout, "  mode=%s running=%t scanned=%d indexed=%d skipped=%d deleted=%d reps=%d chunks=%d embedded=%d errors=%d\n",
+	writef(a.stdout, "  mode=%s running=%t scanned=%d indexed=%d skipped=%d deleted=%d reps=%d chunks=%d embedded=%d errors=%d unknown=%d\n",
 		snapshot.Indexing.Mode,
 		snapshot.Indexing.Running,
 		snapshot.Indexing.Scanned,
@@ -900,6 +909,7 @@ func (a *App) runStatus(ctx context.Context, global globalOptions, args []string
 		snapshot.Indexing.ChunksTotal,
 		snapshot.Indexing.EmbeddedOK,
 		snapshot.Indexing.Errors,
+		snapshot.Indexing.Unknown,
 	)
 	writef(a.stdout, "Documents: total=%d code_ratio=%.4f\n", snapshot.TotalDocs, snapshot.CodeRatio)
 	if len(snapshot.DocCounts) > 0 {
@@ -1713,16 +1723,16 @@ func newNDJSONEmitter(out io.Writer, enabled bool) *ndjsonEmitter {
 	return &ndjsonEmitter{enabled: enabled, out: out}
 }
 
-func runCorpusWriter(ctx context.Context, stateDir string, st model.Store, indexingState *appstate.IndexingState, stderr io.Writer) {
-	runCorpusWriterWithInterval(ctx, stateDir, st, indexingState, stderr, 5*time.Second)
+func runCorpusWriter(ctx context.Context, stateDir string, st model.Store, indexingState *appstate.IndexingState, stderr io.Writer, emitter *ndjsonEmitter) {
+	runCorpusWriterWithInterval(ctx, stateDir, st, indexingState, stderr, emitter, 5*time.Second)
 }
 
-func runCorpusWriterWithInterval(ctx context.Context, stateDir string, st model.Store, indexingState *appstate.IndexingState, stderr io.Writer, interval time.Duration) {
+func runCorpusWriterWithInterval(ctx context.Context, stateDir string, st model.Store, indexingState *appstate.IndexingState, stderr io.Writer, emitter *ndjsonEmitter, interval time.Duration) {
 	if interval <= 0 {
 		interval = 5 * time.Second
 	}
 	// Emit an initial snapshot immediately, then refresh while indexing runs.
-	if err := writeCorpusSnapshot(ctx, stateDir, st, indexingState); err != nil {
+	if err := writeCorpusSnapshot(ctx, stateDir, st, indexingState, stderr, emitter); err != nil {
 		writef(stderr, "write corpus snapshot: %v\n", err)
 	}
 
@@ -1736,15 +1746,15 @@ func runCorpusWriterWithInterval(ctx context.Context, stateDir string, st model.
 			if indexingState != nil && !indexingState.Snapshot().Running {
 				continue
 			}
-			if err := writeCorpusSnapshot(ctx, stateDir, st, indexingState); err != nil {
+			if err := writeCorpusSnapshot(ctx, stateDir, st, indexingState, stderr, emitter); err != nil {
 				writef(stderr, "write corpus snapshot: %v\n", err)
 			}
 		}
 	}
 }
 
-func writeCorpusSnapshot(ctx context.Context, stateDir string, st model.Store, indexingState *appstate.IndexingState) error {
-	snapshot, err := buildCorpusSnapshot(ctx, st, indexingState)
+func writeCorpusSnapshot(ctx context.Context, stateDir string, st model.Store, indexingState *appstate.IndexingState, stderr io.Writer, emitter *ndjsonEmitter) error {
+	snapshot, err := buildCorpusSnapshot(ctx, st, indexingState, stderr, emitter)
 	if err != nil {
 		return err
 	}
@@ -1791,8 +1801,8 @@ func writeCorpusSnapshot(ctx context.Context, stateDir string, st model.Store, i
 	return nil
 }
 
-func buildCorpusSnapshot(ctx context.Context, st model.Store, indexingState *appstate.IndexingState) (corpusSnapshot, error) {
-	corpusStats, err := collectCorpusStats(ctx, st)
+func buildCorpusSnapshot(ctx context.Context, st model.Store, indexingState *appstate.IndexingState, stderr io.Writer, emitter *ndjsonEmitter) (corpusSnapshot, error) {
+	corpusStats, err := collectCorpusStats(ctx, st, stderr, emitter)
 	if err != nil {
 		return corpusSnapshot{}, err
 	}
@@ -1817,6 +1827,7 @@ func buildCorpusSnapshot(ctx context.Context, st model.Store, indexingState *app
 		idx.ChunksTotal = corpusStats.ChunksTotal
 		idx.EmbeddedOK = corpusStats.EmbeddedOK
 		idx.Errors = corpusStats.Errors
+		idx.Unknown = corpusStats.Unknown
 	}
 
 	return corpusSnapshot{
@@ -1832,6 +1843,7 @@ func buildCorpusSnapshot(ctx context.Context, st model.Store, indexingState *app
 			ChunksTotal:     idx.ChunksTotal,
 			EmbeddedOK:      idx.EmbeddedOK,
 			Errors:          idx.Errors,
+			Unknown:         idx.Unknown,
 		},
 		DocCounts: docCounts,
 		TotalDocs: totalDocs,
@@ -1839,7 +1851,7 @@ func buildCorpusSnapshot(ctx context.Context, st model.Store, indexingState *app
 	}, nil
 }
 
-func collectCorpusStats(ctx context.Context, st model.Store) (model.CorpusStats, error) {
+func collectCorpusStats(ctx context.Context, st model.Store, stderr io.Writer, emitter *ndjsonEmitter) (model.CorpusStats, error) {
 	if st == nil {
 		return model.CorpusStats{DocCounts: map[string]int64{}}, nil
 	}
@@ -1862,7 +1874,7 @@ func collectCorpusStats(ctx context.Context, st model.Store) (model.CorpusStats,
 		return model.CorpusStats{}, err
 	}
 
-	statusCounts, err := collectDocumentStatusCounts(ctx, st)
+	statusCounts, err := collectDocumentStatusCounts(ctx, st, stderr, emitter)
 	if err != nil {
 		return model.CorpusStats{}, err
 	}
@@ -1874,7 +1886,12 @@ func collectCorpusStats(ctx context.Context, st model.Store) (model.CorpusStats,
 		Indexed:   statusCounts.Indexed,
 		Skipped:   statusCounts.Skipped,
 		Deleted:   statusCounts.Deleted,
-		Errors:    statusCounts.Errors,
+		// Not derivable from ListFiles-only fallback path.
+		Representations: -1,
+		ChunksTotal:     -1,
+		EmbeddedOK:      -1,
+		Errors:          statusCounts.Errors,
+		Unknown:         statusCounts.Unknown,
 	}, nil
 }
 
@@ -1928,9 +1945,10 @@ type documentStatusCounts struct {
 	Skipped int64
 	Deleted int64
 	Errors  int64
+	Unknown int64
 }
 
-func collectDocumentStatusCounts(ctx context.Context, st model.Store) (documentStatusCounts, error) {
+func collectDocumentStatusCounts(ctx context.Context, st model.Store, stderr io.Writer, emitter *ndjsonEmitter) (documentStatusCounts, error) {
 	if st == nil {
 		return documentStatusCounts{}, nil
 	}
@@ -1938,6 +1956,8 @@ func collectDocumentStatusCounts(ctx context.Context, st model.Store) (documentS
 	const pageSize = 500
 	offset := 0
 	counts := documentStatusCounts{}
+	unexpectedStatusCounts := make(map[string]int64)
+	unexpectedStatusExample := make(map[string]string)
 
 	for {
 		docs, total, err := st.ListFiles(ctx, "", "", pageSize, offset)
@@ -1952,18 +1972,47 @@ func collectDocumentStatusCounts(ctx context.Context, st model.Store) (documentS
 			}
 
 			switch strings.ToLower(strings.TrimSpace(doc.Status)) {
+			case "indexed", "ok":
+				counts.Indexed++
 			case "skipped":
 				counts.Skipped++
 			case "error":
 				counts.Errors++
 			default:
-				counts.Indexed++
+				rawStatus := strings.TrimSpace(doc.Status)
+				if rawStatus == "" {
+					rawStatus = "<empty>"
+				}
+				counts.Unknown++
+				unexpectedStatusCounts[rawStatus]++
+				if _, exists := unexpectedStatusExample[rawStatus]; !exists {
+					unexpectedStatusExample[rawStatus] = strings.TrimSpace(doc.RelPath)
+				}
 			}
 		}
 
 		offset += len(docs)
 		if len(docs) == 0 || int64(offset) >= total {
 			break
+		}
+	}
+
+	if len(unexpectedStatusCounts) > 0 {
+		parts := make([]string, 0, len(unexpectedStatusCounts))
+		for statusVal, count := range unexpectedStatusCounts {
+			example := unexpectedStatusExample[statusVal]
+			parts = append(parts, fmt.Sprintf("%s=%d (example rel_path=%q)", statusVal, count, example))
+		}
+		sort.Strings(parts)
+		msg := fmt.Sprintf("unexpected document statuses encountered during scan: %s", strings.Join(parts, ", "))
+		if emitter != nil && emitter.enabled {
+			emitter.Emit("warning", "unexpected_document_statuses", map[string]interface{}{
+				"message":  msg,
+				"counts":   unexpectedStatusCounts,
+				"examples": unexpectedStatusExample,
+			})
+		} else {
+			writef(stderr, "warning: %s\n", msg)
 		}
 	}
 
