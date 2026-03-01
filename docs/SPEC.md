@@ -58,7 +58,8 @@ Current high-level status:
 - Retrieval `Stats()` service contract: **Planned** (see issue #71)
 - Advanced retrieval answer quality/completion work: **In progress** (see issue #70)
 - Native x402 tools/call gating path: **Implemented** (optional and facilitator-backed)
-- Hosted smoke/runbook and release-completion checklist: **In progress** (see issues #19 and #12)
+- Hosted smoke/runbook guidance: **Implemented** (see issue #19)
+- Release-completion checklist hardening: **In progress** (see issue #12)
 
 ---
 
@@ -248,6 +249,24 @@ ERROR: CONFIG_INVALID: Missing MISTRAL_API_KEY
 Set env: MISTRAL_API_KEY=...
 Or run: dir2mcp config init
 ```
+
+### 3.4 Hosted demo smoke probe (operational runbook)
+
+For a hosted endpoint readiness check, use the repo script:
+
+```bash
+DIR2MCP_DEMO_URL="https://your-host.example/mcp" \
+DIR2MCP_DEMO_TOKEN="<optional-bearer-token>" \
+./scripts/smoke_hosted_demo.sh
+```
+
+Expected pass conditions:
+
+* `initialize` returns HTTP `200` and includes `MCP-Session-Id`.
+* `tools/list` returns HTTP `200` and includes tool metadata.
+* `tools/call` against `dir2mcp.list_files` returns either:
+  * HTTP `200` with JSON-RPC body, or
+  * HTTP `402` with `PAYMENT-REQUIRED` when x402 route gating is enabled.
 
 ---
 

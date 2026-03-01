@@ -56,6 +56,21 @@ Precedence (highest to lowest): shell environment variables > `.env.local` > `.e
 
 `dir2mcp` automatically loads both `.env` and `.env.local` from the working directory; `.env.local` overrides `.env`, and real shell environment variables take ultimate precedence.
 
+### Hosted demo smoke runbook
+
+For a quick hosted readiness check (issue #19 scope), run:
+
+```bash
+DIR2MCP_DEMO_URL="https://your-host.example/mcp" \
+DIR2MCP_DEMO_TOKEN="<optional-bearer-token>" \
+./scripts/smoke_hosted_demo.sh
+```
+
+What it verifies:
+- `initialize` returns HTTP 200 and a valid `MCP-Session-Id`
+- `tools/list` returns HTTP 200 with tool metadata
+- `tools/call` for `dir2mcp.list_files` returns HTTP 200, or HTTP 402 with `PAYMENT-REQUIRED` when x402 is enabled
+
 ## CLI Commands
 
 | Command | Description |
