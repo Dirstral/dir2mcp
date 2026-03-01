@@ -37,6 +37,7 @@ type stdioClient struct {
 	stdin  io.WriteCloser
 	stdout *bufio.Reader
 	mu     sync.Mutex
+	callMu sync.Mutex
 }
 
 type Tool struct {
@@ -157,7 +158,7 @@ func (c *Client) Initialize(ctx context.Context) error {
 		"capabilities":    map[string]any{"tools": map[string]any{}},
 		"clientInfo":      map[string]any{"name": "dirstral", "version": "0.1.0"},
 	}
-	body, status, headers, err := c.call(ctx, "initialize", params, true)
+	_, status, headers, err := c.call(ctx, protocol.RPCMethodInitialize, params, true)
 	if err != nil {
 		return err
 	}
@@ -174,8 +175,13 @@ func (c *Client) Initialize(ctx context.Context) error {
 		c.sessionID = "stdio"
 	}
 
-	_ = body
-	_, _, _, _ = c.call(ctx, "notifications/initialized", map[string]any{}, false)
+	_, notifyStatus, _, notifyErr := c.call(ctx, protocol.RPCMethodNotificationsInitialized, map[string]any{}, false)
+	if notifyErr != nil {
+		return fmt.Errorf("notifications/initialized failed: %w", notifyErr)
+	}
+	if notifyStatus != http.StatusAccepted && (notifyStatus < 200 || notifyStatus >= 300) {
+		return fmt.Errorf("notifications/initialized returned status %d", notifyStatus)
+	}
 	return nil
 }
 
@@ -184,7 +190,7 @@ func (c *Client) SessionID() string {
 }
 
 func (c *Client) ListTools(ctx context.Context) ([]Tool, error) {
-	body, _, _, err := c.call(ctx, "tools/list", map[string]any{}, true)
+	body, _, _, err := c.call(ctx, protocol.RPCMethodToolsList, map[string]any{}, true)
 	if err != nil {
 		return nil, err
 	}
@@ -218,7 +224,7 @@ func (c *Client) CallTool(ctx context.Context, name string, args map[string]any)
 		"arguments": args,
 	}
 	start := time.Now()
-	body, status, headers, err := c.call(ctx, "tools/call", params, true)
+	body, status, headers, err := c.call(ctx, protocol.RPCMethodToolsCall, params, true)
 	if err != nil && c.transport == "streamable-http" && isSessionNotFoundError(err) {
 		if c.verbose {
 			fmt.Println("[mcp] SESSION_NOT_FOUND received; recovering session and retrying tools/call once")
@@ -232,7 +238,7 @@ func (c *Client) CallTool(ctx context.Context, name string, args map[string]any)
 		if c.verbose {
 			fmt.Println("[mcp] session recovery succeeded; retrying tools/call")
 		}
-		body, status, headers, err = c.call(ctx, "tools/call", params, true)
+		body, status, headers, err = c.call(ctx, protocol.RPCMethodToolsCall, params, true)
 		if err != nil && c.verbose {
 			fmt.Printf("[mcp] tools/call retry failed: %v\n", err)
 		}
@@ -410,6 +416,8 @@ func (c *Client) callStdio(ctx context.Context, method string, params map[string
 			return nil, 0, nil, err
 		}
 	}
+	c.stdio.callMu.Lock()
+	defer c.stdio.callMu.Unlock()
 
 	var id *int
 	if withID {
@@ -424,16 +432,40 @@ func (c *Client) callStdio(ctx context.Context, method string, params map[string
 	}
 
 	c.stdio.mu.Lock()
-	defer c.stdio.mu.Unlock()
 	if err := writeStdioMessage(c.stdio.stdin, payload); err != nil {
+		c.stdio.mu.Unlock()
 		return nil, 0, nil, err
 	}
 	if !withID {
+		c.stdio.mu.Unlock()
 		return map[string]any{}, http.StatusAccepted, http.Header{}, nil
 	}
-	bodyBytes, err := readStdioMessage(c.stdio.stdout)
-	if err != nil {
-		return nil, 0, nil, err
+	stdout := c.stdio.stdout
+	c.stdio.mu.Unlock()
+
+	type stdioReadResult struct {
+		body []byte
+		err  error
+	}
+	readResultCh := make(chan stdioReadResult, 1)
+	go func() {
+		body, readErr := readStdioMessage(stdout)
+		readResultCh <- stdioReadResult{body: body, err: readErr}
+	}()
+
+	var bodyBytes []byte
+	select {
+	case <-ctx.Done():
+		return nil, 0, nil, ctx.Err()
+	case readResult := <-readResultCh:
+		if readResult.err != nil {
+			return nil, 0, nil, readResult.err
+		}
+		bodyBytes = readResult.body
+	}
+
+	if len(bodyBytes) == 0 {
+		return nil, 0, nil, fmt.Errorf("empty stdio response")
 	}
 
 	var envelope jsonRPCResponse
