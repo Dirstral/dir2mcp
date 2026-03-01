@@ -11,6 +11,7 @@ import (
 
 	"dir2mcp/internal/cli"
 	"dir2mcp/internal/config"
+	"dir2mcp/internal/mcp"
 	"dir2mcp/internal/model"
 	"dir2mcp/internal/store"
 )
@@ -560,6 +561,63 @@ func TestAskNoContextResponse(t *testing.T) {
 	})
 	if !strings.Contains(stdout.String(), "No relevant context found in the indexed corpus.") {
 		t.Fatalf("expected no-context response in stdout, got: %s", stdout.String())
+	}
+}
+
+func TestAskNonPositiveKDefaultsToSearchK(t *testing.T) {
+	t.Setenv("MISTRAL_API_KEY", "test-key")
+
+	for _, rawK := range []string{"0", "-1"} {
+		t.Run("k="+rawK, func(t *testing.T) {
+			tmp := t.TempDir()
+
+			stub := &commandTestRetrieverStub{
+				askResult: model.AskResult{
+					Question: "q",
+					Answer:   "a",
+				},
+			}
+
+			var stdout, stderr bytes.Buffer
+			app := cli.NewAppWithIOAndHooks(&stdout, &stderr, cli.RuntimeHooks{
+				NewStore: func(config.Config) model.Store { return &commandTestNoopStore{} },
+				NewRetriever: func(config.Config, model.Store) model.Retriever {
+					return stub
+				},
+			})
+
+			withWorkingDir(t, tmp, func() {
+				code := app.RunWithContext(context.Background(), []string{"ask", "--k", rawK, "q"})
+				if code != 0 {
+					t.Fatalf("unexpected exit code: %d stderr=%s", code, stderr.String())
+				}
+			})
+
+			if !stub.askCalled {
+				t.Fatal("expected Ask to be called")
+			}
+			if stub.lastAskQuery.K != mcp.DefaultSearchK {
+				t.Fatalf("expected default k=%d, got=%d", mcp.DefaultSearchK, stub.lastAskQuery.K)
+			}
+		})
+	}
+}
+
+func TestAskKAboveMaxFails(t *testing.T) {
+	tmp := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	app := cli.NewAppWithIO(&stdout, &stderr)
+
+	withWorkingDir(t, tmp, func() {
+		code := app.RunWithContext(context.Background(), []string{"ask", "--k", "51", "q"})
+		if code != 1 {
+			t.Fatalf("unexpected exit code: got=%d want=1 stderr=%s", code, stderr.String())
+		}
+	})
+
+	errOut := stderr.String()
+	if !strings.Contains(errOut, "invalid ask flags") || !strings.Contains(errOut, "k must be <= 50") {
+		t.Fatalf("expected k upper-bound error, got: %s", errOut)
 	}
 }
 
