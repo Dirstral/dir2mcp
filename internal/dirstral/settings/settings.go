@@ -295,6 +295,15 @@ func (m *model) save() {
 			secretFailures = append(secretFailures, fmt.Sprintf("%s: no mapped environment variable", f.Key))
 			continue
 		}
+		storedSecret, loadErr := config.LoadSecret(envKey)
+		if loadErr != nil {
+			failedSecretKeys[f.Key] = true
+			secretFailures = append(secretFailures, fmt.Sprintf("%s: %v", f.Key, loadErr))
+			continue
+		}
+		if strings.TrimSpace(storedSecret) == strings.TrimSpace(f.Value) {
+			continue
+		}
 		var err error
 		if strings.TrimSpace(f.Value) == "" {
 			err = config.DeleteSecret(envKey)
