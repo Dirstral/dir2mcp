@@ -270,6 +270,9 @@ func Status() error {
 	fmt.Printf("%s endpoint=%s reachable=%s mcp_ready=%s\n", ui.Brand.Render("lighthouse:"), ui.Cyan.Render(health.MCPURL), reachStr, readyStr)
 	fmt.Printf("%s protocol=%s session_header=%s\n", ui.Brand.Render("lighthouse:"), ui.Cyan.Render(OrUnknown(health.ProtocolHeader)), ui.Cyan.Render(OrUnknown(health.SessionHeaderName)))
 	fmt.Printf("%s auth_source=%s\n", ui.Brand.Render("lighthouse:"), ui.Cyan.Render(OrUnknown(health.AuthSourceType)))
+	if health.AuthDiagnostic != "" {
+		fmt.Printf("%s auth_diagnostic=%s\n", ui.Brand.Render("lighthouse:"), ui.Yellow.Render(health.AuthDiagnostic))
+	}
 	if health.LastError != "" {
 		fmt.Printf("%s detail=%s\n", ui.Brand.Render("lighthouse:"), ui.Dim(health.LastError))
 	}
@@ -277,6 +280,9 @@ func Status() error {
 	if !health.Ready {
 		if health.LastError != "" {
 			return fmt.Errorf("%w: %s", errUnhealthy, health.LastError)
+		}
+		if health.AuthDiagnostic != "" {
+			return fmt.Errorf("%w: %s", errUnhealthy, health.AuthDiagnostic)
 		}
 		return fmt.Errorf("%w", errUnhealthy)
 	}
@@ -519,6 +525,7 @@ type HealthInfo struct {
 	ProtocolHeader    string // configured MCP protocol header value
 	SessionHeaderName string // configured session header name
 	AuthSourceType    string // configured auth source type
+	AuthDiagnostic    string // diagnostic message for auth source
 	LastError         string // last readiness probe error (if any)
 }
 
@@ -532,12 +539,21 @@ func CheckHealth() HealthInfo {
 	reachable := false
 	mcpReady := false
 	lastErr := ""
+	protocolHeader, sessionHeaderName, authSourceType := readConnectionContractDetails(state)
+
+	token := resolveProbeToken(state)
+	authDiagnostic := ""
+	if authSourceType != "" && authSourceType != "none" && authSourceType != "unknown" {
+		if token == "" {
+			authDiagnostic = "missing required auth token for contract type: " + authSourceType
+		}
+	}
+
 	if state.MCPURL != "" {
 		reachable = endpointReachable(state.MCPURL)
 		if reachable {
 			ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 			defer cancel()
-			token := resolveProbeToken(state)
 			mcpReady, lastErr = probeMCPReady(ctx, state.MCPURL, token)
 		} else {
 			lastErr = "endpoint not reachable"
@@ -549,7 +565,6 @@ func CheckHealth() HealthInfo {
 	if !alive && lastErr == "" {
 		lastErr = "process not alive"
 	}
-	protocolHeader, sessionHeaderName, authSourceType := readConnectionContractDetails(state)
 	return HealthInfo{
 		Found:             true,
 		PID:               state.PID,
@@ -561,6 +576,7 @@ func CheckHealth() HealthInfo {
 		ProtocolHeader:    protocolHeader,
 		SessionHeaderName: sessionHeaderName,
 		AuthSourceType:    authSourceType,
+		AuthDiagnostic:    authDiagnostic,
 		LastError:         lastErr,
 	}
 }
