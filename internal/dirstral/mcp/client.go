@@ -26,6 +26,7 @@ type Client struct {
 	transport  string
 	verbose    bool
 	authToken  string
+	mu         sync.Mutex
 	sessionID  string
 	httpClient *http.Client
 	stdio      *stdioClient
@@ -170,9 +171,13 @@ func (c *Client) Initialize(ctx context.Context) error {
 		if sessionID == "" {
 			return fmt.Errorf("initialize response missing %s", protocol.MCPSessionHeader)
 		}
+		c.mu.Lock()
 		c.sessionID = sessionID
+		c.mu.Unlock()
 	} else {
+		c.mu.Lock()
 		c.sessionID = "stdio"
+		c.mu.Unlock()
 	}
 
 	_, notifyStatus, _, notifyErr := c.call(ctx, protocol.RPCMethodNotificationsInitialized, map[string]any{}, false)
@@ -186,6 +191,8 @@ func (c *Client) Initialize(ctx context.Context) error {
 }
 
 func (c *Client) SessionID() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	return c.sessionID
 }
 
@@ -280,10 +287,14 @@ func (c *Client) recoverStreamableHTTPSession(ctx context.Context) error {
 	if c.verbose {
 		fmt.Println("[mcp] recovering streamable-http MCP session")
 	}
+	c.mu.Lock()
 	previousSessionID := c.sessionID
 	c.sessionID = ""
+	c.mu.Unlock()
 	if err := c.Initialize(ctx); err != nil {
+		c.mu.Lock()
 		c.sessionID = previousSessionID
+		c.mu.Unlock()
 		return err
 	}
 	return nil
@@ -307,8 +318,10 @@ func (c *Client) call(ctx context.Context, method string, params map[string]any,
 
 	var id *int
 	if withID {
+		c.mu.Lock()
 		n := c.nextID
 		c.nextID++
+		c.mu.Unlock()
 		id = &n
 	}
 	message := jsonRPCRequest{JSONRPC: "2.0", ID: id, Method: method, Params: params}
@@ -331,8 +344,11 @@ func (c *Client) call(ctx context.Context, method string, params map[string]any,
 	if c.authToken != "" {
 		req.Header.Set("Authorization", "Bearer "+c.authToken)
 	}
-	if c.sessionID != "" {
-		req.Header.Set(protocol.MCPSessionHeader, c.sessionID)
+	c.mu.Lock()
+	sessionID := c.sessionID
+	c.mu.Unlock()
+	if sessionID != "" {
+		req.Header.Set(protocol.MCPSessionHeader, sessionID)
 	}
 
 	resp, err := c.httpClient.Do(req)
@@ -421,8 +437,10 @@ func (c *Client) callStdio(ctx context.Context, method string, params map[string
 
 	var id *int
 	if withID {
+		c.mu.Lock()
 		n := c.nextID
 		c.nextID++
+		c.mu.Unlock()
 		id = &n
 	}
 	message := jsonRPCRequest{JSONRPC: "2.0", ID: id, Method: method, Params: params}
@@ -456,6 +474,11 @@ func (c *Client) callStdio(ctx context.Context, method string, params map[string
 	var bodyBytes []byte
 	select {
 	case <-ctx.Done():
+		if c.stdio != nil && c.stdio.cmd != nil && c.stdio.cmd.Process != nil {
+			_ = c.stdio.cmd.Process.Kill()
+		}
+		<-readResultCh
+		_ = c.Close()
 		return nil, 0, nil, ctx.Err()
 	case readResult := <-readResultCh:
 		if readResult.err != nil {
