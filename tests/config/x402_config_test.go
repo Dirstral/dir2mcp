@@ -1,6 +1,7 @@
 package tests
 
 import (
+	"strings"
 	"testing"
 
 	"dir2mcp/internal/config"
@@ -50,7 +51,11 @@ func TestValidateX402_StrictRequiresCAIP2Network(t *testing.T) {
 	cfg.X402.Asset = "asset"
 	cfg.X402.PayTo = "payto"
 
-	if err := cfg.ValidateX402(true); err == nil {
+	err := cfg.ValidateX402(true)
+	if err == nil {
 		t.Fatal("expected strict x402 validation error for invalid network")
+	}
+	if !strings.Contains(err.Error(), "CAIP-2") {
+		t.Fatalf("expected CAIP-2 validation error, got: %v", err)
 	}
 }
