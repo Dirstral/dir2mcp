@@ -36,6 +36,9 @@ const (
 // a non-positive value.
 const DefaultSearchK = 10
 
+// MaxSearchK is the highest allowed k value for search/ask requests.
+const MaxSearchK = 50
+
 type Server struct {
 	cfg       config.Config
 	authToken string
