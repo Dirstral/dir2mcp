@@ -36,6 +36,12 @@ func TestLoad_EnvOverridesX402(t *testing.T) {
 		if cfg.X402.Network != "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp" {
 			t.Fatalf("X402.Network=%q", cfg.X402.Network)
 		}
+		if cfg.X402.Asset != "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" {
+			t.Fatalf("X402.Asset=%q want=%q", cfg.X402.Asset, "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v")
+		}
+		if cfg.X402.PayTo != "8N5A4rQU8vJrQmH3iiA7kE4m1df4WeyueXQqGb4G9tTj" {
+			t.Fatalf("X402.PayTo=%q want=%q", cfg.X402.PayTo, "8N5A4rQU8vJrQmH3iiA7kE4m1df4WeyueXQqGb4G9tTj")
+		}
 	})
 }
 
