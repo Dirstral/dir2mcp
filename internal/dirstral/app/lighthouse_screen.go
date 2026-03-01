@@ -10,6 +10,7 @@ func LighthouseMenuConfig() MenuConfig {
 			{Label: lighthouseActionStatus, Description: "Check process and endpoint health", Value: lighthouseActionStatus},
 			{Label: lighthouseActionRemote, Description: "Probe configured remote MCP endpoint", Value: lighthouseActionRemote},
 			{Label: lighthouseActionLogs, Description: "Tail dir2mcp output", Value: lighthouseActionLogs},
+			{Label: lighthouseActionStop, Description: "Stop dir2mcp server", Value: lighthouseActionStop},
 			{Label: lighthouseActionBack, Description: "Return to main menu", Value: lighthouseActionBack},
 		},
 		ShowLogo: false,
