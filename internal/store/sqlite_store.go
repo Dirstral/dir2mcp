@@ -1062,7 +1062,7 @@ func bootstrapSettingsLocked(ctx context.Context, db *sql.DB) error {
 		"embed_code_model":     "codestral-embed",
 		"ocr_model":            mistral.DefaultOCRModel,
 		"stt_provider":         "mistral",
-		"stt_model":            "voxtral-mini-latest",
+		"stt_model":            mistral.DefaultTranscribeModel,
 		"chat_model":           mistral.DefaultChatModel,
 	}
 
