@@ -669,10 +669,6 @@ func (s *Server) handleAskTool(ctx context.Context, args map[string]interface{})
 		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
 	}
 
-	if s.retriever == nil {
-		return toolCallResult{}, &toolExecutionError{Code: protocol.ErrorCodeIndexNotReady, Message: "retriever not configured", Retryable: false}
-	}
-
 	// branch early on search_only so we avoid asking the generator and can
 	// take advantage of Search-specific behaviour (and avoid throwing away the
 	// generated answer).
