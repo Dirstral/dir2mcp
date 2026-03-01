@@ -326,7 +326,7 @@ func (c *Client) call(ctx context.Context, method string, params map[string]any,
 		return nil, 0, nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("MCP-Protocol-Version", protocolVersion)
+	req.Header.Set(protocol.MCPProtocolVersionHeader, protocolVersion)
 	req.Header.Set("Accept", "application/json, text/event-stream")
 	if c.authToken != "" {
 		req.Header.Set("Authorization", "Bearer "+c.authToken)
