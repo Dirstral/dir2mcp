@@ -530,7 +530,7 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 
 	preloadedChunks := 0
 	if metadataStore, ok := st.(embeddedChunkLister); ok {
-		preloadedChunks, err = preloadEmbeddedChunkMetadata(ctx, metadataStore, ret)
+		preloadedChunks, err = retrieval.PreloadChunkMetadata(ctx, metadataStore, ret)
 		if err != nil {
 			// surface the problem in both stderr and the NDJSON event stream so
 			// automation can detect a bootstrap warning.
@@ -720,43 +720,6 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 			})
 		}
 	}
-}
-
-func preloadEmbeddedChunkMetadata(ctx context.Context, source embeddedChunkLister, ret *retrieval.Service) (int, error) {
-	if source == nil || ret == nil {
-		return 0, nil
-	}
-	const pageSize = 500
-	total := 0
-	kinds := []string{"text", "code"}
-	for _, kind := range kinds {
-		offset := 0
-		for {
-			tasks, err := source.ListEmbeddedChunkMetadata(ctx, kind, pageSize, offset)
-			if err != nil {
-				if errors.Is(err, model.ErrNotImplemented) {
-					break
-				}
-				return total, err
-			}
-			for _, task := range tasks {
-				ret.SetChunkMetadataForIndex(kind, task.Metadata.ChunkID, model.SearchHit{
-					ChunkID: task.Metadata.ChunkID,
-					RelPath: task.Metadata.RelPath,
-					DocType: task.Metadata.DocType,
-					RepType: task.Metadata.RepType,
-					Snippet: task.Metadata.Snippet,
-					Span:    task.Metadata.Span,
-				})
-				total++
-			}
-			if len(tasks) < pageSize {
-				break
-			}
-			offset += len(tasks)
-		}
-	}
-	return total, nil
 }
 
 func startEmbeddingWorkers(
@@ -1223,7 +1186,7 @@ func (a *App) buildRetrieverForAsk(ctx context.Context, cfg config.Config, st mo
 	ret.SetProtocolVersion(cfg.ProtocolVersion)
 
 	if metadataStore, ok := st.(embeddedChunkLister); ok {
-		if _, err := preloadEmbeddedChunkMetadata(ctx, metadataStore, ret); err != nil && !errors.Is(err, model.ErrNotImplemented) {
+		if _, err := retrieval.PreloadChunkMetadata(ctx, metadataStore, ret); err != nil && !errors.Is(err, model.ErrNotImplemented) {
 			_ = textIx.Close()
 			_ = codeIx.Close()
 			return nil, nil, fmt.Errorf("preload embedded chunk metadata: %w", err)
@@ -1865,7 +1828,12 @@ func collectCorpusStats(ctx context.Context, st model.Store) (model.CorpusStats,
 		Indexed:   statusCounts.Indexed,
 		Skipped:   statusCounts.Skipped,
 		Deleted:   statusCounts.Deleted,
-		Errors:    statusCounts.Errors,
+		// We cannot derive these counters from ListFiles-only fallback.
+		// Use explicit sentinels instead of misleading zero values.
+		Representations: -1,
+		ChunksTotal:     -1,
+		EmbeddedOK:      -1,
+		Errors:          statusCounts.Errors,
 	}, nil
 }
 
@@ -1913,12 +1881,14 @@ func collectDocumentStats(ctx context.Context, st model.Store) (map[string]int64
 			totalActive++
 
 			switch strings.ToLower(strings.TrimSpace(doc.Status)) {
+			case "indexed", "ok":
+				status.Indexed++
 			case "skipped":
 				status.Skipped++
 			case "error":
 				status.Errors++
 			default:
-				status.Indexed++
+				log.Printf("unexpected document status=%q rel_path=%q; excluding from indexed/skipped/error counts", strings.TrimSpace(doc.Status), strings.TrimSpace(doc.RelPath))
 			}
 		}
 

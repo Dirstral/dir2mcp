@@ -650,6 +650,8 @@ func TestSQLiteStore_CorpusStats_Populated(t *testing.T) {
 	// artificially clear the doc_type for one record to make sure
 	// ActiveDocCounts/CorpusStats normalize it to "unknown". UpsertDocument
 	// normalizes empty values to "text", so we bypass it with raw SQL.
+	// NOTE: this test intentionally relies on EnsureDB returning *sql.DB for
+	// direct SQL mutation; it's a white-box assertion for normalization logic.
 	if dbh, err := st.EnsureDB(ctx); err == nil {
 		// the underlying implementation is *sql.DB; use ExecContext via type
 		// assertion since dbQueryHandle doesn't expose Exec.

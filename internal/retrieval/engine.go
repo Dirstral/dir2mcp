@@ -21,7 +21,8 @@ type engineRetriever interface {
 	Ask(ctx context.Context, question string, query model.SearchQuery) (model.AskResult, error)
 }
 
-type embeddedChunkMetadataSource interface {
+// ChunkMetadataSource lists embedded chunk metadata in paged form.
+type ChunkMetadataSource interface {
 	ListEmbeddedChunkMetadata(ctx context.Context, indexKind string, limit, offset int) ([]model.ChunkTask, error)
 }
 
@@ -40,7 +41,11 @@ type Engine struct {
 }
 
 // NewEngine creates a retrieval engine backed by the on-disk state.
-func NewEngine(stateDir, rootDir string, cfg *config.Config) (*Engine, error) {
+func NewEngine(ctx context.Context, stateDir, rootDir string, cfg *config.Config) (*Engine, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	effective := mergeEngineConfig(config.Default(), cfg)
 	if trimmed := strings.TrimSpace(stateDir); trimmed != "" {
 		effective.StateDir = trimmed
@@ -56,7 +61,7 @@ func NewEngine(stateDir, rootDir string, cfg *config.Config) (*Engine, error) {
 	}
 
 	metadataStore := store.NewSQLiteStore(filepath.Join(effective.StateDir, "meta.sqlite"))
-	if err := metadataStore.Init(context.Background()); err != nil && !errors.Is(err, model.ErrNotImplemented) {
+	if err := metadataStore.Init(ctx); err != nil && !errors.Is(err, model.ErrNotImplemented) {
 		_ = metadataStore.Close()
 		return nil, fmt.Errorf("initialize metadata store: %w", err)
 	}
@@ -93,7 +98,7 @@ func NewEngine(stateDir, rootDir string, cfg *config.Config) (*Engine, error) {
 	svc.SetStateDir(effective.StateDir)
 	svc.SetProtocolVersion(effective.ProtocolVersion)
 
-	if source, ok := interface{}(metadataStore).(embeddedChunkMetadataSource); ok {
+	if source, ok := interface{}(metadataStore).(ChunkMetadataSource); ok {
 		preloadCtx, cancel := context.WithTimeout(context.Background(), defaultEnginePreloadTimeout)
 		defer cancel()
 		total, err := preloadEngineChunkMetadata(preloadCtx, source, svc)
@@ -138,8 +143,11 @@ func mergeEngineConfig(base config.Config, override *config.Config) config.Confi
 	if v := strings.TrimSpace(override.ProtocolVersion); v != "" {
 		merged.ProtocolVersion = v
 	}
-	// Explicitly allow override to set Public to false
-	merged.Public = override.Public
+	// Public is additive here because config.Config cannot distinguish an
+	// omitted bool from an explicit false override.
+	if override.Public {
+		merged.Public = true
+	}
 	if v := strings.TrimSpace(override.AuthMode); v != "" {
 		merged.AuthMode = v
 	}
@@ -269,7 +277,13 @@ func (e *Engine) Ask(question string, opts AskOptions) (*AskResult, error) {
 	}, nil
 }
 
-func preloadEngineChunkMetadata(ctx context.Context, source embeddedChunkMetadataSource, ret *Service) (int, error) {
+func preloadEngineChunkMetadata(ctx context.Context, source ChunkMetadataSource, ret *Service) (int, error) {
+	return PreloadChunkMetadata(ctx, source, ret)
+}
+
+// PreloadChunkMetadata hydrates retrieval metadata for already-embedded chunks.
+// It is shared by engine bootstrap and CLI bootstrap to keep behavior identical.
+func PreloadChunkMetadata(ctx context.Context, source ChunkMetadataSource, ret *Service) (int, error) {
 	if source == nil || ret == nil {
 		return 0, nil
 	}

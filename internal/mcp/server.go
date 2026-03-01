@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
@@ -591,12 +592,12 @@ func (s *Server) hasActiveSession(id string, now time.Time) (bool, string) {
 	}
 	if now.Sub(si.lastSeen) > inactivity {
 		delete(s.sessions, id)
-		log.Printf("session %s expired due to inactivity", id)
+		log.Printf("session %s expired due to inactivity", maskSessionID(id))
 		return false, "inactivity"
 	}
 	if maxLife > 0 && now.Sub(si.created) > maxLife {
 		delete(s.sessions, id)
-		log.Printf("session %s expired due to max lifetime", id)
+		log.Printf("session %s expired due to max lifetime", maskSessionID(id))
 		return false, "max-lifetime"
 	}
 
@@ -614,7 +615,7 @@ func (s *Server) storeSession(id string) {
 }
 
 func (s *Server) runSessionCleanup(ctx context.Context) {
-	ticker := time.NewTicker(sessionCleanupInterval)
+	ticker := time.NewTicker(s.sessionSweepInterval())
 	defer ticker.Stop()
 
 	for {
@@ -625,6 +626,33 @@ func (s *Server) runSessionCleanup(ctx context.Context) {
 			s.cleanupExpiredSessions(now)
 		}
 	}
+}
+
+func (s *Server) sessionSweepInterval() time.Duration {
+	inactivity, maxLife := s.resolveSessionTimeouts()
+	sweep := sessionCleanupInterval
+	if inactivity > 0 && inactivity < sweep {
+		sweep = inactivity
+	}
+	if maxLife > 0 && maxLife < sweep {
+		sweep = maxLife
+	}
+	// Sweep more aggressively than the timeout window to avoid stale sessions
+	// lingering until the full timeout elapses.
+	sweep /= 2
+	if sweep < time.Second {
+		sweep = time.Second
+	}
+	return sweep
+}
+
+func maskSessionID(id string) string {
+	trimmed := strings.TrimSpace(id)
+	if trimmed == "" {
+		return "<empty>"
+	}
+	sum := sha256.Sum256([]byte(trimmed))
+	return hex.EncodeToString(sum[:4])
 }
 
 func (s *Server) runRateLimitCleanup(ctx context.Context) {

@@ -1,6 +1,7 @@
 package tests
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -22,7 +23,7 @@ func TestEngineAsk_WithEmptyIndexReturnsFallback(t *testing.T) {
 	cfg.MistralAPIKey = "test-api-key"
 	cfg.MistralBaseURL = server.URL
 
-	engine, err := retrieval.NewEngine(stateDir, rootDir, &cfg)
+	engine, err := retrieval.NewEngine(context.Background(), stateDir, rootDir, &cfg)
 	if err != nil {
 		t.Fatalf("NewEngine failed: %v", err)
 	}
@@ -54,7 +55,7 @@ func TestEngineAsk_RejectsEmptyQuestion(t *testing.T) {
 	cfg.MistralAPIKey = "test-api-key"
 	cfg.MistralBaseURL = server.URL
 
-	engine, err := retrieval.NewEngine(stateDir, rootDir, &cfg)
+	engine, err := retrieval.NewEngine(context.Background(), stateDir, rootDir, &cfg)
 	if err != nil {
 		t.Fatalf("NewEngine failed: %v", err)
 	}

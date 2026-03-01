@@ -119,6 +119,9 @@ make build        # build binary
 make benchmark    # run retrieval benchmarks
 ```
 
+API note: `retrieval.NewEngine` now requires a context as its first parameter:
+`retrieval.NewEngine(ctx, stateDir, rootDir, cfg)`.
+
 `make check` includes `make lint`, which requires [`golangci-lint`](https://golangci-lint.run/welcome/install/) installed locally.
 
 Contributor and agent guides: [AGENTS.md](AGENTS.md) · [CLAUDE.md](CLAUDE.md)
