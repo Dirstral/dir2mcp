@@ -823,21 +823,27 @@ func (s *SQLiteStore) NextPending(ctx context.Context, limit int, indexKind stri
 	}
 
 	args := []any{"pending"}
-	query := `SELECT c.chunk_id, c.rel_path, c.doc_type, c.rep_type, c.text, c.index_kind,
-	          COALESCE(sp.span_kind, ''), COALESCE(sp.start, 0), COALESCE(sp.end, 0)
-	          FROM chunks c
-	          LEFT JOIN (
-	            SELECT chunk_id, span_kind, start, "end",
-	                   ROW_NUMBER() OVER (PARTITION BY chunk_id ORDER BY span_id) AS rn
-	            FROM spans
-	          ) sp ON sp.chunk_id = c.chunk_id AND sp.rn = 1
-	          WHERE c.embedding_status = ? AND c.deleted = 0 AND c.chunk_id > 0`
+	query := `WITH filtered_chunks AS (
+	            SELECT c.chunk_id, c.rel_path, c.doc_type, c.rep_type, c.text, c.index_kind
+	            FROM chunks c
+	            WHERE c.embedding_status = ? AND c.deleted = 0 AND c.chunk_id > 0
+	          ),
+	          ranked_spans AS (
+	            SELECT s.chunk_id, s.span_kind, s.start, s."end",
+	                   ROW_NUMBER() OVER (PARTITION BY s.chunk_id ORDER BY s.span_id) AS rn
+	            FROM spans s
+	            JOIN filtered_chunks fc ON fc.chunk_id = s.chunk_id
+	          )
+	          SELECT fc.chunk_id, fc.rel_path, fc.doc_type, fc.rep_type, fc.text, fc.index_kind,
+	                 COALESCE(sp.span_kind, ''), COALESCE(sp.start, 0), COALESCE(sp.end, 0)
+	          FROM filtered_chunks fc
+	          LEFT JOIN ranked_spans sp ON sp.chunk_id = fc.chunk_id AND sp.rn = 1`
 	if strings.TrimSpace(indexKind) != "" {
-		query += " AND c.index_kind = ?"
+		query += " WHERE fc.index_kind = ?"
 		args = append(args, indexKind)
 	}
 	args = append(args, limit)
-	query += " ORDER BY c.chunk_id LIMIT ?"
+	query += " ORDER BY fc.chunk_id LIMIT ?"
 
 	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -892,21 +898,27 @@ func (s *SQLiteStore) ListEmbeddedChunkMetadata(ctx context.Context, indexKind s
 	}
 
 	args := []any{"ok"}
-	query := `SELECT c.chunk_id, c.rel_path, c.doc_type, c.rep_type, c.text, c.index_kind,
-	          COALESCE(sp.span_kind, ''), COALESCE(sp.start, 0), COALESCE(sp.end, 0)
-	          FROM chunks c
-	          LEFT JOIN (
-	            SELECT chunk_id, span_kind, start, "end",
-	                   ROW_NUMBER() OVER (PARTITION BY chunk_id ORDER BY span_id) AS rn
-	            FROM spans
-	          ) sp ON sp.chunk_id = c.chunk_id AND sp.rn = 1
-	          WHERE c.embedding_status = ? AND c.deleted = 0 AND c.chunk_id > 0`
+	query := `WITH filtered_chunks AS (
+	            SELECT c.chunk_id, c.rel_path, c.doc_type, c.rep_type, c.text, c.index_kind
+	            FROM chunks c
+	            WHERE c.embedding_status = ? AND c.deleted = 0 AND c.chunk_id > 0
+	          ),
+	          ranked_spans AS (
+	            SELECT s.chunk_id, s.span_kind, s.start, s."end",
+	                   ROW_NUMBER() OVER (PARTITION BY s.chunk_id ORDER BY s.span_id) AS rn
+	            FROM spans s
+	            JOIN filtered_chunks fc ON fc.chunk_id = s.chunk_id
+	          )
+	          SELECT fc.chunk_id, fc.rel_path, fc.doc_type, fc.rep_type, fc.text, fc.index_kind,
+	                 COALESCE(sp.span_kind, ''), COALESCE(sp.start, 0), COALESCE(sp.end, 0)
+	          FROM filtered_chunks fc
+	          LEFT JOIN ranked_spans sp ON sp.chunk_id = fc.chunk_id AND sp.rn = 1`
 	if strings.TrimSpace(indexKind) != "" {
-		query += ` AND c.index_kind = ?`
+		query += ` WHERE fc.index_kind = ?`
 		args = append(args, indexKind)
 	}
 	args = append(args, limit, offset)
-	query += ` ORDER BY c.chunk_id LIMIT ? OFFSET ?`
+	query += ` ORDER BY fc.chunk_id LIMIT ? OFFSET ?`
 
 	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -955,7 +967,7 @@ func (s *SQLiteStore) ListEmbeddedChunkMetadata(ctx context.Context, indexKind s
 func spanFromRow(kind string, start, end int) model.Span {
 	switch strings.ToLower(strings.TrimSpace(kind)) {
 	case "page":
-		if start <= 0 {
+		if start <= 0 || end <= 0 || end != start {
 			return model.Span{Kind: "lines"}
 		}
 		return model.Span{Kind: "page", Page: start}

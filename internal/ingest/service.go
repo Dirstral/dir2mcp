@@ -720,10 +720,10 @@ func (s *Service) GenerateTranscriptRepresentation(ctx context.Context, doc mode
 	return s.generateTranscriptRepresentation(ctx, doc, content)
 }
 
-// enforceOCRCachePolicy scans cacheDir and removes entries that violate
+// enforceCachePolicy scans cacheDir and removes entries that violate
 // the configured size or age limits.  It's safe to call even if neither
 // policy is enabled; in that case it is a no-op.
-func (s *Service) enforceOCRCachePolicy(cacheDir string) error {
+func (s *Service) enforceCachePolicy(cacheDir string) error {
 	// read the limits and any associated hooks under a read lock. we copy them
 	// to locals so the rest of the logic can run without holding the lock for
 	// the entire scan, which could be slow.
@@ -766,7 +766,7 @@ func (s *Service) enforceOCRCachePolicy(cacheDir string) error {
 		if err != nil {
 			// log failure so that operators can investigate; include the
 			// entry name since that is the only identifier available here.
-			s.getLogger().Printf("enforceOCRCachePolicy: failed to stat %s: %v", e.Name(), err)
+			s.getLogger().Printf("enforceCachePolicy: failed to stat %s: %v", e.Name(), err)
 			// a stat error typically means the entry is corrupt or otherwise
 			// unreadable. retaining such files in the cache is unhelpful and
 			// may prevent enforcement from making progress (e.g. if the file is
@@ -777,7 +777,7 @@ func (s *Service) enforceOCRCachePolicy(cacheDir string) error {
 			// expectations of our regression tests.
 			if rmErr := os.Remove(p); rmErr != nil && !os.IsNotExist(rmErr) {
 				// removal failure is unfortunate but not fatal; log and continue.
-				s.getLogger().Printf("enforceOCRCachePolicy: failed to remove stat-error file %s: %v", p, rmErr)
+				s.getLogger().Printf("enforceCachePolicy: failed to remove stat-error file %s: %v", p, rmErr)
 			}
 			continue
 		}
@@ -823,7 +823,7 @@ func (s *Service) enforceOCRCachePolicy(cacheDir string) error {
 
 // EnforceOCRCachePolicy exposes cache policy enforcement for tests.
 func (s *Service) EnforceOCRCachePolicy(cacheDir string) error {
-	return s.enforceOCRCachePolicy(cacheDir)
+	return s.enforceCachePolicy(cacheDir)
 }
 
 func (s *Service) readOrComputeOCR(ctx context.Context, doc model.Document, content []byte) (string, error) {
@@ -861,13 +861,13 @@ func (s *Service) readOrComputeOCR(ctx context.Context, doc model.Document, cont
 		if enforceHook != nil {
 			err = enforceHook(cacheDir)
 		} else {
-			err = s.enforceOCRCachePolicy(cacheDir)
+			err = s.enforceCachePolicy(cacheDir)
 		}
 		if err != nil {
 			// enforcement failure should not prevent the caller from
 			// receiving the OCR result. log and continue instead of
 			// returning an error; the cache write has already succeeded.
-			s.getLogger().Printf("enforceOCRCachePolicy(%s) failed: %v", cacheDir, err)
+			s.getLogger().Printf("enforceCachePolicy(%s) failed: %v", cacheDir, err)
 		}
 	}
 	return string(ocrBytes), nil
@@ -909,7 +909,7 @@ func (s *Service) readOrComputeTranscript(ctx context.Context, doc model.Documen
 		if enforceHook != nil {
 			err = enforceHook(cacheDir)
 		} else {
-			err = s.enforceOCRCachePolicy(cacheDir)
+			err = s.enforceCachePolicy(cacheDir)
 		}
 		if err != nil {
 			s.getLogger().Printf("enforceCachePolicy(%s) failed: %v", cacheDir, err)

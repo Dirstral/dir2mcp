@@ -482,7 +482,7 @@ func TestReadOrComputeOCR_EnforceErrorIgnored(t *testing.T) {
 	if res != "XYZ" {
 		t.Fatalf("unexpected ocr result: %s", res)
 	}
-	if !strings.Contains(buf.String(), "enforceOCRCachePolicy") {
+	if !strings.Contains(buf.String(), "enforceCachePolicy") {
 		t.Fatalf("expected log about enforcement failure, got %q", buf.String())
 	}
 }

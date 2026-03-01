@@ -104,6 +104,7 @@ func TestReadOrComputeTranscript_UsesCache(t *testing.T) {
 }
 
 func TestGenerateTranscriptRepresentation_TranscriberError(t *testing.T) {
+	t.Parallel()
 	stateDir := t.TempDir()
 	st := &fakeIngestStore{}
 	svc := ingest.NewService(config.Config{StateDir: stateDir}, st)
@@ -120,6 +121,7 @@ func TestGenerateTranscriptRepresentation_TranscriberError(t *testing.T) {
 }
 
 func TestReadOrComputeTranscript_PrunesCacheByTTL(t *testing.T) {
+	t.Parallel()
 	stateDir := t.TempDir()
 	svc := ingest.NewService(config.Config{StateDir: stateDir}, nil)
 	svc.SetOCRCacheLimits(0, time.Second)
@@ -179,6 +181,7 @@ func (e *staticEmbedder) Embed(ctx context.Context, model string, texts []string
 }
 
 func TestTranscriptIngest_EndToEnd_AppearsInAskWithCitations(t *testing.T) {
+	t.Parallel()
 	stateDir := t.TempDir()
 	st := &fakeIngestStore{}
 	svc := ingest.NewService(config.Config{StateDir: stateDir}, st)
