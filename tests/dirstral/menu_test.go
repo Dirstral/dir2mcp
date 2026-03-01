@@ -8,6 +8,7 @@ import (
 
 	"dir2mcp/internal/dirstral/app"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 func TestStartMenuItemsOrder(t *testing.T) {
@@ -204,5 +205,47 @@ func TestMenuNarrowWidthTruncatesLongRows(t *testing.T) {
 	view := updated.(app.MenuModel).View()
 	if !strings.Contains(view, "...") {
 		t.Fatalf("expected truncated output in narrow width, got %q", view)
+	}
+}
+
+func TestSelectedRowBadgeDoesNotBreakHighlight(t *testing.T) {
+	badgeStyle := lipgloss.NewStyle().Padding(0, 1)
+
+	m := app.NewMenuModel(app.MenuConfig{
+		Title: "Menu",
+		Items: []app.MenuItem{
+			{
+				Label:       "Lighthouse",
+				Description: "Manage local host and probe remote MCP",
+				Value:       "lighthouse",
+				Badge:       "stopped",
+				BadgeStyle:  &badgeStyle,
+			},
+			{Label: "Exit", Description: "Leave", Value: "exit"},
+		},
+	})
+
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 24})
+	m = updated.(app.MenuModel)
+	// Any key reveals all animated rows; use a no-op key to keep cursor at row 0.
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	m = updated.(app.MenuModel)
+
+	view := m.View()
+	selectedLine := ""
+	for _, line := range strings.Split(view, "\n") {
+		if strings.Contains(line, "Lighthouse") {
+			selectedLine = line
+			break
+		}
+	}
+	if selectedLine == "" {
+		t.Fatalf("expected selected Lighthouse line in view: %q", view)
+	}
+	if !strings.Contains(selectedLine, "[stopped]") {
+		t.Fatalf("expected plain badge token in selected row, got: %q", selectedLine)
+	}
+	if strings.Contains(selectedLine, "[ stopped ]") {
+		t.Fatalf("expected selected row to ignore badge-specific spacing style, got: %q", selectedLine)
 	}
 }
