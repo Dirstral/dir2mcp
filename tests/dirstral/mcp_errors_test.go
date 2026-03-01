@@ -26,6 +26,8 @@ func TestCanonicalCodeFromError(t *testing.T) {
 		{name: "unauthorized alias", err: errors.New("request failed: unauthenticated"), want: mcp.CanonicalCodeUnauthorized},
 		{name: "permission variant", err: errors.New("permission denied for this route"), want: mcp.CanonicalCodePermissionDenied},
 		{name: "rate limit variant", err: errors.New("rate-limit exceeded; retry later"), want: mcp.CanonicalCodeRateLimited},
+		{name: "contextual quota variant", err: errors.New("api quota exceeded for this request"), want: mcp.CanonicalCodeRateLimited},
+		{name: "quota without request context", err: errors.New("disk quota reached for temp files"), want: ""},
 		{name: "unknown", err: errors.New("something else"), want: ""},
 	}
 
