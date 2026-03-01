@@ -35,7 +35,21 @@ func TestStatsJSONFlattening(t *testing.T) {
 	if _, ok := out["CorpusStats"]; ok {
 		t.Fatalf("expected embedded struct to be flattened, got CorpusStats key")
 	}
-	expected := []string{"root", "state_dir", "protocol_version", "doc_counts", "total_docs", "scanned", "indexed", "skipped", "deleted", "representations", "chunks_total", "embedded_ok", "errors"}
+	expected := []string{
+		"root",
+		"state_dir",
+		"protocol_version",
+		"doc_counts",
+		"total_docs",
+		"scanned",
+		"indexed",
+		"skipped",
+		"deleted",
+		"representations",
+		"chunks_total",
+		"embedded_ok",
+		"errors",
+	}
 	for _, key := range expected {
 		if _, ok := out[key]; !ok {
 			t.Errorf("expected key %q in json output", key)

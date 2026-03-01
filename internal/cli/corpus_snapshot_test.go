@@ -105,7 +105,7 @@ func TestBuildCorpusSnapshot_StatusCountsFallback(t *testing.T) {
 		t.Errorf("expected scanned=5, got %d", snap.Indexing.Scanned)
 	}
 	if snap.Indexing.Indexed != 2 {
-		t.Errorf("expected indexed=2 (one active + one other), got %d", snap.Indexing.Indexed)
+		t.Errorf("expected indexed=2 (code doc with Status:\"indexed\" plus non-deleted other doc with default status), got %d", snap.Indexing.Indexed)
 	}
 	if snap.Indexing.Skipped != 1 {
 		t.Errorf("expected skipped=1, got %d", snap.Indexing.Skipped)

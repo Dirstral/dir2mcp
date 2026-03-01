@@ -721,6 +721,20 @@ func TestSQLiteStore_CorpusStats_Populated(t *testing.T) {
 	if stats.Representations != 2 || stats.ChunksTotal != 2 || stats.EmbeddedOK != 1 {
 		t.Fatalf("unexpected rep/chunk counts: %+v", stats)
 	}
+
+	// make sure ActiveDocCounts matches the breakdown from CorpusStats
+	counts, total, err := st.ActiveDocCounts(ctx)
+	if err != nil {
+		t.Fatalf("ActiveDocCounts failed: %v", err)
+	}
+	if total != stats.TotalDocs {
+		t.Fatalf("ActiveDocCounts total %d != CorpusStats total %d", total, stats.TotalDocs)
+	}
+	for k, v := range stats.DocCounts {
+		if counts[k] != v {
+			t.Fatalf("ActiveDocCounts[%s]=%d, expected %d", k, counts[k], v)
+		}
+	}
 }
 
 func TestSQLiteStore_CorpusStats_Empty(t *testing.T) {
