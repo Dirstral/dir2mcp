@@ -766,10 +766,7 @@ func (s *Service) StoreAnnotationRepresentations(ctx context.Context, doc model.
 		if upsertErr != nil {
 			return fmt.Errorf("upsert annotation json representation: %w", upsertErr)
 		}
-		if upsertErr := s.repGen.upsertChunksForRepresentationWithStore(ctx, tx, jsonRepID, "text", []chunkSegment{{
-			Text: jsonText,
-			Span: model.Span{Kind: "lines", StartLine: 1, EndLine: 1},
-		}}); upsertErr != nil {
+		if upsertErr := s.repGen.upsertChunksForRepresentationWithStore(ctx, tx, jsonRepID, "text", chunkTextByChars(jsonText, 1200, 200, 120)); upsertErr != nil {
 			return fmt.Errorf("persist annotation json chunks: %w", upsertErr)
 		}
 
