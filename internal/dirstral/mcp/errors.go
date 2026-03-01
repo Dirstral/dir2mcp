@@ -82,9 +82,9 @@ func canonicalCodeFromText(text string) string {
 	if containsAny(upper,
 		CanonicalCodePermissionDenied,
 		"PERMISSION DENIED",
-		"PERMISSION",
-		"DENIED",
+		"ACCESS DENIED",
 		"FORBIDDEN",
+		"NOT AUTHORIZED",
 	) {
 		return CanonicalCodePermissionDenied
 	}
