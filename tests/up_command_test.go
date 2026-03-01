@@ -196,10 +196,10 @@ func TestReindexPassesConfigToNewIngestor(t *testing.T) {
 	var stderr bytes.Buffer
 	var seenCfg config.Config
 	app := cli.NewAppWithIOAndHooks(&stdout, &stderr, cli.RuntimeHooks{
-		NewIngestor: func(cfg config.Config, st model.Store) model.Ingestor {
+		NewIngestor: func(cfg config.Config, st model.Store) (model.Ingestor, error) {
 			seenCfg = cfg
 			// return the failingIngestor defined later in this file
-			return failingIngestor{}
+			return failingIngestor{}, nil
 		},
 	})
 
@@ -249,12 +249,12 @@ func TestReindexClearsContentHashesBeforeRun(t *testing.T) {
 	var stderr bytes.Buffer
 	var hashAtReindexTime string
 	app := cli.NewAppWithIOAndHooks(&stdout, &stderr, cli.RuntimeHooks{
-		NewIngestor: func(cfg config.Config, st model.Store) model.Ingestor {
+		NewIngestor: func(cfg config.Config, st model.Store) (model.Ingestor, error) {
 			return &capturingIngestor{
 				store:        st,
 				relPath:      "docs/a.md",
 				capturedHash: &hashAtReindexTime,
-			}
+			}, nil
 		},
 	})
 
@@ -399,8 +399,8 @@ func TestUpReturnsExitCode6OnIngestionFatal(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	app := cli.NewAppWithIOAndHooks(&stdout, &stderr, cli.RuntimeHooks{
-		NewIngestor: func(cfg config.Config, st model.Store) model.Ingestor {
-			return failingIngestor{}
+		NewIngestor: func(cfg config.Config, st model.Store) (model.Ingestor, error) {
+			return failingIngestor{}, nil
 		},
 	})
 
