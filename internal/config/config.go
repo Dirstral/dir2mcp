@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
-	"log"
 	"math/big"
 	"net"
 	"net/url"
@@ -62,6 +61,12 @@ type Config struct {
 	// AllowedOrigins is always initialized with local defaults and then extended
 	// via env/CLI comma-separated origin lists.
 	AllowedOrigins []string
+
+	// Warnings captures non-fatal parsing messages that occurred while
+	// loading configuration from environment variables, dotenv files, or
+	// the config file.  Callers can inspect and log these as desired.  This
+	// field is intentionally not persisted to disk.
+	Warnings []error
 
 	// EmbedModelText and EmbedModelCode specify the names of the Mistral
 	// embedding models used for text and code chunks respectively.  They are
@@ -751,9 +756,11 @@ func applyEnvOverrides(cfg *Config, overrideEnv map[string]string) {
 		if enabled, err := strconv.ParseBool(trimmed); err == nil {
 			cfg.X402.ToolsCallEnabled = enabled
 		} else {
-			// log warning but do not override the existing value when parsing
-			// fails, keeping the prior setting (which may be the default).
-			log.Printf("warning: invalid boolean for DIR2MCP_X402_TOOLS_CALL_ENABLED: %q (%v)", trimmed, err)
+			// record a non-fatal warning instead of printing directly to stderr so
+			// callers of the loader can decide how to surface it.  Do not override
+			// the existing value when parsing fails, keeping the prior setting
+			// (which may be the default).
+			cfg.Warnings = append(cfg.Warnings, fmt.Errorf("invalid boolean for DIR2MCP_X402_TOOLS_CALL_ENABLED: %q (%v)", trimmed, err))
 		}
 	}
 	// prefer the atomic env var name matching the YAML key; fall back for compatibility
@@ -785,7 +792,7 @@ func (c Config) ValidateX402(strict bool) error {
 	switch mode {
 	case "off", "on", "required":
 	default:
-		return fmt.Errorf("invalid x402 mode: %s", c.X402.Mode)
+		return fmt.Errorf("invalid x402 mode: %q (accepted: off, on, required)", mode)
 	}
 
 	// if tools calls are disabled we only accept mode "off"; any other
@@ -794,7 +801,7 @@ func (c Config) ValidateX402(strict bool) error {
 	// turned off, which would otherwise quietly bypass validation.
 	if !c.X402.ToolsCallEnabled {
 		if mode != "off" {
-			return fmt.Errorf("x402 mode %q requires ToolsCallEnabled=true", c.X402.Mode)
+			return fmt.Errorf("x402 mode %q requires ToolsCallEnabled=true", mode)
 		}
 		return nil
 	}
@@ -807,13 +814,19 @@ func (c Config) ValidateX402(strict bool) error {
 	if rawURL := strings.TrimSpace(c.X402.FacilitatorURL); rawURL != "" {
 		parsed, err := url.Parse(rawURL)
 		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-			return fmt.Errorf("invalid x402 facilitator URL")
+			if err != nil {
+				return fmt.Errorf("invalid x402 facilitator URL %q: %w", rawURL, err)
+			}
+			return fmt.Errorf("invalid x402 facilitator URL: %q", rawURL)
 		}
 	}
 	if rawURL := strings.TrimSpace(c.X402.ResourceBaseURL); rawURL != "" {
 		parsed, err := url.Parse(rawURL)
 		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-			return fmt.Errorf("invalid x402 resource base URL")
+			if err != nil {
+				return fmt.Errorf("invalid x402 resource base URL %q: %w", rawURL, err)
+			}
+			return fmt.Errorf("invalid x402 resource base URL: %q", rawURL)
 		}
 	}
 

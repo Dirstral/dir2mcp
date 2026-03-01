@@ -231,7 +231,7 @@ curl -sS -D "$INIT_HEADERS" -o "$INIT_BODY" \
     exit 1
 }
 
-SESSION_ID="$(awk -F': ' 'BEGIN{IGNORECASE=1} /^MCP-Session-Id:/{gsub("\r","",$2); print $2; exit}' "$INIT_HEADERS")"
+SESSION_ID="$(awk -F': ' 'tolower($0) ~ /^mcp-session-id:/{gsub("\r","",$2); print $2; exit}' "$INIT_HEADERS")"
 if [ -z "$SESSION_ID" ]; then
   echo "error: could not extract MCP-Session-Id from initialization response" >&2
   cat "$INIT_HEADERS" >&2

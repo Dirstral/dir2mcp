@@ -134,6 +134,16 @@ func BuildPaymentRequiredHeaderValue(req Requirement) (string, error) {
 }
 
 func NormalizeMode(mode string) string {
+	// Normalize user-supplied mode strings to one of the canonical
+	// constants.  This helper is used at runtime during configuration
+	// to decide whether payment gating is enabled, so it’s important
+	// that the return value is always a valid mode.  Previously the
+	// function would return unknown values lowercased which meant
+	// callers such as IsModeValid could disagree with each other.
+	//
+	// After trimming and lowercasing we map anything that isn’t
+	// explicitly recognised back to ModeOff.  Callers that need to
+	// validate the original input should use IsModeValid instead.
 	mode = strings.ToLower(strings.TrimSpace(mode))
 	switch mode {
 	case "", ModeOff:
@@ -143,12 +153,21 @@ func NormalizeMode(mode string) string {
 	case ModeRequired:
 		return ModeRequired
 	default:
-		return mode
+		// unrecognised values fall back to off rather than leaking
+		// arbitrary strings; this keeps the output in the set of
+		// known modes and avoids surprising callers.
+		return ModeOff
 	}
 }
 
 func IsModeValid(mode string) bool {
-	switch NormalizeMode(mode) {
+	// Validate the raw input rather than normalising it.  With the
+	// new behaviour of NormalizeMode the previous implementation would
+	// always return true, which made the helper useless.  Keeping this
+	// logic separate lets callers detect and reject bad configuration
+	// while still using NormalizeMode for runtime decisions.
+	m := strings.ToLower(strings.TrimSpace(mode))
+	switch m {
 	case ModeOff, ModeOn, ModeRequired:
 		return true
 	default:

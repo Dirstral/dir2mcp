@@ -137,8 +137,6 @@ func TestValidateX402_PriceMustBePositiveInteger(t *testing.T) {
 		{"non-integer", "abc"},
 		{"negative", "-100"},
 	} {
-		// capture range variable for the closure
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			// copy config so subtests don't mutate shared state
 			localCfg := cfg
@@ -159,14 +157,19 @@ func TestValidateX402_PriceMustBePositiveInteger(t *testing.T) {
 		})
 	}
 
-	cfg.X402.PriceAtomic = "0"
-	if err := cfg.ValidateX402(true); err == nil {
-		t.Fatal("expected price 0 to be rejected")
-	}
-	cfg.X402.PriceAtomic = "12345"
-	if err := cfg.ValidateX402(true); err != nil {
-		t.Fatalf("expected positive price to be valid, got %v", err)
-	}
+	// additional explicit price checks in subtests for consistent reporting
+	t.Run("price=0 rejects", func(t *testing.T) {
+		cfg.X402.PriceAtomic = "0"
+		if err := cfg.ValidateX402(true); err == nil {
+			t.Fatal("expected price 0 to be rejected")
+		}
+	})
+	t.Run("price=12345 accepts", func(t *testing.T) {
+		cfg.X402.PriceAtomic = "12345"
+		if err := cfg.ValidateX402(true); err != nil {
+			t.Fatalf("expected positive price to be valid, got %v", err)
+		}
+	})
 }
 
 func TestValidateX402_InvalidScheme(t *testing.T) {

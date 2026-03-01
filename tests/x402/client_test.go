@@ -1,10 +1,11 @@
-package tests
+package x402_test
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -81,30 +82,35 @@ func TestRequirementValidate_SchemeWhitelist(t *testing.T) {
 		{"EXACT", false},
 		{" upto ", false},
 	}
-	for _, tc := range cases {
-		r := x402.Requirement{
-			Scheme:   tc.scheme,
-			Network:  "foo:bar",
-			Amount:   "1",
-			Asset:    "a",
-			PayTo:    "p",
-			Resource: "r",
-		}
-		err := r.Validate()
-		if tc.expectsError {
-			if err == nil {
-				t.Errorf("scheme %q should have failed validation", tc.scheme)
+	for i, tc := range cases {
+		name := fmt.Sprintf("%d-%s", i, tc.scheme)
+		t.Run(name, func(t *testing.T) {
+			r := x402.Requirement{
+				Scheme:   tc.scheme,
+				Network:  "foo:bar",
+				Amount:   "1",
+				Asset:    "a",
+				PayTo:    "p",
+				Resource: "r",
 			}
-		} else {
-			if err != nil {
-				t.Errorf("scheme %q should be accepted: %v", tc.scheme, err)
+			err := r.Validate()
+			if tc.expectsError {
+				if err == nil {
+					t.Errorf("scheme %q should have failed validation", tc.scheme)
+				}
+			} else {
+				if err != nil {
+					t.Errorf("scheme %q should be accepted: %v", tc.scheme, err)
+				}
 			}
-		}
+		})
 	}
 }
 
 func TestVerify_NormalizesSchemeInOutgoingPayload(t *testing.T) {
 	var gotScheme string
+	// the transport should return errors for failures so that the upstream
+	// Verify call can observe them and fail at the assertion site.
 	rt := roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		var body struct {
 			PaymentRequirements []struct {
@@ -112,10 +118,10 @@ func TestVerify_NormalizesSchemeInOutgoingPayload(t *testing.T) {
 			} `json:"paymentRequirements"`
 		}
 		if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
-			t.Fatalf("decode request body: %v", err)
+			return nil, fmt.Errorf("decode request body: %w", err)
 		}
 		if len(body.PaymentRequirements) != 1 {
-			t.Fatalf("payment requirements len=%d want=1", len(body.PaymentRequirements))
+			return nil, fmt.Errorf("payment requirements len=%d want=1", len(body.PaymentRequirements))
 		}
 		gotScheme = body.PaymentRequirements[0].Scheme
 		r := &http.Response{

@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"log"
 	"math"
 	"net/http"
 	"os"
@@ -1100,13 +1099,13 @@ func (s *Server) handleAnnotateTool(ctx context.Context, args map[string]interfa
 	// we fail with a mapped tool error rather than invoking client.Generate
 	// which would likely return a provider error.
 	if len([]rune(prompt)) > maxMistralContextChars {
-		return toolCallResult{}, mapToolErrorFromProvider("ANNOTATE_FAILED",
+		return toolCallResult{}, s.mapToolErrorFromProvider("ANNOTATE_FAILED",
 			fmt.Errorf("prompt length %d exceeds max context %d", len([]rune(prompt)), maxMistralContextChars))
 	}
 
 	generated, genErr := client.Generate(ctx, prompt)
 	if genErr != nil {
-		return toolCallResult{}, mapToolErrorFromProvider("ANNOTATE_FAILED", genErr)
+		return toolCallResult{}, s.mapToolErrorFromProvider("ANNOTATE_FAILED", genErr)
 	}
 	annotationObj, parseErr := parseJSONObjectFromModelOutput(generated)
 	if parseErr != nil {
@@ -1494,14 +1493,14 @@ func (s *Server) ensureTranscriptForAudioDoc(ctx context.Context, doc model.Docu
 	// there is anything worth indexing.
 	transcript, readErr := ing.ReadOrComputeTranscript(ctx, doc, content)
 	if readErr != nil {
-		return "", false, false, mapToolErrorFromProvider("TRANSCRIBE_FAILED", readErr)
+		return "", false, false, s.mapToolErrorFromProvider("TRANSCRIBE_FAILED", readErr)
 	}
 
 	indexed := false
 	if strings.TrimSpace(transcript) != "" {
 		// only attempt to persist a representation when we actually have text
 		if genErr := ing.GenerateTranscriptRepresentation(ctx, doc, content); genErr != nil {
-			return "", false, false, mapToolErrorFromProvider("TRANSCRIBE_FAILED", genErr)
+			return "", false, false, s.mapToolErrorFromProvider("TRANSCRIBE_FAILED", genErr)
 		}
 		indexed = true
 	}
@@ -1536,7 +1535,7 @@ func (s *Server) sourceTextForAnnotation(ctx context.Context, doc model.Document
 		ing.SetOCR(client)
 		text, ocrErr := ing.ReadOrComputeOCR(ctx, doc, content)
 		if ocrErr != nil {
-			return "", "", mapToolErrorFromProvider("ANNOTATE_FAILED", ocrErr)
+			return "", "", s.mapToolErrorFromProvider("ANNOTATE_FAILED", ocrErr)
 		}
 		return text, ingest.RepTypeOCRMarkdown, nil
 	default:
@@ -1579,6 +1578,7 @@ func (s *Server) readDocumentContent(relPath string) ([]byte, error) {
 	}
 	return os.ReadFile(targetReal)
 }
+
 func escapeGlobLiteral(input string) string {
 	var b strings.Builder
 	for _, r := range input {
@@ -1629,7 +1629,12 @@ func parseJSONObjectFromModelOutput(raw string) (map[string]interface{}, error) 
 	return nil, errors.New("model output is not a valid JSON object")
 }
 
-func mapToolErrorFromProvider(defaultCode string, err error) *toolExecutionError {
+// mapToolErrorFromProvider maps errors returned by downstream
+// providers into sanitized toolExecutionError values.  Previously this
+// helper relied on the global log package for diagnostics; we now emit
+// structured events via the server's eventEmitter so callers can capture
+// them in the NDJSON stream.
+func (s *Server) mapToolErrorFromProvider(defaultCode string, err error) *toolExecutionError {
 	if err == nil {
 		return nil
 	}
@@ -1647,15 +1652,27 @@ func mapToolErrorFromProvider(defaultCode string, err error) *toolExecutionError
 	}
 	if errors.Is(err, ingest.ErrTranscriptProviderFailure) {
 		// provider failure is retriable but we avoid returning raw details
-		log.Printf("transcript provider failure: %v", err)
+		if s.eventEmitter != nil {
+			s.eventEmitter("error", "transcript_provider_failure", map[string]interface{}{
+				"error": err.Error(),
+				"code":  defaultCode,
+				"msg":   "transcript provider failure",
+			})
+		}
 		return &toolExecutionError{
 			Code:      defaultCode,
 			Message:   "transcript provider failure",
 			Retryable: true,
 		}
 	}
-	// generic fallback: log full error and return a sanitized message
-	log.Printf("tool error [%s]: %v", defaultCode, err)
+	// generic fallback: emit structured event and return sanitized message
+	if s.eventEmitter != nil {
+		s.eventEmitter("error", "tool_error", map[string]interface{}{
+			"error": err.Error(),
+			"code":  defaultCode,
+			"msg":   "internal server error",
+		})
+	}
 	return &toolExecutionError{
 		Code:      defaultCode,
 		Message:   "internal server error",

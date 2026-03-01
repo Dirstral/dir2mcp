@@ -40,13 +40,25 @@ func TestFlattenJSONForIndexing_MarshalErrorFallback(t *testing.T) {
 }
 
 func TestFlattenJSONForIndexing_TopLevelScalar(t *testing.T) {
-	// A string at the top level should not be prefixed by a colon.
-	s := &Service{}
-	if out := s.flattenJSONForIndexing("hello"); out != "hello" {
-		t.Fatalf("expected scalar output without leading colon, got %q", out)
+	// Use a table-driven approach so it's easy to add new scalar inputs.
+	tests := []struct {
+		name  string
+		input interface{}
+		want  string
+	}{
+		{name: "string", input: "hello", want: "hello"},
+		{name: "number", input: 42, want: "42"},
+		{name: "bool-true", input: true, want: "true"},
+		{name: "bool-false", input: false, want: "false"},
+		{name: "nil", input: nil, want: "null"},
 	}
-	// numeric value - should produce JSON representation only.
-	if out := s.flattenJSONForIndexing(42); out != "42" {
-		t.Fatalf("expected numeric output without prefix, got %q", out)
+
+	s := &Service{}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if out := s.flattenJSONForIndexing(tc.input); out != tc.want {
+				t.Fatalf("%s: expected %q, got %q", tc.name, tc.want, out)
+			}
+		})
 	}
 }

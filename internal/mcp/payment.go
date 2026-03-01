@@ -419,7 +419,7 @@ func (s *Server) appendPaymentLog(event string, data map[string]interface{}) {
 		if err := os.MkdirAll(filepath.Dir(s.paymentLogPath), 0o755); err != nil {
 			return err
 		}
-		f, err := os.OpenFile(s.paymentLogPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+		f, err := os.OpenFile(s.paymentLogPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600) // owner read/write only
 		if err != nil {
 			return err
 		}
@@ -463,7 +463,7 @@ func (s *Server) emitPaymentLogWarning(err error) {
 	if err == nil {
 		return
 	}
-	s.emitPaymentEvent("warning", "payment_log_write_failed", map[string]interface{}{
+	s.emitPaymentEvent("warn", "payment_log_write_failed", map[string]interface{}{
 		"msg":  "payment log write failed",
 		"path": s.paymentLogPath,
 		"err":  err.Error(),

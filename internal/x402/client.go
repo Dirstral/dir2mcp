@@ -126,7 +126,7 @@ func (c *HTTPClient) do(ctx context.Context, operation, paymentSignature string,
 		retryable := true
 		// context cancellation or deadline errors should not be retried
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) ||
-			(httpReq.Context() != nil && httpReq.Context().Err() != nil) {
+			httpReq.Context().Err() != nil {
 			retryable = false
 		}
 		return nil, &FacilitatorError{

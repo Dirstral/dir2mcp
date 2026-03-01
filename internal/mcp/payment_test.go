@@ -117,11 +117,34 @@ func TestLockForExecutionKey_SerializesAndCleansUpWithRefCounts(t *testing.T) {
 		unlockC()
 	}()
 
-	// While B holds the lock, C must still be blocked on the same keyed mutex.
+	// While B holds the lock, C must still be registered as a waiter and remain blocked.
+	// Poll under execMu until the ref count reaches 2 (B + C) with a timeout, mirroring
+	// the logic we used earlier above when waiting for B to register.
+	timeoutC := time.After(time.Second)
+	for {
+		s.execMu.Lock()
+		km, ok := s.execKeyMu[key]
+		if ok && km.ref == 2 {
+			s.execMu.Unlock()
+			break
+		}
+		ref := -1
+		if km != nil {
+			ref = km.ref
+		}
+		s.execMu.Unlock()
+		select {
+		case <-timeoutC:
+			t.Fatalf("expected key mutex ref=2 while C waits, got ok=%v ref=%d", ok, ref)
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	// Now that C is registered, ensure it is still blocked (should not have acquired lock yet).
 	select {
 	case <-cAcquired:
 		t.Fatal("C acquired lock while B still held it; keyed exclusion broken")
-	case <-time.After(50 * time.Millisecond):
+	default:
 	}
 
 	close(bRelease)

@@ -366,9 +366,39 @@ func splitTranscriptSegmentWithTiming(text string, startMS, endMS int) []chunkSe
 
 	duration := endMS - startMS
 	out := make([]chunkSegment, 0, len(parts))
-	for i, part := range parts {
-		partStart := startMS + (duration*i)/len(parts)
-		partEnd := startMS + (duration*(i+1))/len(parts)
+
+	// weight time slices by chunk character length rather than uniform
+	// percentages.  compute total length and fall back to equal division if
+	// the result would be zero.
+	totalLen := 0
+	for _, part := range parts {
+		totalLen += len(part.Text)
+	}
+	if totalLen == 0 {
+		// nothing to measure, just do the old uniform split
+		for i, part := range parts {
+			partStart := startMS + (duration*i)/len(parts)
+			partEnd := startMS + (duration*(i+1))/len(parts)
+			if partEnd <= partStart {
+				partEnd = partStart + 1
+			}
+			out = append(out, chunkSegment{
+				Text: part.Text,
+				Span: model.Span{
+					Kind:    "time",
+					StartMS: partStart,
+					EndMS:   partEnd,
+				},
+			})
+		}
+		return out
+	}
+
+	cumLen := 0
+	for _, part := range parts {
+		partStart := startMS + (duration*cumLen)/totalLen
+		cumLen += len(part.Text)
+		partEnd := startMS + (duration*cumLen)/totalLen
 		if partEnd <= partStart {
 			partEnd = partStart + 1
 		}

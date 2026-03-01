@@ -18,6 +18,7 @@ import (
 )
 
 func TestX402ToolsCall_UnpaidReturns402WithPaymentRequiredHeader(t *testing.T) {
+	t.Parallel()
 	cfg := x402EnabledTestConfig("https://resource.example.com")
 	cfg.AuthMode = "none"
 
@@ -41,6 +42,7 @@ func TestX402ToolsCall_UnpaidReturns402WithPaymentRequiredHeader(t *testing.T) {
 }
 
 func TestX402ToolsCall_ModeOnIncompleteConfigFailOpen(t *testing.T) {
+	t.Parallel()
 	cfg := config.Default()
 	cfg.AuthMode = "none"
 	cfg.X402.Mode = "on"
@@ -64,6 +66,7 @@ func TestX402ToolsCall_ModeOnIncompleteConfigFailOpen(t *testing.T) {
 }
 
 func TestX402ToolsCall_PaidRetrySucceedsAndReturnsPaymentResponse(t *testing.T) {
+	t.Parallel()
 	fac := newFacilitatorStub(t)
 	fac.verifyStatus = http.StatusOK
 	fac.settleStatus = http.StatusOK
@@ -101,6 +104,7 @@ func TestX402ToolsCall_PaidRetrySucceedsAndReturnsPaymentResponse(t *testing.T) 
 }
 
 func TestX402ToolsCall_VerifyTransientFailureIsRetryable503(t *testing.T) {
+	t.Parallel()
 	fac := newFacilitatorStub(t)
 	fac.verifyStatus = http.StatusServiceUnavailable
 	fac.verifyBody = `{"message":"temporary outage"}`
@@ -124,6 +128,7 @@ func TestX402ToolsCall_VerifyTransientFailureIsRetryable503(t *testing.T) {
 }
 
 func TestX402ToolsCall_VerifyInvalidReturns402WithChallenge(t *testing.T) {
+	t.Parallel()
 	fac := newFacilitatorStub(t)
 	fac.verifyStatus = http.StatusBadRequest
 	fac.verifyBody = `{"message":"invalid payment"}`
@@ -153,6 +158,7 @@ func TestX402ToolsCall_VerifyInvalidReturns402WithChallenge(t *testing.T) {
 }
 
 func TestX402ToolsCall_ToolErrorDoesNotSettle(t *testing.T) {
+	t.Parallel()
 	fac := newFacilitatorStub(t)
 	fac.verifyStatus = http.StatusOK
 	fac.settleStatus = http.StatusOK
@@ -182,6 +188,7 @@ func TestX402ToolsCall_ToolErrorDoesNotSettle(t *testing.T) {
 }
 
 func TestX402ToolsCall_SettleTransientFailureIsRetryable503(t *testing.T) {
+	t.Parallel()
 	fac := newFacilitatorStub(t)
 	fac.verifyStatus = http.StatusOK
 	fac.settleStatus = http.StatusServiceUnavailable
@@ -206,6 +213,7 @@ func TestX402ToolsCall_SettleTransientFailureIsRetryable503(t *testing.T) {
 }
 
 func TestX402_InitializeAndToolsListRemainUngated(t *testing.T) {
+	t.Parallel()
 	cfg := x402EnabledTestConfig("https://resource.example.com")
 	cfg.AuthMode = "none"
 
@@ -231,6 +239,7 @@ func TestX402_InitializeAndToolsListRemainUngated(t *testing.T) {
 }
 
 func TestX402ToolsCall_FacilitatorBearerTokenForwarded(t *testing.T) {
+	t.Parallel()
 	fac := newFacilitatorStub(t)
 	fac.verifyStatus = http.StatusOK
 	fac.settleStatus = http.StatusOK
@@ -262,6 +271,7 @@ func TestX402ToolsCall_FacilitatorBearerTokenForwarded(t *testing.T) {
 }
 
 func TestX402ToolsCall_SettleRetryReplaysCachedOutcomeWithoutReexecution(t *testing.T) {
+	t.Parallel()
 	fac := newFacilitatorStub(t)
 	fac.verifyStatus = http.StatusOK
 	fac.settleStatuses = []int{http.StatusServiceUnavailable, http.StatusOK}
@@ -430,21 +440,24 @@ func (f *facilitatorStub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "/v2/x402/settle":
 		status := f.settleStatus
 		body := f.settleBody
+		// compute an index atomically (get-and-increment) so concurrent
+		// requests don't race against each other. the returned value is the
+		// previous counter, so subtract one to use it as an index.
+		idx := int(f.settleCalls.Add(1) - 1)
 		if len(f.settleStatuses) > 0 {
-			idx := int(f.settleCalls.Load())
-			if idx >= len(f.settleStatuses) {
-				idx = len(f.settleStatuses) - 1
+			clamped := idx
+			if clamped >= len(f.settleStatuses) {
+				clamped = len(f.settleStatuses) - 1
 			}
-			status = f.settleStatuses[idx]
+			status = f.settleStatuses[clamped]
 		}
 		if len(f.settleBodies) > 0 {
-			idx := int(f.settleCalls.Load())
-			if idx >= len(f.settleBodies) {
-				idx = len(f.settleBodies) - 1
+			clamped := idx
+			if clamped >= len(f.settleBodies) {
+				clamped = len(f.settleBodies) - 1
 			}
-			body = f.settleBodies[idx]
+			body = f.settleBodies[clamped]
 		}
-		f.settleCalls.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
 		_, _ = w.Write([]byte(body))

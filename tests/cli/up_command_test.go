@@ -140,6 +140,44 @@ func TestUpCreatesSecretTokenAndConnectionFile(t *testing.T) {
 	}
 }
 
+// Up command prints a warning when both a direct facilitator token and a
+// token file are supplied; the file takes precedence and the direct flag
+// is ignored. This exercises the new CLI warning logic.
+func TestUpWarnsAboutFacilitatorTokenConflict(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("MISTRAL_API_KEY", "test-key")
+	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
+
+	// prepare a placeholder token file
+	tokenPath := filepath.Join(tmp, "fac.txt")
+	if err := os.WriteFile(tokenPath, []byte("filetoken"), 0o600); err != nil {
+		t.Fatalf("write token file: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := cli.NewAppWithIO(&stdout, &stderr)
+
+	withWorkingDir(t, tmp, func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		code := app.RunWithContext(ctx, []string{
+			"up",
+			"--listen", "127.0.0.1:0",
+			"--x402-facilitator-token-file", tokenPath,
+			"--x402-facilitator-token", "ignored",
+		})
+		if code != 0 {
+			t.Fatalf("unexpected exit code: got=%d stderr=%s", code, stderr.String())
+		}
+	})
+
+	if !strings.Contains(stderr.String(), "warning: --x402-facilitator-token ignored; using --x402-facilitator-token-file") {
+		t.Fatalf("expected warning about token conflict, got stderr: %s", stderr.String())
+	}
+}
+
 func TestUpNonInteractiveMissingConfigReturnsExitCode2(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("MISTRAL_API_KEY", "")

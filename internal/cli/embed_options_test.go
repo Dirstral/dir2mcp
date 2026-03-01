@@ -29,17 +29,19 @@ func TestParseUpOptions_X402TokenFlags(t *testing.T) {
 	// the command‑line semantics dictate that the file flag wins over a direct
 	// token when both are provided.
 	tests := []struct {
-		name      string
-		args      []string
-		wantFile  string
-		wantToken string
+		name          string
+		args          []string
+		wantFile      string
+		wantToken     string
+		wantDirectSet bool
 	}{
-		{"file only", []string{"--x402-facilitator-token-file", "path/to/token"}, "path/to/token", ""},
-		{"token only", []string{"--x402-facilitator-token", "flagval"}, "", "flagval"},
+		{"file only", []string{"--x402-facilitator-token-file", "path/to/token"}, "path/to/token", "", false},
+		{"token only", []string{"--x402-facilitator-token", "flagval"}, "", "flagval", false},
 		// both flags present; precedence rules say the file path should win,
-		// so parseUpOptions is expected to clear the direct token.
-		{"both", []string{"--x402-facilitator-token-file", "path/to/token", "--x402-facilitator-token", "flagval"}, "path/to/token", ""},
-		{"neither", []string{}, "", ""},
+		// so parseUpOptions is expected to clear the direct token and record
+		// that it was originally set.
+		{"both", []string{"--x402-facilitator-token-file", "path/to/token", "--x402-facilitator-token", "flagval"}, "path/to/token", "", true},
+		{"neither", []string{}, "", "", false},
 	}
 
 	for _, tt := range tests {
@@ -53,6 +55,9 @@ func TestParseUpOptions_X402TokenFlags(t *testing.T) {
 			}
 			if opts.x402FacilitatorToken != tt.wantToken {
 				t.Errorf("expected x402FacilitatorToken %q, got %q", tt.wantToken, opts.x402FacilitatorToken)
+			}
+			if opts.x402FacilitatorTokenDirectSet != tt.wantDirectSet {
+				t.Errorf("expected x402FacilitatorTokenDirectSet %v, got %v", tt.wantDirectSet, opts.x402FacilitatorTokenDirectSet)
 			}
 		})
 	}

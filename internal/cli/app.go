@@ -104,20 +104,24 @@ type upOptions struct {
 	x402Mode           string
 	x402FacilitatorURL string
 	// token values may come from a flag, environment variable, or file path
-	x402FacilitatorToken      string
-	x402FacilitatorTokenFile  string
-	x402ResourceBaseURL       string
-	x402Network               string
-	x402Price                 string
-	x402Scheme                string
-	x402Asset                 string
-	x402PayTo                 string
-	x402ToolsCallEnabled      bool
-	x402ToolsCallEnabledIsSet bool
-	auth                      string
-	listen                    string
-	mcpPath                   string
-	allowedOrigins            string
+	x402FacilitatorToken     string
+	x402FacilitatorTokenFile string
+	// original direct token flag presence; true when the user supplied
+	// --x402-facilitator-token and it was non-empty before any precedence
+	// logic cleared it in favor of a file path.
+	x402FacilitatorTokenDirectSet bool
+	x402ResourceBaseURL           string
+	x402Network                   string
+	x402Price                     string
+	x402Scheme                    string
+	x402Asset                     string
+	x402PayTo                     string
+	x402ToolsCallEnabled          bool
+	x402ToolsCallEnabledIsSet     bool
+	auth                          string
+	listen                        string
+	mcpPath                       string
+	allowedOrigins                string
 	// overrideable models, set via flags or env/config
 	embedModelText string
 	embedModelCode string
@@ -333,6 +337,12 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 		writef(a.stderr, "load config: %v\n", err)
 		return exitConfigInvalid
 	}
+	// warn the user if a direct facilitator token was supplied but is being
+	// ignored in favor of a file path. parseUpOptions recorded the original
+	// flag presence in x402FacilitatorTokenDirectSet.
+	if opts.x402FacilitatorTokenDirectSet && opts.x402FacilitatorTokenFile != "" {
+		writef(a.stderr, "warning: --x402-facilitator-token ignored; using --x402-facilitator-token-file\n")
+	}
 
 	if opts.listen != "" {
 		cfg.ListenAddr = opts.listen
@@ -440,9 +450,10 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	}
 	// create payments subdirectory while x402 configuration has been
 	// validated above. creating the state directory first ensures the
-	// parent exists. the call is intentionally unconditional here so that a
-	// valid configuration (including mode="off") never leaves an orphaned
-	// checker running beforehand.
+	// parent exists. the call is intentionally unconditional here: we ensure
+	// the directory exists regardless of mode, avoiding inconsistent state.
+	// because it's done after x402 validation, a valid config (including
+	// mode="off") won't leave an inconsistent state.
 	if err := os.MkdirAll(filepath.Join(cfg.StateDir, "payments"), 0o755); err != nil {
 		writef(a.stderr, "create payments dir: %v\n", err)
 		return exitRootInaccessible
@@ -1423,8 +1434,11 @@ func parseUpOptions(global globalOptions, args []string) (upOptions, error) {
 	// if both forms of the facilitator token are supplied, the file wins.  the
 	// CLI parsing layer clears the direct-token field when a file path is
 	// present so that callers (including tests) can rely on mutual
-	// exclusivity without re‑implementing precedence logic.
-	if opts.x402FacilitatorTokenFile != "" && strings.TrimSpace(opts.x402FacilitatorToken) != "" {
+	// exclusivity without re‑implementing precedence logic. preserve whether
+	// the direct flag was originally set so we can warn later in the CLI flow.
+	directSet := strings.TrimSpace(opts.x402FacilitatorToken) != ""
+	if opts.x402FacilitatorTokenFile != "" && directSet {
+		opts.x402FacilitatorTokenDirectSet = true
 		opts.x402FacilitatorToken = ""
 	}
 
