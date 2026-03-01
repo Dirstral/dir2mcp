@@ -4,6 +4,7 @@ package ui
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/charmbracelet/lipgloss"
 )
@@ -69,5 +70,8 @@ func Dim(text string) string {
 
 // Enabled reports whether color output is enabled.
 func Enabled() bool {
-	return os.Getenv("NO_COLOR") == ""
+	if os.Getenv("NO_COLOR") != "" {
+		return false
+	}
+	return strings.ToLower(strings.TrimSpace(os.Getenv("TERM"))) != "dumb"
 }
