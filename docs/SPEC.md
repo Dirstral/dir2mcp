@@ -337,6 +337,44 @@ A lightweight summary:
 }
 ```
 
+When indexing stats are unavailable (e.g., the ListFiles-only fallback path where no live
+`IndexingState` is present), the fields `representations`, `chunks_total`, and `embedded_ok`
+are set to `-1` to signal "not derivable". A value of `-1` is **not** an error; consumers
+MUST treat it as "data unavailable" and MUST NOT treat it as a counter value.
+
+Example snapshot emitted via the ListFiles-only fallback path:
+
+```json
+{
+  "root": "/abs/root",
+  "profile": {
+    "doc_counts": { "code": 120, "md": 35 },
+    "code_ratio": 0.77
+  },
+  "models": {
+    "embed_text": "mistral-embed",
+    "embed_code": "codestral-embed",
+    "ocr": "mistral-ocr-latest",
+    "stt_provider": "mistral",
+    "stt_model": "voxtral-mini-latest",
+    "chat": "mistral-small-2506"
+  },
+  "indexing": {
+    "job_id": "",
+    "running": false,
+    "mode": "incremental",
+    "scanned": 155,
+    "indexed": 120,
+    "skipped": 35,
+    "deleted": 0,
+    "representations": -1,
+    "chunks_total": -1,
+    "embedded_ok": -1,
+    "errors": 0
+  }
+}
+```
+
 ---
 
 ## 5) SQLite metadata schema (minimum semantics)
@@ -1259,9 +1297,21 @@ filters is impossible.
         "indexed": { "type": "integer" },
         "skipped": { "type": "integer" },
         "deleted": { "type": "integer" },
-        "representations": { "type": "integer" },
-        "chunks_total": { "type": "integer" },
-        "embedded_ok": { "type": "integer" },
+        "representations": {
+          "type": "integer",
+          "minimum": -1,
+          "description": "Number of representations created/updated. -1 means not derivable (ListFiles-only fallback path); treat as unavailable, not as an error."
+        },
+        "chunks_total": {
+          "type": "integer",
+          "minimum": -1,
+          "description": "Total chunks known/created. -1 means not derivable (ListFiles-only fallback path); treat as unavailable, not as an error."
+        },
+        "embedded_ok": {
+          "type": "integer",
+          "minimum": -1,
+          "description": "Chunks embedded successfully. -1 means not derivable (ListFiles-only fallback path); treat as unavailable, not as an error."
+        },
         "errors": { "type": "integer" }
       },
       "required": ["job_id", "running", "mode", "scanned", "indexed", "skipped", "deleted", "representations", "chunks_total", "embedded_ok", "errors"]
@@ -1504,8 +1554,21 @@ stt:
     timestamps: true
 
 x402:
-  enabled: false
-  mode: off                # off|on|required
+  # `mode` is the primary, authoritative field controlling whether
+  # payment gating is active.  Allowed values are `off`, `on`, and
+  # `required` (see x402 spec).  The configuration loader normalizes
+  # the mode string and writes it back into the struct during
+  # validation.  After validation callers should rely solely on
+  # `mode`.
+  #
+  # `enabled` is retained only for historical compatibility and
+  # as a convenience for simple boolean cases; it is not consulted by
+  # the loader.  When both fields are present, `mode` wins and `enabled`
+  # is effectively derived (`enabled` == mode != "off").  Operators are
+  # encouraged to specify `mode` exclusively and may treat `enabled` as
+  # deprecated.  Future releases may drop `enabled` entirely.
+  enabled: false               # deprecated; use `mode` instead (see note above)
+  mode: off                    # off|on|required
   facilitator_url: ""
   resource_base_url: ""
   route_policy:

@@ -300,6 +300,7 @@ func SaveFile(path string, cfg Config) error {
 		// session settings
 		SessionInactivityTimeout: cfg.SessionInactivityTimeout,
 		SessionMaxLifetime:       cfg.SessionMaxLifetime,
+		HealthCheckInterval:      cfg.HealthCheckInterval,
 	}
 
 	raw, err := marshalConfigYAML(serializable)

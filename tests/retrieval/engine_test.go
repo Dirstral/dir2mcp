@@ -3,6 +3,7 @@ package tests
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -14,7 +15,7 @@ import (
 
 func TestEngineAsk_WithEmptyIndexReturnsFallback(t *testing.T) {
 	server := newFakeMistralEmbeddingServer()
-	defer server.Close()
+	t.Cleanup(server.Close)
 
 	stateDir := t.TempDir()
 	rootDir := t.TempDir()
@@ -99,8 +100,14 @@ func TestEngineAsk_ContextCanceled(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when context already canceled")
 	}
-	if !strings.Contains(err.Error(), "canceled") && !strings.Contains(err.Error(), "ask timed out") {
-		t.Fatalf("unexpected error after cancel: %v", err)
+	// we should wrap the cancellation with a clear message; the caller may also
+	// see a deadline exceeded or the underlying context.Canceled, but wrapping
+	// allows callers to inspect the error text if they don't use errors.Is.
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "ask canceled") {
+		t.Fatalf("expected wrapped cancellation message, got: %v", err)
 	}
 }
 

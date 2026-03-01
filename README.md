@@ -10,7 +10,7 @@
 
 # dir2mcp
 
-Deploy any local directory as an MCP knowledge server with indexing, retrieval, citations, and optional x402 request gating.
+Deploy any local directory as an MCP knowledge server with indexing, retrieval, citations, and optional x402 request gating (x402 is a payment/request‑gating protocol).
 
 ## Why dir2mcp
 
@@ -18,7 +18,7 @@ Deploy any local directory as an MCP knowledge server with indexing, retrieval, 
 - MCP Streamable HTTP server with a stable tool surface
 - Multimodal ingestion: text/code, OCR, transcripts, structured annotations
 - Citation-aware retrieval and RAG-style answering
-- Optional facilitator-backed x402 payment gating for `tools/call`
+- Optional facilitator-backed x402 (payment/request‑gating protocol) payment gating for `tools/call`
 
 ## Quickstart
 
@@ -28,6 +28,9 @@ Deploy any local directory as an MCP knowledge server with indexing, retrieval, 
 git clone https://github.com/Dirstral/dir2mcp
 cd dir2mcp
 cp .env.example .env        # add your API keys
+# optional: create `.env.local` for local overrides
+# (it takes precedence over `.env`)
+# cp .env.example .env.local
 make build
 ./dir2mcp up
 ```
@@ -37,7 +40,7 @@ Precedence (highest to lowest): shell environment variables > `.env.local` > `.e
 
 ### Local development environment
 
-`dir2mcp` automatically loads `.env` and `.env.local` from the working directory. `.env.local` takes precedence over `.env`, which in turn is overridden by real shell environment variables.
+`dir2mcp` automatically loads both `.env` and `.env.local` from the working directory; `.env.local` overrides `.env`, and real shell environment variables take ultimate precedence.
 
 ## CLI Commands
 
@@ -51,7 +54,7 @@ Precedence (highest to lowest): shell environment variables > `.env.local` > `.e
 | `config print` | Print effective config |
 | `version` | Print version |
 
-Running `dir2mcp` with no arguments prints usage. There is no `help` subcommand.
+Running `dir2mcp` with no arguments prints usage, which you can consult anytime to see available commands.
 
 ## MCP Tools
 
@@ -69,14 +72,25 @@ Running `dir2mcp` with no arguments prints usage. There is no `help` subcommand.
 
 ## Configuration
 
-Primary config file: `.dir2mcp.yaml` (created by `dir2mcp config init`).
+### YAML configuration (`.dir2mcp.yaml`)
+
+The primary on‑disk configuration file is `.dir2mcp.yaml` (created by `dir2mcp config init`).
+Use it for persistent, non‑sensitive settings such as connector definitions, defaults, and other options
+you might want to check into source control. Values defined here may be overridden at runtime by
+environment variables.
+
+### Environment variables (overrides / secrets)
+
+Sensitive keys and temporary runtime overrides are supplied via environment variables. They take
+precedence over entries in the YAML file and are convenient for API keys, tokens, or settings that
+vary by deployment. The commonly used variables are:
 
 | Variable | Required | Description |
 |---|---|---|
 | `MISTRAL_API_KEY` | Yes | Mistral API key for embeddings, OCR, and generation |
 | `MISTRAL_BASE_URL` | No | Mistral base URL (default: `https://api.mistral.ai`) |
 | `DIR2MCP_AUTH_TOKEN` | No | Auth token override |
-| `DIR2MCP_SESSION_INACTIVITY_TIMEOUT` (`DIR2MCP_SESSION_TIMEOUT`) | No | Session inactivity timeout (default: `24h`) |
+| `DIR2MCP_SESSION_INACTIVITY_TIMEOUT`<br/>(deprecated alias: `DIR2MCP_SESSION_TIMEOUT`) | No | Session inactivity timeout (default: `24h`; previous name `DIR2MCP_SESSION_TIMEOUT` is still supported) |
 | `DIR2MCP_SESSION_MAX_LIFETIME` | No | Maximum session lifetime |
 | `DIR2MCP_HEALTH_CHECK_INTERVAL` | No | Connector health poll interval (default: `5s`) |
 | `DIR2MCP_ALLOWED_ORIGINS` | No | Comma-separated additional browser origins |
@@ -95,7 +109,7 @@ Primary config file: `.dir2mcp.yaml` (created by `dir2mcp config init`).
 
 x402 is optional and additive. Configure with `--x402 off|on|required` and facilitator settings.
 
-| Mode | Behaviour |
+| Mode | Behavior |
 |---|---|
 | `off` | Disabled (default) |
 | `on` | Enabled; fail-open if config is incomplete |

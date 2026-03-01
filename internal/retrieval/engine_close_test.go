@@ -1,7 +1,7 @@
 package retrieval
 
 import (
-	"reflect"
+	"slices"
 	"testing"
 )
 
@@ -23,13 +23,13 @@ func TestEngineClose_LIFOOrder(t *testing.T) {
 	e.Close()
 
 	expected := []int{3, 2, 1}
-	if !reflect.DeepEqual(calls, expected) {
+	if !slices.Equal(calls, expected) {
 		t.Fatalf("unexpected call order; want %v, got %v", expected, calls)
 	}
 
 	// calling Close again should be a no-op and not append additional values.
 	e.Close()
-	if !reflect.DeepEqual(calls, expected) {
+	if !slices.Equal(calls, expected) {
 		t.Fatalf("multiple Close calls mutated order; want %v, got %v", expected, calls)
 	}
 }

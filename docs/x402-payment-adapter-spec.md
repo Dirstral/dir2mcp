@@ -26,6 +26,11 @@ x402:
   facilitator:
     api_key: "..."         # credentials for the external service
 ```
+
+> **Security note:** never commit API keys or sensitive credentials (such as
+> `x402.facilitator.api_key` or `x402.adapter` settings) to version control.
+> Store them securely using environment variables, a secret manager (e.g.
+> HashiCorp Vault, AWS Secrets Manager), or encrypted configuration files.
 ## Normative baseline
 
 The adapter MUST align with x402 v2 concepts and headers:
@@ -51,7 +56,7 @@ The contract defines, at a minimum, the following elements:
 * **Authentication** – adapter-to-facilitator auth must be explicit (for example API key auth for hosted facilitator, mTLS or signed requests for self-managed deployments).  
 * **Payment state model** – canonical states `required -> verified -> settled` with failure branches (`invalid`, `rejected`, `expired`, `failed`). dir2mcp does not persist custodial payment state; facilitator is source of truth for verify/settle outcomes.  
 * **Error codes and retries** – standard HTTP handling (`402`, `4xx`, `5xx`), idempotent settle calls, bounded retry/backoff for transient failures, and explicit non-retryable classes for invalid signatures/requirements mismatch.  
-* **Network normalization** – CAIP-2 network identifiers are required at adapter boundaries (for example `eip155:8453`, `eip155:84532`, and Solana examples like `solana:mainnet`, `solana:devnet`, `solana:testnet`).  
+* **Network normalization** – CAIP-2 network identifiers are required at adapter boundaries (for example `eip155:8453`, `eip155:84532`, and Solana examples using the genesis hash as the reference, e.g. `solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp` (mainnet), `solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1` (devnet), `solana:4uhcVJyU9pJkvQyS88uRDiswHXSCkY3z` (testnet)).  
 * **Discovery passthrough (optional)** – if Bazaar is enabled, expose extension metadata to facilitator discovery ingestion rather than implementing a custom discovery protocol in dir2mcp.  
 
 ## Out of scope

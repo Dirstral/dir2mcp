@@ -196,8 +196,17 @@ type Stats struct {
 	ProtocolVersion string `json:"protocol_version"`
 
 	// embed corpus statistics so that the various lifecycle counters are
-	// promoted. JSON encoding will automatically flatten the fields from the
-	// embedded struct, preserving the previous behaviour.
+	// promoted.
+	//
+	// NOTE: the default behaviour of encoding/json would *not* magically
+	// flatten the embedded fields when the embedded type defines its own
+	// MarshalJSON method. In that case the encoder would call
+	// CorpusStats.MarshalJSON and include only the encoded result of the
+	// embedded struct, dropping the outer metadata fields. To retain a
+	// flat representation we implement Stats.MarshalJSON (below) which
+	// explicitly merges the metadata fields with the promoted CorpusStats
+	// fields.  This custom encoder is what actually provides the flattened
+	// JSON output, not the default encoder behavior.
 	CorpusStats
 }
 

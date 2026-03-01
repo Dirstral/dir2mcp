@@ -2,9 +2,16 @@ package model
 
 import (
 	"encoding/json"
+	"reflect"
 	"testing"
 )
 
+// TestStatsJSONFlattening ensures that Stats.MarshalJSON flattens the
+// embedded CorpusStats fields at the top level.  The hard-coded `expected`
+// slice below also serves as a maintenance safeguard: it mirrors the list of
+// JSON keys produced by the `plain` struct inside Stats.MarshalJSON.  If you
+// add/remove/rename a field in Stats or CorpusStats you must update both that
+// plain struct and this expected list, otherwise the test will fail.
 func TestStatsJSONFlattening(t *testing.T) {
 	s := Stats{
 		Root:            "r",
@@ -57,6 +64,31 @@ func TestStatsJSONFlattening(t *testing.T) {
 			t.Errorf("expected key %q in json output", key)
 		}
 	}
+
+	// sanity-check: every json tag in CorpusStats should appear in the above
+	// list. this catches developers who forget to update the expected slice
+	// when adding new stats fields.
+	csTags := make(map[string]struct{})
+	csType := reflect.TypeOf(CorpusStats{})
+	for i := 0; i < csType.NumField(); i++ {
+		tag := csType.Field(i).Tag.Get("json")
+		if tag == "" {
+			continue
+		}
+		csTags[tag] = struct{}{}
+	}
+	for tag := range csTags {
+		found := false
+		for _, key := range expected {
+			if key == tag {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("json tag %q from CorpusStats missing in expected list", tag)
+		}
+	}
 }
 
 // Ensure that a zero-value CorpusStats (with nil DocCounts) encodes to an
@@ -98,7 +130,7 @@ func TestStatsMarshalNilDocCounts(t *testing.T) {
 	// metadata should still be present
 	for _, key := range []string{"root", "state_dir", "protocol_version"} {
 		if _, ok := out[key]; !ok {
-			t.Fatalf("expected metadata key %q in json output", key)
+			t.Errorf("expected metadata key %q in json output", key)
 		}
 	}
 	// doc_counts should be an object, not null

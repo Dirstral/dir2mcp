@@ -116,4 +116,17 @@ func TestBuildCorpusSnapshot_StatusCountsFallback(t *testing.T) {
 	if snap.Indexing.Deleted != 1 {
 		t.Errorf("expected deleted=1, got %d", snap.Indexing.Deleted)
 	}
+
+	// the document with a non‑standard status should not be counted in any
+	// of the indexed/skipped/error totals. we already asserted the expected
+	// values above, but double‑check explicitly that nothing bumped them.
+	if snap.Indexing.Indexed != 1 || snap.Indexing.Skipped != 1 || snap.Indexing.Errors != 1 {
+		t.Errorf("unexpected counters changed by 'whatever' status: indexed=%d skipped=%d errors=%d",
+			snap.Indexing.Indexed, snap.Indexing.Skipped, snap.Indexing.Errors)
+	}
+
+	// passing nil for the live state should result in Running=false
+	if snap.Indexing.Running {
+		t.Errorf("expected indexing.running=false when live state is nil")
+	}
 }

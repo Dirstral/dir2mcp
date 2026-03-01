@@ -2,7 +2,7 @@
 
 ## Project
 
-dir2mcp is a Go monorepo for deploying a directory as an MCP knowledge server (indexing, retrieval, citations, optional x402 request gating – an HTTP 402‑based payment challenge system; see [x402 request gating docs](docs/x402-payment-adapter-spec.md) for details).
+dir2mcp is a Go monorepo for deploying a directory as an MCP knowledge server. It supports indexing, retrieval, citations, and optional x402 request gating (an HTTP 402‑based payment challenge system). See [x402 request gating docs](docs/x402-payment-adapter-spec.md) for details.
 
 ## Repository layout
 
@@ -65,7 +65,7 @@ claude mcp add --transport stdio context7 -- npx -y @upstash/context7-mcp
 
 ## Known gotchas
 
-- `dir2mcp` has no `help` subcommand; usage prints on bare invocation.
+- `dir2mcp` has no `help` subcommand; usage is printed when `dir2mcp` is invoked without arguments or subcommands.
 - `--public` requires auth unless `--force-insecure` is explicitly set.
 - x402 mode semantics:
   - `off`: disabled

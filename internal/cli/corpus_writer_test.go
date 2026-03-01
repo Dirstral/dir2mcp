@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -150,6 +151,76 @@ func TestWriteCorpusSnapshot_ConcurrentWriters(t *testing.T) {
 	}
 	if final.DocCounts["code"] != 1 || final.DocCounts["md"] != 1 {
 		t.Fatalf("unexpected doc counts: %#v", final.DocCounts)
+	}
+}
+
+// A helper to parse ndjson emitter output into events.
+func parseEvents(t *testing.T, buf *bytes.Buffer) []ndjsonEvent {
+	t.Helper()
+	var events []ndjsonEvent
+	lines := bytes.Split(bytes.TrimSpace(buf.Bytes()), []byte("\n"))
+	for _, line := range lines {
+		var ev ndjsonEvent
+		if err := json.Unmarshal(line, &ev); err != nil {
+			t.Fatalf("unmarshal event: %v", err)
+		}
+		events = append(events, ev)
+	}
+	return events
+}
+
+func TestWriteCorpusSnapshot_WithEmitter(t *testing.T) {
+	stateDir := t.TempDir()
+	store := &mutableCorpusStore{}
+	// include one doc with an unexpected status to force emission
+	store.setDocs([]model.Document{
+		{RelPath: "src/a.go", DocType: "code", Status: "foo"},
+	})
+	idxState := appstate.NewIndexingState(appstate.ModeIncremental)
+
+	var buf bytes.Buffer
+	emitter := newNDJSONEmitter(&buf, true)
+	if err := writeCorpusSnapshot(context.Background(), stateDir, store, idxState, emitter); err != nil {
+		t.Fatalf("writeCorpusSnapshot failed: %v", err)
+	}
+
+	events := parseEvents(t, &buf)
+	if len(events) == 0 {
+		t.Fatal("expected emitter to produce at least one event")
+	}
+	found := false
+	for _, ev := range events {
+		if ev.Event == "unexpected_document_statuses" && ev.Level == "warning" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected warning unexpected_document_statuses event, got %+v", events)
+	}
+
+	// also verify the snapshot file still contains expected counts
+	final := readCorpusFile(t, filepath.Join(stateDir, "corpus.json"))
+	if final.TotalDocs != 1 {
+		t.Fatalf("expected total_docs=1, got %d", final.TotalDocs)
+	}
+}
+
+func TestWriteCorpusSnapshot_EmitterDisabled(t *testing.T) {
+	stateDir := t.TempDir()
+	store := &mutableCorpusStore{}
+	store.setDocs([]model.Document{
+		{RelPath: "src/a.go", DocType: "code", Status: "foo"},
+	})
+	idxState := appstate.NewIndexingState(appstate.ModeIncremental)
+
+	var buf bytes.Buffer
+	emitter := newNDJSONEmitter(&buf, false)
+	if err := writeCorpusSnapshot(context.Background(), stateDir, store, idxState, emitter); err != nil {
+		t.Fatalf("writeCorpusSnapshot failed: %v", err)
+	}
+	if buf.Len() != 0 {
+		t.Fatalf("expected no output when emitter.disabled, got %q", buf.String())
 	}
 }
 

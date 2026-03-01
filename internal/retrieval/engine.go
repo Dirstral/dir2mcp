@@ -95,8 +95,8 @@ func NewEngine(ctx context.Context, stateDir, rootDir string, cfg *config.Config
 
 	if source, ok := interface{}(metadataStore).(embeddedChunkMetadataSource); ok {
 		preloadCtx, cancel := context.WithTimeout(ctx, defaultEnginePreloadTimeout)
-		defer cancel()
 		total, err := preloadEngineChunkMetadata(preloadCtx, source, svc)
+		cancel()
 		if err != nil {
 			_ = metadataStore.Close()
 			_ = textIndex.Close()
@@ -262,6 +262,10 @@ func (e *Engine) AskWithContext(ctx context.Context, question string, opts AskOp
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return nil, fmt.Errorf("ask timed out after %s: %w", timeout, context.DeadlineExceeded)
+		}
+		if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
+			// return a clearer cancellation error instead of raw ctx.Err()
+			return nil, fmt.Errorf("ask canceled: %w", err)
 		}
 		return nil, err
 	}

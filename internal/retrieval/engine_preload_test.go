@@ -19,6 +19,14 @@ func (blockingMetadataSource) ListEmbeddedChunkMetadata(ctx context.Context, _ s
 func TestPreloadEngineChunkMetadata_ContextTimeout(t *testing.T) {
 	t.Parallel()
 
+	// we only care that preloadEngineChunkMetadata returns when the context
+	// deadline is hit. the function will never dereference any fields of the
+	// service if the metadata source blocks, so it's safe to construct the
+	// service with nil dependencies. this keeps the test focused and avoids
+	// needing to wire anything up.
+	//
+	// See TestPreloadEngineChunkMetadata_ContextTimeout, preloadEngineChunkMetadata,
+	// and blockingMetadataSource{} for the relevant logic.
 	svc := NewService(nil, nil, nil, nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
