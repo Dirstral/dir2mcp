@@ -16,6 +16,19 @@ import (
 
 const DefaultProtocolVersion = "2025-11-25"
 
+type X402Config struct {
+	Mode             string
+	FacilitatorURL   string
+	FacilitatorToken string
+	ResourceBaseURL  string
+	ToolsCallEnabled bool
+	PriceAtomic      string
+	Network          string
+	Scheme           string
+	Asset            string
+	PayTo            string
+}
+
 type Config struct {
 	RootDir         string
 	StateDir        string
@@ -56,6 +69,8 @@ type Config struct {
 	// when upstream introduces a new alias or model.  Environment variable
 	// DIR2MCP_CHAT_MODEL also affects this value.
 	ChatModel string
+
+	X402 X402Config
 }
 
 type fileConfig struct {
@@ -78,6 +93,16 @@ type fileConfig struct {
 	AllowedOrigins       []string
 	EmbedModelText       *string
 	EmbedModelCode       *string
+	X402Mode             *string
+	X402FacilitatorURL   *string
+	X402FacilitatorToken *string
+	X402ResourceBaseURL  *string
+	X402ToolsCallEnabled *bool
+	X402PriceAtomic      *string
+	X402Network          *string
+	X402Scheme           *string
+	X402Asset            *string
+	X402PayTo            *string
 }
 
 type persistedConfig struct {
@@ -100,6 +125,16 @@ type persistedConfig struct {
 	AllowedOrigins       []string `yaml:"allowed_origins"`
 	EmbedModelText       string   `yaml:"embed_model_text"`
 	EmbedModelCode       string   `yaml:"embed_model_code"`
+	X402Mode             string   `yaml:"x402_mode"`
+	X402FacilitatorURL   string   `yaml:"x402_facilitator_url"`
+	X402FacilitatorToken string   `yaml:"x402_facilitator_token"`
+	X402ResourceBaseURL  string   `yaml:"x402_resource_base_url"`
+	X402ToolsCallEnabled bool     `yaml:"x402_tools_call_enabled"`
+	X402PriceAtomic      string   `yaml:"x402_price_atomic"`
+	X402Network          string   `yaml:"x402_network"`
+	X402Scheme           string   `yaml:"x402_scheme"`
+	X402Asset            string   `yaml:"x402_asset"`
+	X402PayTo            string   `yaml:"x402_pay_to"`
 }
 
 func Default() Config {
@@ -148,6 +183,18 @@ func Default() Config {
 		EmbedModelText: "mistral-embed",
 		EmbedModelCode: "codestral-embed",
 		ChatModel:      mistral.DefaultChatModel,
+		X402: X402Config{
+			Mode:             "off",
+			FacilitatorURL:   "",
+			FacilitatorToken: "",
+			ResourceBaseURL:  "",
+			ToolsCallEnabled: true,
+			PriceAtomic:      "1000",
+			Network:          "",
+			Scheme:           "exact",
+			Asset:            "",
+			PayTo:            "",
+		},
 	}
 }
 
@@ -185,6 +232,16 @@ func SaveFile(path string, cfg Config) error {
 		AllowedOrigins:       append([]string(nil), cfg.AllowedOrigins...),
 		EmbedModelText:       cfg.EmbedModelText,
 		EmbedModelCode:       cfg.EmbedModelCode,
+		X402Mode:             cfg.X402.Mode,
+		X402FacilitatorURL:   cfg.X402.FacilitatorURL,
+		X402FacilitatorToken: cfg.X402.FacilitatorToken,
+		X402ResourceBaseURL:  cfg.X402.ResourceBaseURL,
+		X402ToolsCallEnabled: cfg.X402.ToolsCallEnabled,
+		X402PriceAtomic:      cfg.X402.PriceAtomic,
+		X402Network:          cfg.X402.Network,
+		X402Scheme:           cfg.X402.Scheme,
+		X402Asset:            cfg.X402.Asset,
+		X402PayTo:            cfg.X402.PayTo,
 	}
 
 	raw, err := marshalConfigYAML(serializable)
@@ -309,6 +366,36 @@ func applyFileOverrides(cfg *Config, path string) error {
 	}
 	if fileCfg.EmbedModelCode != nil {
 		cfg.EmbedModelCode = *fileCfg.EmbedModelCode
+	}
+	if fileCfg.X402Mode != nil {
+		cfg.X402.Mode = *fileCfg.X402Mode
+	}
+	if fileCfg.X402FacilitatorURL != nil {
+		cfg.X402.FacilitatorURL = *fileCfg.X402FacilitatorURL
+	}
+	if fileCfg.X402FacilitatorToken != nil {
+		cfg.X402.FacilitatorToken = *fileCfg.X402FacilitatorToken
+	}
+	if fileCfg.X402ResourceBaseURL != nil {
+		cfg.X402.ResourceBaseURL = *fileCfg.X402ResourceBaseURL
+	}
+	if fileCfg.X402ToolsCallEnabled != nil {
+		cfg.X402.ToolsCallEnabled = *fileCfg.X402ToolsCallEnabled
+	}
+	if fileCfg.X402PriceAtomic != nil {
+		cfg.X402.PriceAtomic = *fileCfg.X402PriceAtomic
+	}
+	if fileCfg.X402Network != nil {
+		cfg.X402.Network = *fileCfg.X402Network
+	}
+	if fileCfg.X402Scheme != nil {
+		cfg.X402.Scheme = *fileCfg.X402Scheme
+	}
+	if fileCfg.X402Asset != nil {
+		cfg.X402.Asset = *fileCfg.X402Asset
+	}
+	if fileCfg.X402PayTo != nil {
+		cfg.X402.PayTo = *fileCfg.X402PayTo
 	}
 
 	return nil
@@ -450,6 +537,30 @@ func setFileScalarValue(cfg *fileConfig, key, value string) error {
 		cfg.EmbedModelText = strPtr(value)
 	case "embed_model_code":
 		cfg.EmbedModelCode = strPtr(value)
+	case "x402_mode":
+		cfg.X402Mode = strPtr(value)
+	case "x402_facilitator_url":
+		cfg.X402FacilitatorURL = strPtr(value)
+	case "x402_facilitator_token":
+		cfg.X402FacilitatorToken = strPtr(value)
+	case "x402_resource_base_url":
+		cfg.X402ResourceBaseURL = strPtr(value)
+	case "x402_tools_call_enabled":
+		parsed, err := strconv.ParseBool(value)
+		if err != nil {
+			return fmt.Errorf("invalid boolean for %s", key)
+		}
+		cfg.X402ToolsCallEnabled = boolPtr(parsed)
+	case "x402_price_atomic":
+		cfg.X402PriceAtomic = strPtr(value)
+	case "x402_network":
+		cfg.X402Network = strPtr(value)
+	case "x402_scheme":
+		cfg.X402Scheme = strPtr(value)
+	case "x402_asset":
+		cfg.X402Asset = strPtr(value)
+	case "x402_pay_to":
+		cfg.X402PayTo = strPtr(value)
 	default:
 		// unknown keys are intentionally ignored for forward compatibility
 	}
@@ -535,6 +646,16 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeList("allowed_origins", cfg.AllowedOrigins)
 	writeScalar("embed_model_text", cfg.EmbedModelText)
 	writeScalar("embed_model_code", cfg.EmbedModelCode)
+	writeScalar("x402_mode", cfg.X402Mode)
+	writeScalar("x402_facilitator_url", cfg.X402FacilitatorURL)
+	writeScalar("x402_facilitator_token", cfg.X402FacilitatorToken)
+	writeScalar("x402_resource_base_url", cfg.X402ResourceBaseURL)
+	writeBool("x402_tools_call_enabled", cfg.X402ToolsCallEnabled)
+	writeScalar("x402_price_atomic", cfg.X402PriceAtomic)
+	writeScalar("x402_network", cfg.X402Network)
+	writeScalar("x402_scheme", cfg.X402Scheme)
+	writeScalar("x402_asset", cfg.X402Asset)
+	writeScalar("x402_pay_to", cfg.X402PayTo)
 
 	return []byte(b.String()), nil
 }
@@ -602,6 +723,126 @@ func applyEnvOverrides(cfg *Config, overrideEnv map[string]string) {
 	if trustedProxies, ok := envLookup("DIR2MCP_TRUSTED_PROXIES", overrideEnv); ok {
 		cfg.TrustedProxies = MergeTrustedProxies(cfg.TrustedProxies, trustedProxies)
 	}
+	if raw, ok := envLookup("DIR2MCP_X402_MODE", overrideEnv); ok && strings.TrimSpace(raw) != "" {
+		cfg.X402.Mode = strings.TrimSpace(raw)
+	}
+	if raw, ok := envLookup("DIR2MCP_X402_FACILITATOR_URL", overrideEnv); ok {
+		cfg.X402.FacilitatorURL = strings.TrimSpace(raw)
+	}
+	if raw, ok := envLookup("DIR2MCP_X402_FACILITATOR_TOKEN", overrideEnv); ok {
+		cfg.X402.FacilitatorToken = strings.TrimSpace(raw)
+	}
+	if raw, ok := envLookup("DIR2MCP_X402_RESOURCE_BASE_URL", overrideEnv); ok {
+		cfg.X402.ResourceBaseURL = strings.TrimSpace(raw)
+	}
+	if raw, ok := envLookup("DIR2MCP_X402_TOOLS_CALL_ENABLED", overrideEnv); ok && strings.TrimSpace(raw) != "" {
+		if enabled, err := strconv.ParseBool(strings.TrimSpace(raw)); err == nil {
+			cfg.X402.ToolsCallEnabled = enabled
+		}
+	}
+	if raw, ok := envLookup("DIR2MCP_X402_PRICE", overrideEnv); ok && strings.TrimSpace(raw) != "" {
+		cfg.X402.PriceAtomic = strings.TrimSpace(raw)
+	}
+	if raw, ok := envLookup("DIR2MCP_X402_NETWORK", overrideEnv); ok && strings.TrimSpace(raw) != "" {
+		cfg.X402.Network = strings.TrimSpace(raw)
+	}
+	if raw, ok := envLookup("DIR2MCP_X402_SCHEME", overrideEnv); ok && strings.TrimSpace(raw) != "" {
+		cfg.X402.Scheme = strings.TrimSpace(raw)
+	}
+	if raw, ok := envLookup("DIR2MCP_X402_ASSET", overrideEnv); ok && strings.TrimSpace(raw) != "" {
+		cfg.X402.Asset = strings.TrimSpace(raw)
+	}
+	if raw, ok := envLookup("DIR2MCP_X402_PAY_TO", overrideEnv); ok && strings.TrimSpace(raw) != "" {
+		cfg.X402.PayTo = strings.TrimSpace(raw)
+	}
+}
+
+func (c Config) ValidateX402(strict bool) error {
+	mode := strings.ToLower(strings.TrimSpace(c.X402.Mode))
+	if mode == "" {
+		mode = "off"
+	}
+
+	switch mode {
+	case "off", "on", "required":
+	default:
+		return fmt.Errorf("invalid x402 mode: %s", c.X402.Mode)
+	}
+
+	if mode == "off" || !c.X402.ToolsCallEnabled {
+		return nil
+	}
+
+	if rawURL := strings.TrimSpace(c.X402.FacilitatorURL); rawURL != "" {
+		parsed, err := url.Parse(rawURL)
+		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+			return fmt.Errorf("invalid x402 facilitator URL")
+		}
+	}
+	if rawURL := strings.TrimSpace(c.X402.ResourceBaseURL); rawURL != "" {
+		parsed, err := url.Parse(rawURL)
+		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+			return fmt.Errorf("invalid x402 resource base URL")
+		}
+	}
+
+	if network := strings.TrimSpace(c.X402.Network); network != "" && !isCAIP2Network(network) {
+		return fmt.Errorf("x402 network must be CAIP-2")
+	}
+
+	if !strict {
+		return nil
+	}
+
+	if strings.TrimSpace(c.X402.FacilitatorURL) == "" {
+		return fmt.Errorf("x402 facilitator URL is required")
+	}
+	if strings.TrimSpace(c.X402.ResourceBaseURL) == "" {
+		return fmt.Errorf("x402 resource base URL is required")
+	}
+	if strings.TrimSpace(c.X402.PriceAtomic) == "" {
+		return fmt.Errorf("x402 price is required")
+	}
+	if strings.TrimSpace(c.X402.Scheme) == "" {
+		return fmt.Errorf("x402 scheme is required")
+	}
+	if strings.TrimSpace(c.X402.Network) == "" {
+		return fmt.Errorf("x402 network is required")
+	}
+	if !isCAIP2Network(c.X402.Network) {
+		return fmt.Errorf("x402 network must be CAIP-2")
+	}
+	if strings.TrimSpace(c.X402.Asset) == "" {
+		return fmt.Errorf("x402 asset is required")
+	}
+	if strings.TrimSpace(c.X402.PayTo) == "" {
+		return fmt.Errorf("x402 pay_to is required")
+	}
+	return nil
+}
+
+func isCAIP2Network(value string) bool {
+	parts := strings.Split(strings.TrimSpace(value), ":")
+	if len(parts) != 2 {
+		return false
+	}
+	ns := parts[0]
+	ref := parts[1]
+	if len(ns) == 0 || len(ns) > 32 || len(ref) == 0 || len(ref) > 128 {
+		return false
+	}
+	for _, r := range ns {
+		if (r < 'a' || r > 'z') && (r < '0' || r > '9') {
+			return false
+		}
+	}
+	for _, r := range ref {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 // MergeAllowedOrigins appends comma-separated origins to an existing allowlist,

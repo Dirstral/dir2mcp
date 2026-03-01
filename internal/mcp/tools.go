@@ -157,6 +157,19 @@ func (s *Server) handleToolsList(w http.ResponseWriter, id interface{}) {
 }
 
 func (s *Server) handleToolsCall(ctx context.Context, w http.ResponseWriter, rawParams json.RawMessage, id interface{}) {
+	result, statusCode, rpcErr := s.processToolsCall(ctx, rawParams)
+	if rpcErr != nil {
+		writeResponse(w, statusCode, rpcResponse{
+			JSONRPC: "2.0",
+			ID:      id,
+			Error:   rpcErr,
+		})
+		return
+	}
+	writeResult(w, statusCode, id, result)
+}
+
+func (s *Server) processToolsCall(ctx context.Context, rawParams json.RawMessage) (toolCallResult, int, *rpcError) {
 	params, err := parseToolsCallParams(rawParams)
 	if err != nil {
 		canonicalCode := "INVALID_FIELD"
@@ -164,27 +177,31 @@ func (s *Server) handleToolsCall(ctx context.Context, w http.ResponseWriter, raw
 		if errors.As(err, &vErr) && vErr.canonicalCode != "" {
 			canonicalCode = vErr.canonicalCode
 		}
-		writeError(w, http.StatusBadRequest, id, -32600, err.Error(), canonicalCode, false)
-		return
+		return toolCallResult{}, http.StatusBadRequest, &rpcError{
+			Code:    -32600,
+			Message: err.Error(),
+			Data: &rpcErrorData{
+				Code:      canonicalCode,
+				Retryable: false,
+			},
+		}
 	}
 
 	tool, ok := s.tools[params.Name]
 	if !ok {
-		writeResult(w, http.StatusOK, id, newToolErrorResult(toolExecutionError{
+		return newToolErrorResult(toolExecutionError{
 			Code:      "METHOD_NOT_FOUND",
 			Message:   fmt.Sprintf("unknown tool: %s", params.Name),
 			Retryable: false,
-		}))
-		return
+		}), http.StatusOK, nil
 	}
 
 	result, toolErr := tool.handler(ctx, params.Arguments)
 	if toolErr != nil {
-		writeResult(w, http.StatusOK, id, newToolErrorResult(*toolErr))
-		return
+		return newToolErrorResult(*toolErr), http.StatusOK, nil
 	}
 
-	writeResult(w, http.StatusOK, id, result)
+	return result, http.StatusOK, nil
 }
 
 func parseToolsCallParams(raw json.RawMessage) (toolsCallParams, error) {

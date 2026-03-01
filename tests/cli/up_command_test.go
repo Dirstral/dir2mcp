@@ -616,6 +616,58 @@ func TestUpPublicAuthNoneAllowedWithForceInsecure(t *testing.T) {
 	})
 }
 
+func TestUpX402RequiredMissingFieldsFailsFast(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("MISTRAL_API_KEY", "test-key")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := cli.NewAppWithIO(&stdout, &stderr)
+
+	var code int
+	withWorkingDir(t, tmp, func() {
+		code = app.RunWithContext(context.Background(), []string{
+			"up",
+			"--x402", "required",
+			"--x402-resource-base-url", "https://resource.example.com",
+			"--x402-network", "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+			"--x402-asset", "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+			"--x402-pay-to", "8N5A4rQU8vJrQmH3iiA7kE4m1df4WeyueXQqGb4G9tTj",
+			// Intentionally missing --x402-facilitator-url.
+		})
+	})
+
+	if code != 2 {
+		t.Fatalf("unexpected exit code: got=%d want=2 stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "x402 facilitator URL is required") {
+		t.Fatalf("expected x402 validation error, got: %s", stderr.String())
+	}
+}
+
+func TestUpX402OnAllowsMissingFields(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("MISTRAL_API_KEY", "test-key")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := cli.NewAppWithIO(&stdout, &stderr)
+
+	withWorkingDir(t, tmp, func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		code := app.RunWithContext(ctx, []string{
+			"up",
+			"--x402", "on",
+			"--listen", "127.0.0.1:0",
+		})
+		if code != 0 {
+			t.Fatalf("unexpected exit code: got=%d stderr=%s", code, stderr.String())
+		}
+	})
+}
+
 func TestUpPublicRespectsExplicitListen(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("MISTRAL_API_KEY", "test-key")

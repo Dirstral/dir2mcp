@@ -20,6 +20,7 @@ import (
 	"dir2mcp/internal/appstate"
 	"dir2mcp/internal/config"
 	"dir2mcp/internal/model"
+	"dir2mcp/internal/x402"
 )
 
 const (
@@ -49,6 +50,13 @@ type Server struct {
 	sessions  map[string]time.Time
 
 	rateLimiter *ipRateLimiter
+
+	x402Client      *x402.HTTPClient
+	x402Requirement x402.Requirement
+	x402Enabled     bool
+	paymentLogPath  string
+
+	eventEmitter func(level, event string, data interface{})
 }
 
 type rpcRequest struct {
@@ -109,6 +117,12 @@ func WithTTS(tts TTSSynthesizer) ServerOption {
 	}
 }
 
+func WithEventEmitter(fn func(level, event string, data interface{})) ServerOption {
+	return func(s *Server) {
+		s.eventEmitter = fn
+	}
+}
+
 func NewServer(cfg config.Config, retriever model.Retriever, opts ...ServerOption) *Server {
 	s := &Server{
 		cfg:       cfg,
@@ -127,6 +141,7 @@ func NewServer(cfg config.Config, retriever model.Retriever, opts ...ServerOptio
 	if cfg.Public && cfg.RateLimitRPS > 0 && cfg.RateLimitBurst > 0 {
 		s.rateLimiter = newIPRateLimiter(float64(cfg.RateLimitRPS), cfg.RateLimitBurst, cfg.TrustedProxies)
 	}
+	s.initPaymentConfig()
 	s.tools = s.buildToolRegistry()
 	return s
 }
@@ -146,8 +161,8 @@ func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 		if origin != "" && isOriginAllowed(origin, s.cfg.AllowedOrigins) {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, MCP-Protocol-Version, MCP-Session-Id")
-			w.Header().Set("Access-Control-Expose-Headers", "MCP-Session-Id")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, MCP-Protocol-Version, MCP-Session-Id, PAYMENT-SIGNATURE")
+			w.Header().Set("Access-Control-Expose-Headers", "MCP-Session-Id, PAYMENT-REQUIRED, PAYMENT-RESPONSE")
 			w.Header().Set("Access-Control-Max-Age", "86400")
 			w.Header().Set("Vary", "Origin")
 		}
@@ -299,7 +314,7 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusAccepted)
 			return
 		}
-		s.handleToolsCall(r.Context(), w, req.Params, id)
+		s.handleToolsCallRequest(r.Context(), w, r, req.Params, id)
 	default:
 		if !hasID {
 			w.WriteHeader(http.StatusAccepted)
