@@ -203,6 +203,28 @@ func TestStatusFallsBackToComputedSnapshot(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("upsert document: %v", err)
 	}
+	doc, err := st.GetDocumentByPath(context.Background(), "docs/a.md")
+	if err != nil {
+		t.Fatalf("get document: %v", err)
+	}
+	repID, err := st.UpsertRepresentation(context.Background(), model.Representation{
+		DocID:   doc.DocID,
+		RepType: "raw_text",
+		RepHash: "rep-hash",
+	})
+	if err != nil {
+		t.Fatalf("upsert representation: %v", err)
+	}
+	if _, err := st.InsertChunkWithSpans(context.Background(), model.Chunk{
+		RepID:           repID,
+		Ordinal:         0,
+		Text:            "hello world",
+		TextHash:        "chunk-hash",
+		IndexKind:       "text",
+		EmbeddingStatus: "ok",
+	}, []model.Span{{Kind: "lines", StartLine: 1, EndLine: 1}}); err != nil {
+		t.Fatalf("insert chunk: %v", err)
+	}
 	if err := st.Close(); err != nil {
 		t.Fatalf("close sqlite store: %v", err)
 	}
@@ -221,6 +243,13 @@ func TestStatusFallsBackToComputedSnapshot(t *testing.T) {
 		Snapshot struct {
 			TotalDocs int64            `json:"total_docs"`
 			DocCounts map[string]int64 `json:"doc_counts"`
+			Indexing  struct {
+				Scanned         int64 `json:"scanned"`
+				Indexed         int64 `json:"indexed"`
+				Representations int64 `json:"representations"`
+				ChunksTotal     int64 `json:"chunks_total"`
+				EmbeddedOK      int64 `json:"embedded_ok"`
+			} `json:"indexing"`
 		} `json:"snapshot"`
 	}
 	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
@@ -231,6 +260,12 @@ func TestStatusFallsBackToComputedSnapshot(t *testing.T) {
 	}
 	if payload.Snapshot.TotalDocs != 1 || payload.Snapshot.DocCounts["md"] != 1 {
 		t.Fatalf("unexpected computed snapshot: %+v", payload.Snapshot)
+	}
+	if payload.Snapshot.Indexing.Scanned != 1 || payload.Snapshot.Indexing.Indexed != 1 {
+		t.Fatalf("unexpected lifecycle counters: %+v", payload.Snapshot.Indexing)
+	}
+	if payload.Snapshot.Indexing.Representations != 1 || payload.Snapshot.Indexing.ChunksTotal != 1 || payload.Snapshot.Indexing.EmbeddedOK != 1 {
+		t.Fatalf("unexpected representation/chunk counters: %+v", payload.Snapshot.Indexing)
 	}
 }
 
