@@ -263,28 +263,71 @@ func newToolErrorResult(toolErr toolExecutionError) toolCallResult {
 	}
 }
 
-func (s *Server) handleStatsTool(_ context.Context, args map[string]interface{}) (toolCallResult, *toolExecutionError) {
+func (s *Server) handleStatsTool(ctx context.Context, args map[string]interface{}) (toolCallResult, *toolExecutionError) {
 	if err := assertNoUnknownArguments(args, map[string]struct{}{}); err != nil {
 		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
 	}
 
+	retrievedStats := model.Stats{
+		Root:            s.cfg.RootDir,
+		StateDir:        s.cfg.StateDir,
+		ProtocolVersion: s.cfg.ProtocolVersion,
+		DocCounts:       map[string]int64{},
+	}
+	statsFromRetriever := false
+	if s.retriever != nil {
+		stats, err := s.retriever.Stats(ctx)
+		if err != nil {
+			if !errors.Is(err, model.ErrNotImplemented) {
+				return toolCallResult{}, &toolExecutionError{Code: "STORE_CORRUPT", Message: err.Error(), Retryable: false}
+			}
+		} else {
+			statsFromRetriever = true
+			retrievedStats = stats
+			if retrievedStats.DocCounts == nil {
+				retrievedStats.DocCounts = map[string]int64{}
+			}
+			if strings.TrimSpace(retrievedStats.Root) == "" {
+				retrievedStats.Root = s.cfg.RootDir
+			}
+			if strings.TrimSpace(retrievedStats.StateDir) == "" {
+				retrievedStats.StateDir = s.cfg.StateDir
+			}
+			if strings.TrimSpace(retrievedStats.ProtocolVersion) == "" {
+				retrievedStats.ProtocolVersion = s.cfg.ProtocolVersion
+			}
+		}
+	}
+
 	snapshot := s.indexing.Snapshot()
+	if !statsFromRetriever {
+		retrievedStats.Scanned = snapshot.Scanned
+		retrievedStats.Indexed = snapshot.Indexed
+		retrievedStats.Skipped = snapshot.Skipped
+		retrievedStats.Deleted = snapshot.Deleted
+		retrievedStats.Representations = snapshot.Representations
+		retrievedStats.ChunksTotal = snapshot.ChunksTotal
+		retrievedStats.EmbeddedOK = snapshot.EmbeddedOK
+		retrievedStats.Errors = snapshot.Errors
+	}
 	structured := map[string]interface{}{
-		"root":             s.cfg.RootDir,
-		"state_dir":        s.cfg.StateDir,
-		"protocol_version": s.cfg.ProtocolVersion,
+		"root":             retrievedStats.Root,
+		"state_dir":        retrievedStats.StateDir,
+		"protocol_version": retrievedStats.ProtocolVersion,
+		"doc_counts":       retrievedStats.DocCounts,
+		"total_docs":       retrievedStats.TotalDocs,
 		"indexing": map[string]interface{}{
 			"job_id":          snapshot.JobID,
 			"running":         snapshot.Running,
 			"mode":            snapshot.Mode,
-			"scanned":         snapshot.Scanned,
-			"indexed":         snapshot.Indexed,
-			"skipped":         snapshot.Skipped,
-			"deleted":         snapshot.Deleted,
-			"representations": snapshot.Representations,
-			"chunks_total":    snapshot.ChunksTotal,
-			"embedded_ok":     snapshot.EmbeddedOK,
-			"errors":          snapshot.Errors,
+			"scanned":         retrievedStats.Scanned,
+			"indexed":         retrievedStats.Indexed,
+			"skipped":         retrievedStats.Skipped,
+			"deleted":         retrievedStats.Deleted,
+			"representations": retrievedStats.Representations,
+			"chunks_total":    retrievedStats.ChunksTotal,
+			"embedded_ok":     retrievedStats.EmbeddedOK,
+			"errors":          retrievedStats.Errors,
 		},
 		"models": map[string]interface{}{
 			"embed_text":   defaultEmbedTextModel,
@@ -304,9 +347,9 @@ func (s *Server) handleStatsTool(_ context.Context, args map[string]interface{})
 	text := fmt.Sprintf(
 		"indexing running=%t scanned=%d indexed=%d errors=%d",
 		snapshot.Running,
-		snapshot.Scanned,
-		snapshot.Indexed,
-		snapshot.Errors,
+		retrievedStats.Scanned,
+		retrievedStats.Indexed,
+		retrievedStats.Errors,
 	)
 
 	return toolCallResult{
@@ -2140,6 +2183,11 @@ func statsOutputSchema() map[string]interface{} {
 			"root":             map[string]interface{}{"type": "string"},
 			"state_dir":        map[string]interface{}{"type": "string"},
 			"protocol_version": map[string]interface{}{"type": "string"},
+			"doc_counts": map[string]interface{}{
+				"type":                 "object",
+				"additionalProperties": map[string]interface{}{"type": "integer"},
+			},
+			"total_docs": map[string]interface{}{"type": "integer"},
 			"indexing": map[string]interface{}{
 				"type":                 "object",
 				"additionalProperties": false,
@@ -2172,6 +2220,6 @@ func statsOutputSchema() map[string]interface{} {
 				"required": []string{"embed_text", "embed_code", "ocr", "stt_provider", "stt_model", "chat"},
 			},
 		},
-		"required": []string{"root", "state_dir", "protocol_version", "indexing", "models"},
+		"required": []string{"root", "state_dir", "protocol_version", "doc_counts", "total_docs", "indexing", "models"},
 	}
 }
