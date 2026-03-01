@@ -1388,7 +1388,14 @@ func (s *Server) lookupDocumentForTool(ctx context.Context, relPath string) (mod
 func (s *Server) ensureTranscriptForAudioDoc(ctx context.Context, doc model.Document, retranscribe bool, language string) (string, bool, *toolExecutionError) {
 	content, err := s.readDocumentContent(doc.RelPath)
 	if err != nil {
-		return "", false, &toolExecutionError{Code: "FORBIDDEN", Message: err.Error(), Retryable: false}
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+			return "", false, &toolExecutionError{Code: "NOT_FOUND", Message: "file not found", Retryable: false}
+		case errors.Is(err, model.ErrPathOutsideRoot):
+			return "", false, &toolExecutionError{Code: "PATH_OUTSIDE_ROOT", Message: err.Error(), Retryable: false}
+		default:
+			return "", false, &toolExecutionError{Code: "FORBIDDEN", Message: err.Error(), Retryable: false}
+		}
 	}
 
 	cachePath := filepath.Join(s.cfg.StateDir, "cache", "transcribe", ingest.ComputeContentHash(content)+".txt")
