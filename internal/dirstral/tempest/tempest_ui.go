@@ -188,6 +188,13 @@ func (m tempestModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.messages = append(m.messages, ui.Dim("you said: ")+msg.text)
+
+		if m.opts.TranscriptOnly {
+			m.state = stateIdle
+			m.scrollToBottom()
+			return m, nil
+		}
+
 		m.state = stateThinking
 		m.scrollToBottom()
 		return m, m.thinkCmd(msg.text)
