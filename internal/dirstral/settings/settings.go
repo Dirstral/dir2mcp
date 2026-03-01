@@ -3,6 +3,7 @@ package settings
 
 import (
 	"fmt"
+	"log"
 	"strings"
 
 	"dir2mcp/internal/dirstral/config"
@@ -289,7 +290,10 @@ func (m *model) save() {
 		}
 		envKey := config.EnvVarForField(f.Key)
 		if envKey == "" {
-			envKey = f.Key
+			log.Printf("settings: no environment mapping for %s; skipping secret save", f.Key)
+			failedSecretKeys[f.Key] = true
+			secretFailures = append(secretFailures, fmt.Sprintf("%s: no mapped environment variable", f.Key))
+			continue
 		}
 		var err error
 		if strings.TrimSpace(f.Value) == "" {
