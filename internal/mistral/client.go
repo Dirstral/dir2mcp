@@ -760,7 +760,6 @@ func (c *Client) transcribeOnce(ctx context.Context, relPath string, data []byte
 		}
 	}
 	req.Header.Set("Authorization", "Bearer "+c.APIKey)
-	req.Header.Set("x-api-key", c.APIKey)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 
 	client := c.HTTPClient

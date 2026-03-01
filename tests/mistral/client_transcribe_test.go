@@ -34,9 +34,9 @@ func TestTranscribe_FormatsSegments(t *testing.T) {
 			http.Error(w, handlerErr.Error(), http.StatusUnauthorized)
 			return
 		}
-		if got := r.Header.Get("x-api-key"); got != "test-key" {
+		if got := r.Header.Get("x-api-key"); got != "" {
 			mu.Lock()
-			handlerErr = fmt.Errorf("unexpected x-api-key header: %q", got)
+			handlerErr = fmt.Errorf("unexpected x-api-key header present: %q", got)
 			mu.Unlock()
 			http.Error(w, handlerErr.Error(), http.StatusUnauthorized)
 			return
