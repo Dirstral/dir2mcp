@@ -93,6 +93,37 @@ func TestCORS_OptionsWithoutPreflightHeadersFallsThrough(t *testing.T) {
 	}
 }
 
+func TestCORS_PreflightDisallowedOriginNoCORSHeaders(t *testing.T) {
+	cfg := config.Default()
+	cfg.AuthMode = "none"
+	cfg.AllowedOrigins = []string{"https://elevenlabs.io"}
+
+	server := httptest.NewServer(mcp.NewServer(cfg, nil).Handler())
+	defer server.Close()
+
+	req, err := http.NewRequest(http.MethodOptions, server.URL+cfg.MCPPath, nil)
+	if err != nil {
+		t.Fatalf("create request: %v", err)
+	}
+	req.Header.Set("Origin", "https://evil.example.com")
+	req.Header.Set("Access-Control-Request-Method", "POST")
+	req.Header.Set("Access-Control-Request-Headers", "Content-Type, Authorization, MCP-Protocol-Version")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do request: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("status=%d want=%d", resp.StatusCode, http.StatusNoContent)
+	}
+
+	if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "" {
+		t.Fatalf("Access-Control-Allow-Origin=%q want empty", got)
+	}
+}
+
 func TestCORS_DisallowedOriginNoHeaders(t *testing.T) {
 	cfg := config.Default()
 	cfg.AuthMode = "none"
