@@ -121,3 +121,48 @@ func TestMCPPaymentRequiredActionableMessageFromHTTP402(t *testing.T) {
 		t.Fatalf("ActionableMessageFromError() = %q, want %q", got, wantMessage)
 	}
 }
+
+func TestMCPPaymentRequiredActionableMessageWithHints(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		switch req["method"] {
+		case "initialize":
+			w.Header().Set(protocol.MCPSessionHeader, "session-1")
+			_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": req["id"], "result": map[string]any{}})
+		case "notifications/initialized":
+			w.WriteHeader(http.StatusAccepted)
+		case "tools/call":
+			w.Header().Set("payment-required", `{"x402Version":2, "accepts":[{"amount":"100", "asset":"USD", "network":"base", "payTo":"someone", "resource":"stats"}]}`)
+			w.WriteHeader(http.StatusPaymentRequired)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"jsonrpc": "2.0",
+				"id":      req["id"],
+				"error":   map[string]any{"code": -32000, "message": "payment required"},
+			})
+		default:
+			w.WriteHeader(http.StatusBadRequest)
+		}
+	}))
+	defer server.Close()
+
+	client := mcp.NewWithTransport(server.URL, "streamable-http", false)
+	ctx := context.Background()
+	_ = client.Initialize(ctx)
+
+	_, err := client.CallTool(ctx, protocol.ToolNameStats, map[string]any{})
+	if err == nil {
+		t.Fatal("expected payment-required error")
+	}
+
+	wantMessage := "This tool requires payment. Run with x402 enabled or configure a payment token. (Hints: amount=100, asset=USD, network=base)"
+	if got := mcp.ActionableMessageFromError(err); got != wantMessage {
+		t.Fatalf("ActionableMessageFromError() = %q, want %q", got, wantMessage)
+	}
+}
