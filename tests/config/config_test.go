@@ -160,43 +160,64 @@ func TestLoad_DefaultElevenLabsVoiceID(t *testing.T) {
 }
 
 func TestLoad_X402FacilitatorTokenEnvOnly(t *testing.T) {
-	tmp := t.TempDir()
+	// split into explicit subtests for clarity
+	// each subtest gets its own temporary working directory and environment
 
-	testutil.WithWorkingDir(t, tmp, func() {
-		// write a config file containing the sensitive field; it should be ignored
-		writeFile(t, filepath.Join(tmp, ".dir2mcp.yaml"), "x402_facilitator_token: should-not-be-used\n")
-		// set the env var to the empty string (config.Load treats blank
-		// values the same as if the variable were unset, so the token
-		// remains empty). use os.Unsetenv if you really want it removed
-		// from the environment entirely.
-		t.Setenv("DIR2MCP_X402_FACILITATOR_TOKEN", "")
-		cfg, err := config.Load("")
-		if err != nil {
-			t.Fatalf("Load failed: %v", err)
-		}
-		if cfg.X402.FacilitatorToken != "" {
-			t.Fatalf("expected empty token when config file provides it, got %q", cfg.X402.FacilitatorToken)
-		}
-		// environment variable should take precedence
-		t.Setenv("DIR2MCP_X402_FACILITATOR_TOKEN", "envval")
-		cfg2, err := config.Load("")
-		if err != nil {
-			t.Fatalf("Load failed: %v", err)
-		}
-		if cfg2.X402.FacilitatorToken != "envval" {
-			t.Fatalf("expected envval, got %q", cfg2.X402.FacilitatorToken)
-		}
-		// clearing the env var causes the loader to return to defaults (no token)
-		t.Setenv("DIR2MCP_X402_FACILITATOR_TOKEN", "")
-		cfg3, err := config.Load("")
-		if err != nil {
-			t.Fatalf("Load failed: %v", err)
-		}
-		if cfg3.X402.FacilitatorToken != "" {
-			t.Fatalf("expected token to be empty after env cleared, got %q", cfg3.X402.FacilitatorToken)
-		}
+	t.Run("file-only", func(t *testing.T) {
+		tmp := t.TempDir()
+		testutil.WithWorkingDir(t, tmp, func() {
+			// write a config file containing the sensitive field; it should be ignored
+			writeFile(t, filepath.Join(tmp, ".dir2mcp.yaml"), "x402_facilitator_token: should-not-be-used\n")
+			// ensure the env var is blank so loader falls back to default
+			t.Setenv("DIR2MCP_X402_FACILITATOR_TOKEN", "")
+			cfg, err := config.Load("")
+			if err != nil {
+				t.Fatalf("Load failed: %v", err)
+			}
+			if cfg.X402.FacilitatorToken != "" {
+				t.Fatalf("expected empty token when config file provides it, got %q", cfg.X402.FacilitatorToken)
+			}
+		})
+	})
+
+	t.Run("env-override", func(t *testing.T) {
+		tmp := t.TempDir()
+		testutil.WithWorkingDir(t, tmp, func() {
+			// config file still contains a value that should be ignored
+			writeFile(t, filepath.Join(tmp, ".dir2mcp.yaml"), "x402_facilitator_token: should-not-be-used\n")
+			// start with no token to prove override later
+			t.Setenv("DIR2MCP_X402_FACILITATOR_TOKEN", "")
+			// now set the actual override
+			t.Setenv("DIR2MCP_X402_FACILITATOR_TOKEN", "envval")
+			cfg, err := config.Load("")
+			if err != nil {
+				t.Fatalf("Load failed: %v", err)
+			}
+			if cfg.X402.FacilitatorToken != "envval" {
+				t.Fatalf("expected envval, got %q", cfg.X402.FacilitatorToken)
+			}
+		})
+	})
+
+	t.Run("env-cleared", func(t *testing.T) {
+		tmp := t.TempDir()
+		testutil.WithWorkingDir(t, tmp, func() {
+			// config file again contains a token that should be ignored
+			writeFile(t, filepath.Join(tmp, ".dir2mcp.yaml"), "x402_facilitator_token: should-not-be-used\n")
+			// simulate previous override then clear it
+			t.Setenv("DIR2MCP_X402_FACILITATOR_TOKEN", "envval")
+			t.Setenv("DIR2MCP_X402_FACILITATOR_TOKEN", "")
+			cfg, err := config.Load("")
+			if err != nil {
+				t.Fatalf("Load failed: %v", err)
+			}
+			if cfg.X402.FacilitatorToken != "" {
+				t.Fatalf("expected token to be empty after env cleared, got %q", cfg.X402.FacilitatorToken)
+			}
+		})
 	})
 }
+
 
 func TestLoad_InvalidX402ToolsCallEnabledEnvWarning(t *testing.T) {
 	tmp := t.TempDir()
@@ -208,7 +229,7 @@ func TestLoad_InvalidX402ToolsCallEnabledEnvWarning(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		// default should remain true
-		if cfg.X402.ToolsCallEnabled != true {
+		if !cfg.X402.ToolsCallEnabled {
 			t.Fatalf("expected default ToolsCallEnabled=true, got %v", cfg.X402.ToolsCallEnabled)
 		}
 		if len(cfg.Warnings) == 0 {

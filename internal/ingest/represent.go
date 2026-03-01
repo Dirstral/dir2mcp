@@ -367,14 +367,16 @@ func splitTranscriptSegmentWithTiming(text string, startMS, endMS int) []chunkSe
 	duration := endMS - startMS
 	out := make([]chunkSegment, 0, len(parts))
 
-	// weight time slices by chunk character length rather than uniform
-	// percentages.  compute total length and fall back to equal division if
-	// the result would be zero.
-	totalLen := 0
+	// weight time slices by chunk character (rune) length rather than
+	// uniform percentages. compute the total character count and fall back to
+	// equal division if the result would be zero. using rune counts ensures
+	// that multi-byte UTF‑8 characters are treated consistently with
+	// chunkTextByChars.
+	totalChars := 0
 	for _, part := range parts {
-		totalLen += len(part.Text)
+		totalChars += utf8.RuneCountInString(part.Text)
 	}
-	if totalLen == 0 {
+	if totalChars == 0 {
 		// nothing to measure, just do the old uniform split
 		for i, part := range parts {
 			partStart := startMS + (duration*i)/len(parts)
@@ -394,11 +396,11 @@ func splitTranscriptSegmentWithTiming(text string, startMS, endMS int) []chunkSe
 		return out
 	}
 
-	cumLen := 0
+	cumChars := 0
 	for _, part := range parts {
-		partStart := startMS + (duration*cumLen)/totalLen
-		cumLen += len(part.Text)
-		partEnd := startMS + (duration*cumLen)/totalLen
+		partStart := startMS + (duration*cumChars)/totalChars
+		cumChars += utf8.RuneCountInString(part.Text)
+		partEnd := startMS + (duration*cumChars)/totalChars
 		if partEnd <= partStart {
 			partEnd = partStart + 1
 		}

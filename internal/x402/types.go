@@ -32,12 +32,13 @@ const (
 )
 
 type Requirement struct {
-	Scheme   string
-	Network  string
-	Amount   string
-	Asset    string
-	PayTo    string
-	Resource string
+	Scheme            string
+	Network           string
+	Amount            string
+	MaxAmountRequired string
+	Asset             string
+	PayTo             string
+	Resource          string
 }
 
 // X402Payload represents the JSON object returned in the PAYMENT-REQUIRED header.
@@ -90,6 +91,24 @@ func (r Requirement) Validate() error {
 	if _, ok := value.SetString(amt, 10); !ok || value.Sign() <= 0 {
 		return fmt.Errorf("x402 amount must be a positive integer")
 	}
+
+	// For "upto" scheme we also require a max value which must be a
+	// positive integer and not smaller than amount.  The MaxAmountRequired
+	// field may be empty for "exact" since it is ignored.
+	scheme = strings.ToLower(strings.TrimSpace(r.Scheme))
+	if scheme == "upto" {
+		max := strings.TrimSpace(r.MaxAmountRequired)
+		if max == "" {
+			return fmt.Errorf("x402 maxAmountRequired is required for upto scheme")
+		}
+		maxVal := new(big.Int)
+		if _, ok := maxVal.SetString(max, 10); !ok || maxVal.Sign() <= 0 {
+			return fmt.Errorf("x402 maxAmountRequired must be a positive integer")
+		}
+		if maxVal.Cmp(value) < 0 {
+			return fmt.Errorf("x402 maxAmountRequired must be >= amount")
+		}
+	}
 	if strings.TrimSpace(r.Asset) == "" {
 		return fmt.Errorf("x402 asset is required")
 	}
@@ -118,7 +137,7 @@ func BuildPaymentRequiredHeaderValue(req Requirement) (string, error) {
 				Scheme:            strings.ToLower(strings.TrimSpace(req.Scheme)),
 				Network:           strings.TrimSpace(req.Network),
 				Amount:            strings.TrimSpace(req.Amount),
-				MaxAmountRequired: strings.TrimSpace(req.Amount),
+				MaxAmountRequired: strings.TrimSpace(req.MaxAmountRequired),
 				Asset:             strings.TrimSpace(req.Asset),
 				PayTo:             strings.TrimSpace(req.PayTo),
 				Resource:          strings.TrimSpace(req.Resource),

@@ -1054,6 +1054,10 @@ func (s *failingListFilesStore) Close() error {
 	return nil
 }
 
+// compile-time assertion: ensure our stub satisfies the Store interface used by
+// mcp.WithStore.  This will fail to compile if the interface changes.
+var _ model.Store = (*failingListFilesStore)(nil)
+
 // assertToolCallErrorCode validates that a tools/call response returned a
 // tool-level error payload with the expected canonical error code.
 func assertToolCallErrorCode(t *testing.T, resp *http.Response, wantCode string) {

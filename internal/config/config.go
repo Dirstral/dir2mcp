@@ -18,6 +18,13 @@ import (
 const DefaultProtocolVersion = "2025-11-25"
 
 type X402Config struct {
+	// Mode controls whether x402 payment gating is enabled.  Allowed values
+	// are "off", "on" and "required".  Validation will normalize the
+	// string by trimming whitespace, lower‑casing it, and defaulting the
+	// empty value to "off"; this normalization is applied in
+	// ValidateX402 and the resulting canonical value is written back into the
+	// struct so callers can rely on a cleaned value after validation.  Any
+	// invalid mode will cause validation to fail.
 	Mode           string
 	FacilitatorURL string
 	// FacilitatorToken is sensitive and must not be written to disk.
@@ -135,14 +142,18 @@ type persistedConfig struct {
 	AllowedOrigins       []string `yaml:"allowed_origins"`
 	EmbedModelText       string   `yaml:"embed_model_text"`
 	EmbedModelCode       string   `yaml:"embed_model_code"`
-	X402Mode             string   `yaml:"x402_mode"`
-	X402FacilitatorURL   string   `yaml:"x402_facilitator_url"`
-	// FacilitatorToken is a sensitive bearer token used for x402 operations.
-	// It is intentionally **not** persisted to disk; operators must supply it via
-	// the environment variable DIR2MCP_X402_FACILITATOR_TOKEN.  This mirrors the
-	// treatment of other API keys and prevents accidental leakage when the
-	// config file is written or shared.
-	// (persisted config omits this field entirely)
+
+	// The following fields configure optional x402 payment gating.  The
+	// facilitator token itself is treated like any other sensitive API key:
+	// it **must not** be written to disk and is therefore *not* part of the
+	// persisted configuration struct.  Operators should provide the token via
+	// DIR2MCP_X402_FACILITATOR_TOKEN (environment/CLI) when running the
+	// application; the loader ignores file-supplied token values.
+	//
+	// Other x402 settings *are* persisted and must be declared in the
+	// configuration file when required.
+	X402Mode             string `yaml:"x402_mode"`
+	X402FacilitatorURL   string `yaml:"x402_facilitator_url"`
 	X402ResourceBaseURL  string `yaml:"x402_resource_base_url"`
 	X402ToolsCallEnabled bool   `yaml:"x402_tools_call_enabled"`
 	X402PriceAtomic      string `yaml:"x402_price_atomic"`
@@ -783,11 +794,28 @@ func applyEnvOverrides(cfg *Config, overrideEnv map[string]string) {
 	}
 }
 
-func (c Config) ValidateX402(strict bool) error {
+// ValidateX402 performs consistency checks on the embedded X402Config
+// state.  When called it normalizes certain fields (most notably
+// `Mode`) and writes the canonical form back into the config struct,
+// therefore it must be invoked on a pointer receiver (the method is
+// defined on *Config).  The `strict` parameter enables additional
+// semantic checks that aren't required in non-strict modes.
+//
+// The validation is intentionally side‑effecting so that callers may rely
+// on `cfg.X402.Mode` being a lowercase, trimmed, non-empty string after a
+// successful call.  Errors are returned for invalid values regardless of
+// whether mutation has already occurred.
+func (c *Config) ValidateX402(strict bool) error {
+	// normalize and store back so callers looking at the struct afterwards
+	// see a canonical value.  this mirrors the behaviour used elsewhere
+	// (eg. x402.NormalizeMode) but keeps the logic self-contained.  we
+	// perform the assignment immediately because many of the subsequent
+	// branches rely on comparing `mode` and there are early return paths.
 	mode := strings.ToLower(strings.TrimSpace(c.X402.Mode))
 	if mode == "" {
 		mode = "off"
 	}
+	c.X402.Mode = mode
 
 	switch mode {
 	case "off", "on", "required":

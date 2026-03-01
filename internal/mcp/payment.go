@@ -43,17 +43,27 @@ func (s *Server) initPaymentConfig() {
 	// keep tools/call ungated instead of enabling a runtime-bricking gate.
 	if mode == x402.ModeOn {
 		if err := s.cfg.ValidateX402(true); err != nil {
+			// validation failed; log a warning so operators understand why x402
+			// isn't being enabled.  We still return early to avoid enabling the
+			// payment gate.
+			s.emitPaymentEvent("warning", "x402_validation_failed", map[string]interface{}{
+				"err": err.Error(),
+			})
 			return
 		}
 	}
 
 	s.x402Requirement = x402.Requirement{
-		Scheme:   strings.TrimSpace(s.cfg.X402.Scheme),
-		Network:  strings.TrimSpace(s.cfg.X402.Network),
-		Amount:   strings.TrimSpace(s.cfg.X402.PriceAtomic),
-		Asset:    strings.TrimSpace(s.cfg.X402.Asset),
-		PayTo:    strings.TrimSpace(s.cfg.X402.PayTo),
-		Resource: strings.TrimSpace(buildPaymentResourceURL(s.cfg.X402.ResourceBaseURL, s.cfg.MCPPath)),
+		Scheme:  strings.TrimSpace(s.cfg.X402.Scheme),
+		Network: strings.TrimSpace(s.cfg.X402.Network),
+		Amount:  strings.TrimSpace(s.cfg.X402.PriceAtomic),
+		// MaxAmountRequired intentionally uses a separate field; by default we
+		// mirror the configured price but callers (or future config) may set
+		// a larger upper bound for "upto" schemes.
+		MaxAmountRequired: strings.TrimSpace(s.cfg.X402.PriceAtomic),
+		Asset:             strings.TrimSpace(s.cfg.X402.Asset),
+		PayTo:             strings.TrimSpace(s.cfg.X402.PayTo),
+		Resource:          strings.TrimSpace(buildPaymentResourceURL(s.cfg.X402.ResourceBaseURL, s.cfg.MCPPath)),
 	}
 	s.x402Client = x402.NewHTTPClient(s.cfg.X402.FacilitatorURL, s.cfg.X402.FacilitatorToken, nil)
 	s.x402Enabled = true
@@ -140,8 +150,19 @@ func (s *Server) handleToolsCallRequest(ctx context.Context, w http.ResponseWrit
 		return
 	}
 
-	outcome = s.markPaymentExecutionSettled(executionKey, string(settleResponse))
-	s.replayPaymentExecutionOutcome(w, id, outcome)
+	// update the cached outcome; if the entry was pruned we need to
+	// reconstruct and persist the successful state before replaying it.
+	updated, found := s.markPaymentExecutionSettled(executionKey, string(settleResponse))
+	if !found {
+		// use the local copy of outcome that still holds the original
+		// execution result, then mark it settled and persist it.
+		outcome.Settled = true
+		outcome.PaymentResponse = strings.TrimSpace(string(settleResponse))
+		outcome.UpdatedAt = time.Now().UTC()
+		s.setPaymentExecutionOutcome(executionKey, outcome)
+		updated = outcome
+	}
+	s.replayPaymentExecutionOutcome(w, id, updated)
 
 	s.emitPaymentEvent("info", "payment_settled", map[string]interface{}{
 		"response": json.RawMessage(settleResponse),
@@ -236,8 +257,18 @@ func (s *Server) replayCachedPaymentOutcomeIfAny(ctx context.Context, w http.Res
 		s.handlePaymentFailure(w, id, "settle", settleErr, executionKey)
 		return true
 	}
-	outcome = s.markPaymentExecutionSettled(executionKey, string(settleResponse))
-	s.replayPaymentExecutionOutcome(w, id, outcome)
+	// original outcome loaded above; keep a copy in case the cache entry
+	// is gone by the time we call markPaymentExecutionSettled.
+	orig := outcome
+	updated, found := s.markPaymentExecutionSettled(executionKey, string(settleResponse))
+	if !found {
+		orig.Settled = true
+		orig.PaymentResponse = strings.TrimSpace(string(settleResponse))
+		orig.UpdatedAt = time.Now().UTC()
+		s.setPaymentExecutionOutcome(executionKey, orig)
+		updated = orig
+	}
+	s.replayPaymentExecutionOutcome(w, id, updated)
 
 	s.emitPaymentEvent("info", "payment_settled", map[string]interface{}{
 		"response": json.RawMessage(settleResponse),
@@ -311,20 +342,20 @@ func (s *Server) setPaymentExecutionOutcome(key string, outcome paymentExecution
 	s.paymentOutcomes[key] = outcome
 }
 
-func (s *Server) markPaymentExecutionSettled(key, paymentResponse string) paymentExecutionOutcome {
+func (s *Server) markPaymentExecutionSettled(key, paymentResponse string) (paymentExecutionOutcome, bool) {
 	s.paymentMu.Lock()
 	defer s.paymentMu.Unlock()
 	outcome, ok := s.paymentOutcomes[key]
 	if !ok {
 		// nothing to settle; avoid creating a partial entry
 		s.emitPaymentEvent("warning", "payment_outcome_missing", map[string]interface{}{"key": key})
-		return paymentExecutionOutcome{}
+		return paymentExecutionOutcome{}, false
 	}
 	outcome.Settled = true
 	outcome.PaymentResponse = strings.TrimSpace(paymentResponse)
 	outcome.UpdatedAt = time.Now().UTC()
 	s.paymentOutcomes[key] = outcome
-	return outcome
+	return outcome, true
 }
 
 func cloneRPCError(err *rpcError) *rpcError {

@@ -1,6 +1,8 @@
 package mcp
 
 import (
+	"context"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -19,9 +21,26 @@ func TestInitPaymentConfig_ModeOnIncompleteConfigDisablesGating(t *testing.T) {
 	// Mode and ToolsCallEnabled set; nothing else is populated, which should keep
 	// x402Enabled=false and gating disabled despite the mode being "on".
 
-	s := NewServer(cfg, nil)
+	var events []map[string]interface{}
+	s := NewServer(cfg, nil, WithEventEmitter(func(level, event string, data interface{}) {
+		events = append(events, map[string]interface{}{"level": level, "event": event, "data": data})
+	}))
 	if s.x402Enabled {
 		t.Fatal("expected x402 gating to remain disabled for incomplete mode=on config")
+	}
+	// ensure a warning was emitted about validation failure
+	if len(events) == 0 {
+		t.Fatalf("expected warning event when X402 validation fails")
+	}
+	found := false
+	for _, e := range events {
+		if e["event"] == "x402_validation_failed" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("did not see x402_validation_failed event, events: %+v", events)
 	}
 }
 
@@ -58,6 +77,30 @@ func TestCleanupPaymentOutcomes_AppliesTTLAndCap(t *testing.T) {
 	}
 }
 
+func waitForKeyRef(ctx context.Context, s *Server, key string, wantRef int) error {
+	for {
+		s.execMu.Lock()
+		km, ok := s.execKeyMu[key]
+		if ok && km.ref == wantRef {
+			s.execMu.Unlock()
+			return nil
+		}
+		ref := -1
+		if km != nil {
+			ref = km.ref
+		}
+		s.execMu.Unlock()
+
+		select {
+		case <-ctx.Done():
+			// include current state in error for diagnostic purposes
+			return fmt.Errorf("key=%s ok=%v ref=%d: %w", key, ok, ref, ctx.Err())
+		case <-time.After(5 * time.Millisecond):
+			// continue polling
+		}
+	}
+}
+
 func TestLockForExecutionKey_SerializesAndCleansUpWithRefCounts(t *testing.T) {
 	s := &Server{execKeyMu: make(map[string]*keyMutex)}
 	key := "same-signature:same-params"
@@ -77,24 +120,11 @@ func TestLockForExecutionKey_SerializesAndCleansUpWithRefCounts(t *testing.T) {
 	}()
 
 	// wait until the reference count for the key reaches 2 (A + B)
-	timeout := time.After(time.Second)
-	for {
-		s.execMu.Lock()
-		km, ok := s.execKeyMu[key]
-		if ok && km.ref == 2 {
-			s.execMu.Unlock()
-			break
-		}
-		ref := -1
-		if km != nil {
-			ref = km.ref
-		}
-		s.execMu.Unlock()
-		select {
-		case <-timeout:
-			t.Fatalf("expected key mutex ref=2 while B waits, got ok=%v ref=%d", ok, ref)
-		default:
-			time.Sleep(5 * time.Millisecond)
+	{
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := waitForKeyRef(ctx, s, key, 2); err != nil {
+			t.Fatalf("expected key mutex ref=2 while B waits: %v", err)
 		}
 	}
 
@@ -120,24 +150,11 @@ func TestLockForExecutionKey_SerializesAndCleansUpWithRefCounts(t *testing.T) {
 	// While B holds the lock, C must still be registered as a waiter and remain blocked.
 	// Poll under execMu until the ref count reaches 2 (B + C) with a timeout, mirroring
 	// the logic we used earlier above when waiting for B to register.
-	timeoutC := time.After(time.Second)
-	for {
-		s.execMu.Lock()
-		km, ok := s.execKeyMu[key]
-		if ok && km.ref == 2 {
-			s.execMu.Unlock()
-			break
-		}
-		ref := -1
-		if km != nil {
-			ref = km.ref
-		}
-		s.execMu.Unlock()
-		select {
-		case <-timeoutC:
-			t.Fatalf("expected key mutex ref=2 while C waits, got ok=%v ref=%d", ok, ref)
-		default:
-			time.Sleep(5 * time.Millisecond)
+	{
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := waitForKeyRef(ctx, s, key, 2); err != nil {
+			t.Fatalf("expected key mutex ref=2 while C waits: %v", err)
 		}
 	}
 	// Now that C is registered, ensure it is still blocked (should not have acquired lock yet).

@@ -179,13 +179,16 @@ func (c *HTTPClient) do(ctx context.Context, operation, paymentSignature string,
 		message = fmt.Sprintf("facilitator %s request failed with status %d", operation, resp.StatusCode)
 	}
 
+	// redact the body before exposing it in the error object.  We still
+	// preserve a human-readable summary via extractFacilitatorMessage above,
+	// but the raw payload may contain secrets that should not leak.
 	return nil, &FacilitatorError{
 		Operation:  operation,
 		StatusCode: resp.StatusCode,
 		Retryable:  retryable,
 		Code:       code,
 		Message:    message,
-		Body:       string(normalized),
+		Body:       redactNormalizedPayload(normalized),
 	}
 }
 
@@ -194,7 +197,7 @@ func toRequirementPayload(req Requirement) map[string]interface{} {
 		"scheme":            strings.ToLower(strings.TrimSpace(req.Scheme)),
 		"network":           strings.TrimSpace(req.Network),
 		"amount":            strings.TrimSpace(req.Amount),
-		"maxAmountRequired": strings.TrimSpace(req.Amount),
+		"maxAmountRequired": strings.TrimSpace(req.MaxAmountRequired),
 		"asset":             strings.TrimSpace(req.Asset),
 		"payTo":             strings.TrimSpace(req.PayTo),
 		"resource":          strings.TrimSpace(req.Resource),
@@ -213,6 +216,8 @@ func isRetryableStatus(status int) bool {
 	}
 }
 
+const maxFacilitatorBody = 1024
+
 func normalizeResponsePayload(payload []byte) json.RawMessage {
 	trimmed := bytes.TrimSpace(payload)
 	if len(trimmed) == 0 {
@@ -228,6 +233,32 @@ func normalizeResponsePayload(payload []byte) json.RawMessage {
 		"raw": string(trimmed),
 	})
 	return json.RawMessage(fallback)
+}
+
+// redactNormalizedPayload returns a safe string representation of the
+// normalized JSON returned by the facilitator.  The goal is to avoid
+// including potentially sensitive information (payment payloads,
+// tokens, etc.) and to prevent unbounded logging of very large error
+// responses.  It attempts to parse the payload and redact a handful of
+// common keys, then truncates the result to a reasonable maximum length.
+func redactNormalizedPayload(normalized json.RawMessage) string {
+	s := string(normalized)
+	if s == "" {
+		return ""
+	}
+
+	var obj map[string]interface{}
+	if err := json.Unmarshal(normalized, &obj); err == nil {
+		for _, key := range []string{"paymentPayload", "token", "secret", "password"} {
+			if _, ok := obj[key]; ok {
+				obj[key] = "[REDACTED]"
+			}
+		}
+		if data, err := json.Marshal(obj); err == nil {
+			s = string(data)
+		}
+	}
+	return truncateString(s, maxFacilitatorBody)
 }
 
 func extractFacilitatorMessage(payload []byte) string {
@@ -247,10 +278,11 @@ func extractFacilitatorMessage(payload []byte) string {
 		if raw, ok := asObj[key]; ok {
 			switch value := raw.(type) {
 			case string:
-				return value
+				// always truncate extracted strings to avoid unbounded length
+				return truncateString(value, 256)
 			case map[string]interface{}:
 				if msg, ok := value["message"].(string); ok {
-					return msg
+					return truncateString(msg, 256)
 				}
 			}
 		}

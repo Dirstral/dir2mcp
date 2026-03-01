@@ -32,7 +32,7 @@ func TestIsModeValid(t *testing.T) {
 		}
 	}
 
-	invalid := []string{"", "", "foo", "123", "maybe"}
+	invalid := []string{"", " ", "foo", "123", "maybe"}
 	for _, v := range invalid {
 		if IsModeValid(v) {
 			t.Errorf("expected %q to be invalid", v)

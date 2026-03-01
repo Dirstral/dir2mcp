@@ -135,6 +135,12 @@ func TestAppendPaymentLogMkdirAllFailure(t *testing.T) {
 	cfg.AuthMode = "none"
 
 	s := NewServer(cfg, nil)
+	// ensure server resources are cleaned up during the test
+	defer func() {
+		if err := s.Close(); err != nil {
+			t.Fatalf("Close returned unexpected error: %v", err)
+		}
+	}()
 	s.paymentLogPath = filepath.Join(tmp, "payments", "settlement.log")
 
 	// create a file at the directory location so MkdirAll errors
@@ -165,16 +171,18 @@ func TestAppendPaymentLogMkdirAllFailure(t *testing.T) {
 	if fi, err := os.Stat(s.paymentLogPath); err == nil {
 		t.Logf("unexpected log path exists: %v (isdir=%v)", fi.Name(), fi.IsDir())
 		t.Fatalf("expected log file to not exist")
-	} else if os.IsNotExist(err) {
-		// expected missing file
 	} else {
-		// any other non-nil error (e.g. ENOTDIR) is also fine
-		if len(events) == 0 {
-			t.Fatalf("expected at least one warning event when MkdirAll fails")
-		}
-		for i, e := range events {
-			t.Logf("event %d: %+v", i, e)
-		}
+		// nothing to do here; we'll assert events below
+	}
+
+	// Regardless of the stat result above (IsNotExist or other), we expect a
+	// warning event to have been emitted when s.appendPaymentLog failed to
+	// create the directory.  Log them for debugging if present.
+	if len(events) == 0 {
+		t.Fatalf("expected at least one warning event when MkdirAll fails")
+	}
+	for i, e := range events {
+		t.Logf("event %d: %+v", i, e)
 	}
 }
 

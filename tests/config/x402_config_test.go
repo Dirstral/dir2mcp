@@ -94,6 +94,29 @@ func TestValidateX402_ModeWithToolsDisabled(t *testing.T) {
 	}
 }
 
+func TestValidateX402_NormalizesMode(t *testing.T) {
+	cfg := config.Default()
+	cfg.X402.Mode = "  On  "
+	cfg.X402.ToolsCallEnabled = true
+	if err := cfg.ValidateX402(false); err != nil {
+		t.Fatalf("unexpected validation error: %v", err)
+	}
+	if cfg.X402.Mode != "on" {
+		t.Fatalf("mode not normalized, got %q", cfg.X402.Mode)
+	}
+
+	// ensure an empty value is defaulted to off
+	cfg = config.Default()
+	cfg.X402.Mode = ""
+	cfg.X402.ToolsCallEnabled = true
+	if err := cfg.ValidateX402(false); err != nil {
+		t.Fatalf("unexpected validation error with blank mode: %v", err)
+	}
+	if cfg.X402.Mode != "off" {
+		t.Fatalf("blank mode should default to off, got %q", cfg.X402.Mode)
+	}
+}
+
 func TestValidateX402_InvalidNetwork(t *testing.T) {
 	cfg := config.Default()
 	cfg.X402.Mode = "required" // enable validation path
@@ -159,14 +182,16 @@ func TestValidateX402_PriceMustBePositiveInteger(t *testing.T) {
 
 	// additional explicit price checks in subtests for consistent reporting
 	t.Run("price=0 rejects", func(t *testing.T) {
-		cfg.X402.PriceAtomic = "0"
-		if err := cfg.ValidateX402(true); err == nil {
+		local := cfg
+		local.X402.PriceAtomic = "0"
+		if err := local.ValidateX402(true); err == nil {
 			t.Fatal("expected price 0 to be rejected")
 		}
 	})
 	t.Run("price=12345 accepts", func(t *testing.T) {
-		cfg.X402.PriceAtomic = "12345"
-		if err := cfg.ValidateX402(true); err != nil {
+		local := cfg
+		local.X402.PriceAtomic = "12345"
+		if err := local.ValidateX402(true); err != nil {
 			t.Fatalf("expected positive price to be valid, got %v", err)
 		}
 	})
@@ -193,13 +218,17 @@ func TestValidateX402_InvalidScheme(t *testing.T) {
 		t.Fatalf("unexpected error message for scheme: %v", err)
 	}
 
-	cfg.X402.Scheme = "EXACT"
-	if err := cfg.ValidateX402(true); err != nil {
+	// subsequent checks should not mutate the original configuration; make
+	// copies so each assertion is independent
+	copyCfg := cfg
+	copyCfg.X402.Scheme = "EXACT"
+	if err := copyCfg.ValidateX402(true); err != nil {
 		t.Fatalf("expected uppercase exact to be accepted, got %v", err)
 	}
 
-	cfg.X402.Scheme = " UpTo "
-	if err := cfg.ValidateX402(true); err != nil {
+	copyCfg = cfg
+	copyCfg.X402.Scheme = " UpTo "
+	if err := copyCfg.ValidateX402(true); err != nil {
 		t.Fatalf("expected spaced/upper upto to be accepted, got %v", err)
 	}
 }

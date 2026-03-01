@@ -28,6 +28,13 @@ func TestParseUpOptions_X402TokenFlags(t *testing.T) {
 	// the two token flags. parseUpOptions itself does not read the file, but
 	// the command‑line semantics dictate that the file flag wins over a direct
 	// token when both are provided.
+	//
+	// wantDirectSet mirrors the post‑parse value of
+	// opts.x402FacilitatorTokenDirectSet.  It indicates whether the direct
+	// token flag remains set after parsing (i.e. not cleared because a file
+	// took precedence), not merely whether the flag was passed on the
+	// command line.  The "token only" case leaves it false; the "both" case
+	// sets it true even though the direct token value is wiped.
 	tests := []struct {
 		name          string
 		args          []string
@@ -41,6 +48,9 @@ func TestParseUpOptions_X402TokenFlags(t *testing.T) {
 		// so parseUpOptions is expected to clear the direct token and record
 		// that it was originally set.
 		{"both", []string{"--x402-facilitator-token-file", "path/to/token", "--x402-facilitator-token", "flagval"}, "path/to/token", "", true},
+		// verify precedence is order-independent by specifying the direct flag
+		// before the file flag; semantics should still favor the file flag.
+		{"both order reversed", []string{"--x402-facilitator-token", "flagval", "--x402-facilitator-token-file", "path/to/token"}, "path/to/token", "", true},
 		{"neither", []string{}, "", "", false},
 	}
 
@@ -61,4 +71,5 @@ func TestParseUpOptions_X402TokenFlags(t *testing.T) {
 			}
 		})
 	}
+
 }

@@ -420,6 +420,16 @@ func newFacilitatorStub(t *testing.T) *facilitatorStub {
 	return f
 }
 
+func clampIndex(idx int, sliceLen int) int {
+    if sliceLen <= 0 {
+        return 0
+    }
+    if idx >= sliceLen {
+        return sliceLen - 1
+    }
+    return idx
+}
+
 func (f *facilitatorStub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// update authorization atomically
 	f.lastAuthorization.Store(r.Header.Get("Authorization"))
@@ -445,18 +455,10 @@ func (f *facilitatorStub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// previous counter, so subtract one to use it as an index.
 		idx := int(f.settleCalls.Add(1) - 1)
 		if len(f.settleStatuses) > 0 {
-			clamped := idx
-			if clamped >= len(f.settleStatuses) {
-				clamped = len(f.settleStatuses) - 1
-			}
-			status = f.settleStatuses[clamped]
+			status = f.settleStatuses[clampIndex(idx, len(f.settleStatuses))]
 		}
 		if len(f.settleBodies) > 0 {
-			clamped := idx
-			if clamped >= len(f.settleBodies) {
-				clamped = len(f.settleBodies) - 1
-			}
-			body = f.settleBodies[clamped]
+			body = f.settleBodies[clampIndex(idx, len(f.settleBodies))]
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
