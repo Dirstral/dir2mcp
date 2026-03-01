@@ -46,6 +46,11 @@ type UpOptions struct {
 
 var errUnhealthy = errors.New("lighthouse not ready")
 
+const (
+	defaultEndpointCaptureTimeout      = 20 * time.Second
+	defaultEndpointCapturePollInterval = 150 * time.Millisecond
+)
+
 func Up(ctx context.Context, opts UpOptions) error {
 	baseCommand, baseArgs, workDir, err := resolveDir2MCPCommand()
 	if err != nil {
@@ -112,7 +117,7 @@ func Up(ctx context.Context, opts UpOptions) error {
 
 	stopCapture := make(chan struct{})
 	if !deterministic {
-		go captureEndpoint(stopCapture, state.PID, state.RootDir)
+		go captureEndpoint(stopCapture, state.PID, state.RootDir, defaultEndpointCaptureTimeout, defaultEndpointCapturePollInterval)
 	}
 
 	go streamLogs(stdout, "")
@@ -229,7 +234,7 @@ func UpDetached(ctx context.Context, opts UpOptions) error {
 		// - connection.json appears with a valid endpoint
 		// - the managed process exits
 		// - the capture timeout elapses (prevents long-lived goroutine leaks)
-		go captureEndpoint(make(chan struct{}), state.PID, state.RootDir)
+		go captureEndpoint(make(chan struct{}), state.PID, state.RootDir, defaultEndpointCaptureTimeout, defaultEndpointCapturePollInterval)
 	}
 
 	return nil
@@ -541,9 +546,6 @@ func processAlive(pid int) bool {
 	if err != nil {
 		return false
 	}
-	if runtime.GOOS == "windows" {
-		return proc.Signal(syscall.Signal(0)) == nil
-	}
 	return proc.Signal(syscall.Signal(0)) == nil
 }
 
@@ -628,12 +630,18 @@ func resolveRootDir(dirFlag, cmdDir string) string {
 	return cwd
 }
 
-func captureEndpoint(stop <-chan struct{}, pid int, rootDir string) {
+func captureEndpoint(stop <-chan struct{}, pid int, rootDir string, timeout, pollInterval time.Duration) {
 	if pid <= 0 || strings.TrimSpace(rootDir) == "" {
 		return
 	}
-	deadline := time.Now().Add(2 * time.Minute)
-	ticker := time.NewTicker(300 * time.Millisecond)
+	if timeout <= 0 {
+		timeout = defaultEndpointCaptureTimeout
+	}
+	if pollInterval <= 0 {
+		pollInterval = defaultEndpointCapturePollInterval
+	}
+	deadline := time.Now().Add(timeout)
+	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 	for {
 		select {
