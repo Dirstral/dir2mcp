@@ -118,7 +118,7 @@ func TestVerify_NormalizesSchemeInOutgoingPayload(t *testing.T) {
 			t.Fatalf("payment requirements len=%d want=1", len(body.PaymentRequirements))
 		}
 		gotScheme = body.PaymentRequirements[0].Scheme
-		return &http.Response{
+		r := &http.Response{
 			StatusCode: http.StatusOK,
 			Header:     make(http.Header),
 			Body:       io.NopCloser(bytes.NewBufferString(`{"ok":true}`)),
@@ -126,7 +126,9 @@ func TestVerify_NormalizesSchemeInOutgoingPayload(t *testing.T) {
 				Method: http.MethodPost,
 				URL:    &url.URL{Scheme: "https", Host: "api.example.com", Path: "/"},
 			},
-		}, nil
+		}
+		r.Header.Set("Content-Type", "application/json")
+		return r, nil
 	})
 
 	client := x402.NewHTTPClient("https://facilitator.test", "token", &http.Client{Transport: rt})

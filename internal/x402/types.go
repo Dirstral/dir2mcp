@@ -3,6 +3,7 @@ package x402
 import (
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"strings"
 )
 
@@ -21,6 +22,13 @@ const (
 	CodePaymentSettlementFailed       = "PAYMENT_SETTLEMENT_FAILED"
 	CodePaymentSettlementUnavailable  = "PAYMENT_SETTLEMENT_UNAVAILABLE"
 	CodePaymentConfigInvalid          = "PAYMENT_CONFIG_INVALID"
+
+	// X402Version is the current protocol version encoded in the
+	// PAYMENT-REQUIRED header payload.  It’s a small integer that
+	// allows clients/servers to evolve the format in a backwards-
+	// compatible way, and having it as a constant makes updates
+	// straightforward.
+	X402Version = 2
 )
 
 type Requirement struct {
@@ -73,8 +81,14 @@ func (r Requirement) Validate() error {
 	if !IsCAIP2Network(r.Network) {
 		return fmt.Errorf("x402 network must be CAIP-2")
 	}
-	if strings.TrimSpace(r.Amount) == "" {
+	// amount must be a non-empty positive integer.
+	amt := strings.TrimSpace(r.Amount)
+	if amt == "" {
 		return fmt.Errorf("x402 amount is required")
+	}
+	value := new(big.Int)
+	if _, ok := value.SetString(amt, 10); !ok || value.Sign() <= 0 {
+		return fmt.Errorf("x402 amount must be a positive integer")
 	}
 	if strings.TrimSpace(r.Asset) == "" {
 		return fmt.Errorf("x402 asset is required")
@@ -98,7 +112,7 @@ func BuildPaymentRequiredHeaderValue(req Requirement) (string, error) {
 	// assemble a typed payload rather than a loose map; this aids
 	// compile-time checking and prevents inadvertent typos.
 	p := X402Payload{
-		X402Version: 2,
+		X402Version: X402Version,
 		Accept: []AcceptEntry{
 			{
 				Scheme:            strings.ToLower(strings.TrimSpace(req.Scheme)),

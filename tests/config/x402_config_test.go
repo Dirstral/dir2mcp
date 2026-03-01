@@ -116,7 +116,7 @@ func TestValidateX402_InvalidNetwork(t *testing.T) {
 	}
 }
 
-func TestValidateX402_PriceMustBeNonNegativeInteger(t *testing.T) {
+func TestValidateX402_PriceMustBePositiveInteger(t *testing.T) {
 	cfg := config.Default()
 	cfg.X402.Mode = "required"
 	cfg.X402.ToolsCallEnabled = true
@@ -137,9 +137,13 @@ func TestValidateX402_PriceMustBeNonNegativeInteger(t *testing.T) {
 		{"non-integer", "abc"},
 		{"negative", "-100"},
 	} {
+		// capture range variable for the closure
+		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			cfg.X402.PriceAtomic = tc.bad
-			err := cfg.ValidateX402(true)
+			// copy config so subtests don't mutate shared state
+			localCfg := cfg
+			localCfg.X402.PriceAtomic = tc.bad
+			err := localCfg.ValidateX402(true)
 			if err == nil {
 				t.Fatalf("price %q should have failed validation", tc.bad)
 			}
@@ -148,7 +152,7 @@ func TestValidateX402_PriceMustBeNonNegativeInteger(t *testing.T) {
 					t.Fatalf("empty price produced wrong error: %v", err)
 				}
 			} else {
-				if !strings.Contains(err.Error(), "non-negative integer") {
+				if !strings.Contains(err.Error(), "positive integer") {
 					t.Fatalf("unexpected error message for price %q: %v", tc.bad, err)
 				}
 			}
@@ -156,8 +160,8 @@ func TestValidateX402_PriceMustBeNonNegativeInteger(t *testing.T) {
 	}
 
 	cfg.X402.PriceAtomic = "0"
-	if err := cfg.ValidateX402(true); err != nil {
-		t.Fatalf("expected price 0 to be valid, got %v", err)
+	if err := cfg.ValidateX402(true); err == nil {
+		t.Fatal("expected price 0 to be rejected")
 	}
 	cfg.X402.PriceAtomic = "12345"
 	if err := cfg.ValidateX402(true); err != nil {

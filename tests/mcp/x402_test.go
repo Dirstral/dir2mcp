@@ -212,7 +212,15 @@ func TestX402_InitializeAndToolsListRemainUngated(t *testing.T) {
 	server := httptest.NewServer(mcp.NewServer(cfg, nil).Handler())
 	defer server.Close()
 
+	// initializeSession already fails the test if initialization is blocked,
+	// so the mere act of calling it covers the "initialize remains ungated"
+	// portion of this test.  we assert on the returned session ID explicitly
+	// to make the intent crystal clear.
 	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
+	if sessionID == "" {
+		t.Fatal("initialize did not return a session ID; it should remain ungated")
+	}
+
 	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":106,"method":"tools/list","params":{}}`)
 	defer func() { _ = resp.Body.Close() }()
 

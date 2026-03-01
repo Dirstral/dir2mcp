@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -122,11 +123,17 @@ func (c *HTTPClient) do(ctx context.Context, operation, paymentSignature string,
 		if operation == "settle" {
 			code = CodePaymentSettlementUnavailable
 		}
+		retryable := true
+		// context cancellation or deadline errors should not be retried
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) ||
+			(httpReq.Context() != nil && httpReq.Context().Err() != nil) {
+			retryable = false
+		}
 		return nil, &FacilitatorError{
 			Operation: operation,
 			Code:      code,
 			Message:   "facilitator request failed",
-			Retryable: true,
+			Retryable: retryable,
 			Cause:     err,
 		}
 	}
@@ -231,7 +238,10 @@ func extractFacilitatorMessage(payload []byte) string {
 
 	var asObj map[string]interface{}
 	if err := json.Unmarshal(trimmed, &asObj); err != nil {
-		return string(trimmed)
+		// failure to parse means we can't rely on structured keys; return
+		// a truncated, UTF-8-safe rendition of the raw payload so that very
+		// large or sensitive blobs are not accidentally logged or surfaced.
+		return truncateString(string(trimmed), 256)
 	}
 	for _, key := range []string{"message", "error", "reason"} {
 		if raw, ok := asObj[key]; ok {
@@ -246,4 +256,18 @@ func extractFacilitatorMessage(payload []byte) string {
 		}
 	}
 	return ""
+}
+
+// truncateString returns a UTF‑8-safe slice of s limited to max runes. If
+// the input exceeds the limit it appends an ellipsis indicator. This is used
+// when dumping unparsed payloads so we don't expose huge or sensitive content.
+func truncateString(s string, max int) string {
+	if len(s) == 0 || max <= 0 {
+		return ""
+	}
+	runes := []rune(s)
+	if len(runes) <= max {
+		return s
+	}
+	return string(runes[:max]) + "… (truncated)"
 }

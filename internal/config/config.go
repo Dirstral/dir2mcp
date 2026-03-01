@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"log"
 	"math/big"
 	"net"
 	"net/url"
@@ -746,8 +747,13 @@ func applyEnvOverrides(cfg *Config, overrideEnv map[string]string) {
 		cfg.X402.ResourceBaseURL = strings.TrimSpace(raw)
 	}
 	if raw, ok := envLookup("DIR2MCP_X402_TOOLS_CALL_ENABLED", overrideEnv); ok && strings.TrimSpace(raw) != "" {
-		if enabled, err := strconv.ParseBool(strings.TrimSpace(raw)); err == nil {
+		trimmed := strings.TrimSpace(raw)
+		if enabled, err := strconv.ParseBool(trimmed); err == nil {
 			cfg.X402.ToolsCallEnabled = enabled
+		} else {
+			// log warning but do not override the existing value when parsing
+			// fails, keeping the prior setting (which may be the default).
+			log.Printf("warning: invalid boolean for DIR2MCP_X402_TOOLS_CALL_ENABLED: %q (%v)", trimmed, err)
 		}
 	}
 	// prefer the atomic env var name matching the YAML key; fall back for compatibility
@@ -816,7 +822,6 @@ func (c Config) ValidateX402(strict bool) error {
 	if !strict {
 		return nil
 	}
-
 	if strings.TrimSpace(c.X402.FacilitatorURL) == "" {
 		return fmt.Errorf("x402 facilitator URL is required")
 	}
@@ -827,10 +832,10 @@ func (c Config) ValidateX402(strict bool) error {
 	if priceStr == "" {
 		return fmt.Errorf("x402 price is required")
 	}
-	// ensure price is a non-negative integer
+	// ensure price is a positive integer
 	price := new(big.Int)
-	if _, ok := price.SetString(priceStr, 10); !ok || price.Sign() < 0 {
-		return fmt.Errorf("x402 price must be a non-negative integer")
+	if _, ok := price.SetString(priceStr, 10); !ok || price.Sign() <= 0 {
+		return fmt.Errorf("x402 price must be a positive integer")
 	}
 	// normalize scheme input by trimming spaces and converting to lower-case
 	scheme := strings.ToLower(strings.TrimSpace(c.X402.Scheme))

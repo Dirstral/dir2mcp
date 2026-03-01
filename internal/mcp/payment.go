@@ -408,44 +408,53 @@ func (s *Server) appendPaymentLog(event string, data map[string]interface{}) {
 		return
 	}
 
-	// acquire lock and ensure writer is initialized before doing any write.
-	// this prevents a second goroutine from racing in between the nil-check and
-	// the actual write and dropping an entry.
+	// acquire lock and ensure writer is initialized before doing any write.  this
+	// prevents a second goroutine from racing in between the nil-check and the
+	// actual write and dropping an entry.
 	s.paymentLogMu.Lock()
-	// initialize cache if needed
-	if s.paymentLogWriter == nil || s.paymentLogFile == nil {
+	defer s.paymentLogMu.Unlock()
+
+	// helper that (re)initializes the cached file/writer; caller must hold mutex.
+	initWriter := func() error {
 		if err := os.MkdirAll(filepath.Dir(s.paymentLogPath), 0o755); err != nil {
-			s.paymentLogMu.Unlock()
-			s.emitPaymentLogWarning(err)
-			// fallback write
-			f, err2 := os.OpenFile(s.paymentLogPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
-			if err2 != nil {
-				s.emitPaymentLogWarning(err2)
-				return
-			}
-			if err2 := writeLogEntry(f, raw); err2 != nil {
-				s.emitPaymentLogWarning(err2)
-			}
-			_ = f.Close()
-			return
+			return err
 		}
 		f, err := os.OpenFile(s.paymentLogPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 		if err != nil {
-			s.paymentLogMu.Unlock()
+			return err
+		}
+		s.paymentLogFile = f
+		s.paymentLogWriter = bufio.NewWriter(f)
+		return nil
+	}
+
+	if s.paymentLogWriter == nil || s.paymentLogFile == nil {
+		if err := initWriter(); err != nil {
 			s.emitPaymentLogWarning(err)
 			return
 		}
-		w := bufio.NewWriter(f)
-		s.paymentLogFile = f
-		s.paymentLogWriter = w
 	}
-	// write the entry while still holding the lock
+
+	// attempt write; on error try to recover once
 	if err := writeLogEntry(s.paymentLogWriter, raw); err != nil {
-		s.paymentLogMu.Unlock()
 		s.emitPaymentLogWarning(err)
-		return
+		// persistent writer failure; try to re-create writer & retry once
+		if s.paymentLogWriter != nil {
+			// drop the buffered writer; there is nothing to close
+			s.paymentLogWriter = nil
+		}
+		if s.paymentLogFile != nil {
+			_ = s.paymentLogFile.Close()
+			s.paymentLogFile = nil
+		}
+		if err2 := initWriter(); err2 != nil {
+			s.emitPaymentLogWarning(err2)
+			return
+		}
+		if err2 := writeLogEntry(s.paymentLogWriter, raw); err2 != nil {
+			s.emitPaymentLogWarning(err2)
+		}
 	}
-	s.paymentLogMu.Unlock()
 
 	// done successfully
 }

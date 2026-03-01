@@ -701,13 +701,13 @@ func isOriginAllowed(origin string, allowlist []string) bool {
 	return false
 }
 
-// Close flushes and closes any cached payment log writer/file. It is safe to call
-// multiple times and may be used during server shutdown to ensure durability.
+// Close flushes and closes any cached payment log writer and file.
 //
-// The previous implementation ignored the error returned by Flush; this method
-// now captures that error and combines it with any error from closing the
-// underlying file. Both writer and file are cleared under the mutex regardless
-// of error, and a combined error is returned if either operation fails.
+// The method is safe to call multiple times (idempotent) and is typically
+// invoked during server shutdown to guarantee that any buffered payments are
+// persisted. It acquires the paymentLogMu mutex, clears
+// s.paymentLogWriter and s.paymentLogFile under that lock, and returns a
+// combined error using errors.Join if flushing or closing fails.
 func (s *Server) Close() error {
 	s.paymentLogMu.Lock()
 	defer s.paymentLogMu.Unlock()

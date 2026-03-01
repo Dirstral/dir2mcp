@@ -368,7 +368,12 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 			writef(a.stderr, "failed to read x402 facilitator token file: %v\n", err)
 			return exitConfigInvalid
 		}
-		cfg.X402.FacilitatorToken = strings.TrimSpace(string(data))
+		token := strings.TrimSpace(string(data))
+		if token == "" {
+			writef(a.stderr, "x402 facilitator token file is empty\n")
+			return exitConfigInvalid
+		}
+		cfg.X402.FacilitatorToken = token
 	} else if token := strings.TrimSpace(os.Getenv(x402FacilitatorTokenEnvVar)); token != "" {
 		cfg.X402.FacilitatorToken = token
 	} else if strings.TrimSpace(opts.x402FacilitatorToken) != "" {
@@ -433,12 +438,14 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 		writef(a.stderr, "create state dir: %v\n", err)
 		return exitRootInaccessible
 	}
-	mode := strings.TrimSpace(cfg.X402.Mode)
-	if mode != "" && !strings.EqualFold(mode, "off") {
-		if err := os.MkdirAll(filepath.Join(cfg.StateDir, "payments"), 0o755); err != nil {
-			writef(a.stderr, "create payments dir: %v\n", err)
-			return exitRootInaccessible
-		}
+	// create payments subdirectory while x402 configuration has been
+	// validated above. creating the state directory first ensures the
+	// parent exists. the call is intentionally unconditional here so that a
+	// valid configuration (including mode="off") never leaves an orphaned
+	// checker running beforehand.
+	if err := os.MkdirAll(filepath.Join(cfg.StateDir, "payments"), 0o755); err != nil {
+		writef(a.stderr, "create payments dir: %v\n", err)
+		return exitRootInaccessible
 	}
 
 	nonInteractiveMode := opts.nonInteractive || !isTerminal(os.Stdin) || !isTerminal(os.Stdout)

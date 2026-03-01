@@ -970,6 +970,12 @@ func (s *Server) handleTranscribeTool(ctx context.Context, args map[string]inter
 		return toolCallResult{}, &toolExecutionError{Code: "DOC_TYPE_UNSUPPORTED", Message: "document is not audio", Retryable: false}
 	}
 
+	// if a language override is provided we always force a retranscription.
+	// this ensures that callers can request a specific language, but note that
+	// even if a cached transcript already exists the request will re-run the
+	// transcription step. repeated calls with the same language value therefore
+	// defeat caching and may incur extra API/cost overhead; clients should avoid
+	// doing so when possible.
 	if strings.TrimSpace(language) != "" {
 		retranscribe = true
 	}
@@ -1107,7 +1113,8 @@ func (s *Server) handleAnnotateTool(ctx context.Context, args map[string]interfa
 		return toolCallResult{}, &toolExecutionError{Code: "ANNOTATE_FAILED", Message: parseErr.Error(), Retryable: false}
 	}
 
-	// store is already validated above
+	// create a request-scoped ingest service to avoid cross-request mutation of
+	// OCR/transcriber settings under concurrency.
 	ing := ingest.NewService(s.cfg, s.store)
 	preview, persistErr := ing.StoreAnnotationRepresentations(ctx, doc, annotationObj, indexFlattenedText)
 	if persistErr != nil {
@@ -1444,7 +1451,18 @@ func (s *Server) ensureTranscriptForAudioDoc(ctx context.Context, doc model.Docu
 		}
 	}
 
-	cachePath := filepath.Join(s.cfg.StateDir, "cache", "transcribe", ingest.ComputeContentHash(content)+".txt")
+	// construct cache path using a hash of the content and the requested
+	// language. without the language there was a collision: a transcript
+	// generated in one language could be reused for a later request in a
+	// different language. adding the normalized language string to the
+	// filename ensures each locale has its own entry. if language is empty we
+	// fall back to a content-only key, meaning requests without a language
+	// still share a cache file.
+	langSuffix := ""
+	if l := strings.TrimSpace(language); l != "" {
+		langSuffix = "-" + strings.ToLower(l)
+	}
+	cachePath := filepath.Join(s.cfg.StateDir, "cache", "transcribe", ingest.ComputeContentHash(content)+langSuffix+".txt")
 	// Determine whether we already have a usable cache file. We initially
 	// consider the cache "valid" if it exists on disk. When a retranscribe is
 	// requested we treat the cached file as stale regardless of whether it
@@ -1487,10 +1505,6 @@ func (s *Server) ensureTranscriptForAudioDoc(ctx context.Context, doc model.Docu
 		}
 		indexed = true
 	}
-
-	// second return value indicates whether we computed a fresh transcript
-	// (true when the cache was not valid). cacheValid is false when either the
-	// file never existed or retranscribe forced invalidation.
 	return transcript, !cacheValid, indexed, nil
 }
 

@@ -69,6 +69,106 @@ func TestAppendPaymentLogCachingAndClose(t *testing.T) {
 	}
 }
 
+func TestAppendPaymentLogRecovery(t *testing.T) {
+	// simulate a writer that fails on first write but can be reopened successfully
+	tmp := t.TempDir()
+	cfg := config.Default()
+	cfg.AuthMode = "none"
+
+	s := NewServer(cfg, nil)
+	s.paymentLogPath = filepath.Join(tmp, "payments", "settlement.log")
+
+	// create directory and an initial file so we can assign a real *os.File
+	if err := os.MkdirAll(filepath.Dir(s.paymentLogPath), 0o755); err != nil {
+		t.Fatalf("setup mkdirall failed: %v", err)
+	}
+	f, err := os.OpenFile(s.paymentLogPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatalf("setup open file failed: %v", err)
+	}
+	// assign a bad writer backed by a valid file; the write should fail and
+	// trigger recovery logic that reopens the path again with a good writer.
+	s.paymentLogFile = f
+	s.paymentLogWriter = bufio.NewWriter(badWriter{})
+
+	var events []map[string]interface{}
+	s.eventEmitter = func(level, event string, data interface{}) {
+		events = append(events, map[string]interface{}{"level": level, "event": event, "data": data})
+	}
+
+	// perform append; recovery should occur internally
+	s.appendPaymentLog("evt", map[string]interface{}{"a": 1})
+
+	// after recovery the writer and file should be non-nil
+	if s.paymentLogWriter == nil || s.paymentLogFile == nil {
+		t.Fatalf("expected writer/file to be reinitialized after recovery")
+	}
+
+	// at least one warning should have been emitted about the initial write
+	if len(events) == 0 {
+		t.Fatalf("expected a warning event during recovery")
+	}
+
+	// read the file and ensure the entry was written
+	data, err := os.ReadFile(s.paymentLogPath)
+	if err != nil {
+		t.Fatalf("failed to read log file: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("wrong number of log lines: got %d, want 1", len(lines))
+	}
+}
+
+func TestAppendPaymentLogMkdirAllFailure(t *testing.T) {
+	// MkdirAll should fail when a regular file exists at the target path; no
+	// fallback write should occur and no file should be created.
+	tmp := t.TempDir()
+	cfg := config.Default()
+	cfg.AuthMode = "none"
+
+	s := NewServer(cfg, nil)
+	s.paymentLogPath = filepath.Join(tmp, "payments", "settlement.log")
+
+	// create a file at the directory location so MkdirAll errors
+	if err := os.WriteFile(filepath.Join(tmp, "payments"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("setup failure: %v", err)
+	}
+
+	var events []map[string]interface{}
+	s.eventEmitter = func(level, event string, data interface{}) {
+		events = append(events, map[string]interface{}{"level": level, "event": event, "data": data})
+	}
+
+	s.appendPaymentLog("evt", nil)
+
+	// directory should still be a regular file
+	fi, err := os.Stat(filepath.Join(tmp, "payments"))
+	if err != nil {
+		t.Fatalf("stat failed: %v", err)
+	}
+	if fi.IsDir() {
+		t.Fatalf("expected payments to remain a file, not a directory")
+	}
+
+	// the log file should not exist because we never opened it.  stat can
+	// fail because the parent component is a regular file rather than a
+	// directory; treat that case as success too.
+	if fi, err := os.Stat(s.paymentLogPath); err == nil {
+		t.Logf("unexpected log path exists: %v (isdir=%v)", fi.Name(), fi.IsDir())
+		t.Fatalf("expected log file to not exist")
+	} else if !os.IsNotExist(err) && !strings.Contains(err.Error(), "not a directory") {
+		t.Fatalf("stat on log path returned unexpected error: %v", err)
+	}
+
+	if len(events) == 0 {
+		t.Fatalf("expected at least one warning event when MkdirAll fails")
+	}
+	for i, e := range events {
+		t.Logf("event %d: %+v", i, e)
+	}
+}
+
 func TestCloseErrorsPropagated(t *testing.T) {
 	// create a server and manually assign a writer that will return an error
 	// when flushed and a file that is already closed so Close() on it fails.
