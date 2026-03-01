@@ -9,7 +9,7 @@ import (
 	"dir2mcp/internal/cli"
 )
 
-func TestUpEmbedModelFlags_IsAcceptedByCLI(t *testing.T) {
+func TestUpModelFlags_IsAcceptedByCLI(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("MISTRAL_API_KEY", "")
 

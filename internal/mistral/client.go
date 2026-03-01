@@ -727,9 +727,11 @@ func (c *Client) transcribeOnce(ctx context.Context, relPath string, data []byte
 			Cause:     err,
 		}
 	}
-	modelName := DefaultTranscribeModel
-	if strings.TrimSpace(c.DefaultTranscribeModel) != "" {
-		modelName = c.DefaultTranscribeModel
+	// model selection mirrors OCR logic: prefer the client-configured value
+	// and only fall back to the package constant if the field is empty.
+	modelName := strings.TrimSpace(c.DefaultTranscribeModel)
+	if modelName == "" {
+		modelName = DefaultTranscribeModel
 	}
 	if err := writer.WriteField("model", modelName); err != nil {
 		return "", &model.ProviderError{

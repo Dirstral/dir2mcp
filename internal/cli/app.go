@@ -292,8 +292,8 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	if opts.embedModelCode != "" {
 		cfg.EmbedModelCode = opts.embedModelCode
 	}
-	if opts.chatModel != "" {
-		cfg.ChatModel = opts.chatModel
+	if strings.TrimSpace(opts.chatModel) != "" {
+		cfg.ChatModel = strings.TrimSpace(opts.chatModel)
 	}
 	if opts.public {
 		cfg.Public = true

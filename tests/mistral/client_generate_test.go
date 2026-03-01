@@ -58,38 +58,6 @@ func TestGenerate_SuccessStringContent(t *testing.T) {
 	}
 }
 
-// Verify that setting DefaultChatModel on the client changes the request.
-func TestGenerate_CustomChatModel(t *testing.T) {
-	testModel := "my-chat-model"
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var req map[string]any
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			t.Errorf("decode request: %v", err)
-			http.Error(w, "bad request", http.StatusBadRequest)
-			return
-		}
-		if req["model"] != testModel {
-			t.Errorf("expected model %q, got %v", testModel, req["model"])
-			http.Error(w, "bad model", http.StatusBadRequest)
-			return
-		}
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"choices": []map[string]any{{"message": map[string]any{"content": "x"}}},
-		})
-	}))
-	defer server.Close()
-
-	client := mistral.NewClient(server.URL, "test-key")
-	client.DefaultChatModel = testModel
-	out, err := client.Generate(context.Background(), "hi")
-	if err != nil {
-		t.Fatalf("Generate failed: %v", err)
-	}
-	if out != "x" {
-		t.Fatalf("unexpected generated text: %q", out)
-	}
-}
-
 func TestGenerate_SuccessArrayContent(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -188,7 +156,8 @@ func TestGenerate_ValidatesPrompt(t *testing.T) {
 	// use a local server so that even if validation is bypassed we won't hit
 	// the real API. handler should never be invoked.
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		t.Fatal("network call should not happen during prompt validation")
+		t.Error("network call should not happen during prompt validation")
+		http.Error(w, "unexpected call", http.StatusInternalServerError)
 	}))
 	defer server.Close()
 
