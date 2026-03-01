@@ -140,6 +140,44 @@ func TestUpCreatesSecretTokenAndConnectionFile(t *testing.T) {
 	}
 }
 
+// Up command prints a warning when both a direct facilitator token and a
+// token file are supplied; the file takes precedence and the direct flag
+// is ignored. This exercises the new CLI warning logic.
+func TestUpWarnsAboutFacilitatorTokenConflict(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("MISTRAL_API_KEY", "test-key")
+	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
+
+	// prepare a placeholder token file
+	tokenPath := filepath.Join(tmp, "fac.txt")
+	if err := os.WriteFile(tokenPath, []byte("filetoken"), 0o600); err != nil {
+		t.Fatalf("write token file: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := cli.NewAppWithIO(&stdout, &stderr)
+
+	withWorkingDir(t, tmp, func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		code := app.RunWithContext(ctx, []string{
+			"up",
+			"--listen", "127.0.0.1:0",
+			"--x402-facilitator-token-file", tokenPath,
+			"--x402-facilitator-token", "ignored",
+		})
+		if code != 0 {
+			t.Fatalf("unexpected exit code: got=%d stderr=%s", code, stderr.String())
+		}
+	})
+
+	if !strings.Contains(stderr.String(), "warning: --x402-facilitator-token ignored; using --x402-facilitator-token-file") {
+		t.Fatalf("expected warning about token conflict, got stderr: %s", stderr.String())
+	}
+}
+
 func TestUpNonInteractiveMissingConfigReturnsExitCode2(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("MISTRAL_API_KEY", "")
@@ -614,6 +652,86 @@ func TestUpPublicAuthNoneAllowedWithForceInsecure(t *testing.T) {
 			t.Fatalf("unexpected exit code: got=%d stderr=%s", code, stderr.String())
 		}
 	})
+}
+
+func TestUpX402RequiredMissingFieldsFailsFast(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("MISTRAL_API_KEY", "test-key")
+	// ensure previous tests don't leak auth token
+	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := cli.NewAppWithIO(&stdout, &stderr)
+
+	var code int
+	withWorkingDir(t, tmp, func() {
+		code = app.RunWithContext(context.Background(), []string{
+			"up",
+			"--x402", "required",
+			"--x402-resource-base-url", "https://resource.example.com",
+			"--x402-network", "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+			"--x402-asset", "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+			"--x402-pay-to", "8N5A4rQU8vJrQmH3iiA7kE4m1df4WeyueXQqGb4G9tTj",
+			// Intentionally missing --x402-facilitator-url.
+		})
+	})
+
+	if code != 2 {
+		t.Fatalf("unexpected exit code: got=%d want=2 stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "x402 facilitator URL is required") {
+		t.Fatalf("expected x402 validation error, got: %s", stderr.String())
+	}
+}
+
+func TestUpX402OnAllowsMissingFields(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("MISTRAL_API_KEY", "test-key")
+	// ensure no leftover auth token influences behaviour
+	t.Setenv("DIR2MCP_AUTH_TOKEN", "")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := cli.NewAppWithIO(&stdout, &stderr)
+
+	withWorkingDir(t, tmp, func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		code := app.RunWithContext(ctx, []string{
+			"up",
+			"--x402", "on",
+			"--listen", "127.0.0.1:0",
+			"--json",
+		})
+		if code != 0 {
+			t.Fatalf("unexpected exit code: got=%d stderr=%s", code, stderr.String())
+		}
+	})
+
+	// verify server_started event in NDJSON output
+	lines := scanLines(t, stdout.String())
+	if len(lines) == 0 {
+		t.Fatal("expected NDJSON output")
+	}
+
+	found := false
+	for _, line := range lines {
+		var ev map[string]interface{}
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			t.Fatalf("invalid NDJSON line: %q err=%v", line, err)
+		}
+		if ev["event"] != "server_started" {
+			continue
+		}
+		found = true
+		// break early once we locate the desired event
+		break
+	}
+	if !found {
+		t.Fatal("missing server_started event")
+	}
 }
 
 func TestUpPublicRespectsExplicitListen(t *testing.T) {

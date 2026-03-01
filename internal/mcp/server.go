@@ -1,18 +1,22 @@
 package mcp
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -20,6 +24,7 @@ import (
 	"dir2mcp/internal/appstate"
 	"dir2mcp/internal/config"
 	"dir2mcp/internal/model"
+	"dir2mcp/internal/x402"
 )
 
 const (
@@ -30,6 +35,11 @@ const (
 	sessionCleanupInterval = time.Hour
 	rateLimitCleanupEvery  = 5 * time.Minute
 	rateLimitBucketMaxAge  = 10 * time.Minute
+	// Replay outcomes are only useful while signatures are still valid.
+	// Keep a small buffer over common short-lived signature windows.
+	paymentOutcomeTTL             = 10 * time.Minute
+	paymentOutcomeCleanupInterval = time.Minute
+	paymentOutcomeMaxEntries      = 5000
 )
 
 // DefaultSearchK is used when tools/call search arguments omit k or provide
@@ -52,6 +62,32 @@ type Server struct {
 	sessions  map[string]time.Time
 
 	rateLimiter *ipRateLimiter
+
+	x402Client      *x402.HTTPClient
+	x402Requirement x402.Requirement
+	x402Enabled     bool
+	paymentLogPath  string
+	paymentMu       sync.RWMutex
+	paymentOutcomes map[string]paymentExecutionOutcome
+	paymentTTL      time.Duration
+	paymentMaxItems int
+
+	// cached writer used by appendPaymentLog. protected by paymentLogMu.
+	paymentLogMu     sync.Mutex
+	paymentLogFile   *os.File
+	paymentLogWriter *bufio.Writer
+
+	// per-execution-key locks used to serialize payment handling for identical
+	// signatures+params.  Map is protected by execMu.  execCond is a condition
+	// variable that goroutines can wait on when they need to observe changes to
+	// the ref counts stored in execKeyMu.  It is always created with execMu as
+	// its Locker (see NewServer) so callers must hold execMu before calling
+	// Wait/Signal/Broadcast.
+	execMu    sync.Mutex
+	execCond  *sync.Cond
+	execKeyMu map[string]*keyMutex
+
+	eventEmitter func(level, event string, data interface{})
 }
 
 type rpcRequest struct {
@@ -74,6 +110,21 @@ type rpcError struct {
 	Data    *rpcErrorData `json:"data,omitempty"`
 }
 
+// rpcErrorData is attached to an rpcError when additional metadata is
+// required by the JSON-RPC response.  All fields are exported so that the
+// structure can be marshaled to JSON; presently the type contains only
+// primitive values.  The copy helper in mcp/payment.go relies on this
+// property to produce an independent duplicate.  If new fields are added that
+// are themselves reference types (slices, maps, pointers, etc.) the cloning
+// logic must be kept in sync (the deep-copy performed via JSON round-trip
+// already handles such extensions, so tests should guard against regressions).
+//
+// Keeping rpcErrorData simple helps avoid accidental sharing of mutable
+// state between the original and any clones.
+//
+// NOTE: because we use encoding/json for the deep copy, the layout of this
+// struct must remain JSON-encodable.  Adding unexported fields or custom
+// types will require updating cloneRPCError accordingly.
 type rpcErrorData struct {
 	Code      string `json:"code"`
 	Retryable bool   `json:"retryable"`
@@ -112,13 +163,25 @@ func WithTTS(tts TTSSynthesizer) ServerOption {
 	}
 }
 
+func WithEventEmitter(fn func(level, event string, data interface{})) ServerOption {
+	return func(s *Server) {
+		s.eventEmitter = fn
+	}
+}
+
 func NewServer(cfg config.Config, retriever model.Retriever, opts ...ServerOption) *Server {
 	s := &Server{
-		cfg:       cfg,
-		authToken: loadAuthToken(cfg),
-		retriever: retriever,
-		sessions:  make(map[string]time.Time),
+		cfg:             cfg,
+		authToken:       loadAuthToken(cfg),
+		retriever:       retriever,
+		sessions:        make(map[string]time.Time),
+		paymentOutcomes: make(map[string]paymentExecutionOutcome),
+		paymentTTL:      paymentOutcomeTTL,
+		paymentMaxItems: paymentOutcomeMaxEntries,
+		execKeyMu:       make(map[string]*keyMutex),
 	}
+	// cond must be set after the zero-value mutex has been created above
+	s.execCond = sync.NewCond(&s.execMu)
 	for _, opt := range opts {
 		if opt != nil {
 			opt(s)
@@ -130,6 +193,7 @@ func NewServer(cfg config.Config, retriever model.Retriever, opts ...ServerOptio
 	if cfg.Public && cfg.RateLimitRPS > 0 && cfg.RateLimitBurst > 0 {
 		s.rateLimiter = newIPRateLimiter(float64(cfg.RateLimitRPS), cfg.RateLimitBurst, cfg.TrustedProxies)
 	}
+	s.initPaymentConfig()
 	s.tools = s.buildToolRegistry()
 	return s
 }
@@ -149,8 +213,8 @@ func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 		if origin != "" && isOriginAllowed(origin, s.cfg.AllowedOrigins) {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, MCP-Protocol-Version, MCP-Session-Id")
-			w.Header().Set("Access-Control-Expose-Headers", "MCP-Session-Id")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, MCP-Protocol-Version, MCP-Session-Id, PAYMENT-SIGNATURE")
+			w.Header().Set("Access-Control-Expose-Headers", "MCP-Session-Id, PAYMENT-REQUIRED, PAYMENT-RESPONSE")
 			w.Header().Set("Access-Control-Max-Age", "86400")
 			w.Header().Set("Vary", "Origin")
 		}
@@ -181,6 +245,14 @@ func (s *Server) RunOnListener(ctx context.Context, ln net.Listener) error {
 	if ln == nil {
 		return errors.New("nil listener passed to RunOnListener")
 	}
+	// make sure any cached payment-log resources are flushed when the server
+	// stops; the deferred call is harmless if nothing was opened.  Log any
+	// error instead of silently discarding it.
+	defer func() {
+		if err := s.Close(); err != nil {
+			log.Printf("error closing payment log: %v", err)
+		}
+	}()
 
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -188,6 +260,9 @@ func (s *Server) RunOnListener(ctx context.Context, ln net.Listener) error {
 	go s.runSessionCleanup(runCtx)
 	if s.rateLimiter != nil {
 		go s.runRateLimitCleanup(runCtx)
+	}
+	if s.x402Enabled {
+		go s.runPaymentOutcomeCleanup(runCtx)
 	}
 
 	server := &http.Server{
@@ -302,7 +377,7 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusAccepted)
 			return
 		}
-		s.handleToolsCall(r.Context(), w, req.Params, id)
+		s.handleToolsCallRequest(r.Context(), w, r, req.Params, id)
 	default:
 		if !hasID {
 			w.WriteHeader(http.StatusAccepted)
@@ -527,6 +602,70 @@ func (s *Server) cleanupExpiredSessions(now time.Time) {
 	}
 }
 
+func (s *Server) runPaymentOutcomeCleanup(ctx context.Context) {
+	ticker := time.NewTicker(paymentOutcomeCleanupInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-ticker.C:
+			s.cleanupPaymentOutcomes(now)
+		}
+	}
+}
+
+func (s *Server) cleanupPaymentOutcomes(now time.Time) {
+	s.paymentMu.Lock()
+	defer s.paymentMu.Unlock()
+	s.prunePaymentOutcomesLocked(now)
+}
+
+func (s *Server) prunePaymentOutcomesLocked(now time.Time) {
+	ttl := s.paymentTTL
+	if ttl <= 0 {
+		ttl = paymentOutcomeTTL
+	}
+
+	cutoff := now.Add(-ttl)
+	for key, outcome := range s.paymentOutcomes {
+		if outcome.UpdatedAt.IsZero() || outcome.UpdatedAt.Before(cutoff) {
+			delete(s.paymentOutcomes, key)
+		}
+	}
+
+	maxItems := s.paymentMaxItems
+	if maxItems <= 0 {
+		maxItems = paymentOutcomeMaxEntries
+	}
+	if len(s.paymentOutcomes) <= maxItems {
+		return
+	}
+
+	type entry struct {
+		key string
+		ts  time.Time
+	}
+	entries := make([]entry, 0, len(s.paymentOutcomes))
+	for key, outcome := range s.paymentOutcomes {
+		entries = append(entries, entry{key: key, ts: outcome.UpdatedAt})
+	}
+	// ensure deterministic eviction order when timestamps are equal by
+	// performing a stable sort and using the key as a tie-breaker.
+	sort.SliceStable(entries, func(i, j int) bool {
+		if entries[i].ts.Equal(entries[j].ts) {
+			return entries[i].key < entries[j].key
+		}
+		return entries[i].ts.Before(entries[j].ts)
+	})
+
+	toDrop := len(entries) - maxItems
+	for i := 0; i < toDrop; i++ {
+		delete(s.paymentOutcomes, entries[i].key)
+	}
+}
+
 func generateSessionID() (string, error) {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
@@ -596,4 +735,37 @@ func isOriginAllowed(origin string, allowlist []string) bool {
 		}
 	}
 	return false
+}
+
+// Close flushes and closes any cached payment log writer and file.
+//
+// The method is safe to call multiple times (idempotent) and is typically
+// invoked during server shutdown to guarantee that any buffered payments are
+// persisted. It acquires the paymentLogMu mutex, clears
+// s.paymentLogWriter and s.paymentLogFile under that lock, and returns a
+// combined error using errors.Join if flushing or closing fails.
+func (s *Server) Close() error {
+	s.paymentLogMu.Lock()
+	defer s.paymentLogMu.Unlock()
+
+	var errs []error
+	if s.paymentLogWriter != nil {
+		if err := s.paymentLogWriter.Flush(); err != nil {
+			errs = append(errs, fmt.Errorf("payment log flush: %w", err))
+		}
+		s.paymentLogWriter = nil
+	}
+	if s.paymentLogFile != nil {
+		// ensure on-disk durability: sync before closing.
+		if err := s.paymentLogFile.Sync(); err != nil {
+			errs = append(errs, fmt.Errorf("payment log file sync: %w", err))
+		}
+		if err := s.paymentLogFile.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("payment log file close: %w", err))
+		}
+		s.paymentLogFile = nil
+	}
+	// errors.Join will return nil when "errs" is empty, which keeps behavior
+	// consistent with the previous implementation.
+	return errors.Join(errs...)
 }

@@ -3,6 +3,7 @@ package tests
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"dir2mcp/internal/config"
@@ -154,6 +155,99 @@ func TestLoad_DefaultElevenLabsVoiceID(t *testing.T) {
 		}
 		if cfg.ElevenLabsTTSVoiceID != "JBFqnCBsd6RMkjVDRZzb" {
 			t.Fatalf("unexpected default elevenlabs voice id: %q", cfg.ElevenLabsTTSVoiceID)
+		}
+	})
+}
+
+func TestLoad_X402FacilitatorTokenEnvOnly(t *testing.T) {
+	// split into explicit subtests for clarity
+	// each subtest gets its own temporary working directory and environment
+
+	t.Run("file-only", func(t *testing.T) {
+		tmp := t.TempDir()
+		testutil.WithWorkingDir(t, tmp, func() {
+			// write a config file containing the sensitive field; it should be ignored
+			writeFile(t, filepath.Join(tmp, ".dir2mcp.yaml"), "x402_facilitator_token: should-not-be-used\n")
+			// ensure the env var is blank so loader falls back to default
+			t.Setenv("DIR2MCP_X402_FACILITATOR_TOKEN", "")
+			cfg, err := config.Load("")
+			if err != nil {
+				t.Fatalf("Load failed: %v", err)
+			}
+			if cfg.X402.FacilitatorToken != "" {
+				t.Fatalf("expected empty token when config file provides it, got %q", cfg.X402.FacilitatorToken)
+			}
+		})
+	})
+
+	t.Run("env-override", func(t *testing.T) {
+		tmp := t.TempDir()
+		testutil.WithWorkingDir(t, tmp, func() {
+			// config file still contains a value that should be ignored
+			writeFile(t, filepath.Join(tmp, ".dir2mcp.yaml"), "x402_facilitator_token: should-not-be-used\n")
+			// set the actual override
+			t.Setenv("DIR2MCP_X402_FACILITATOR_TOKEN", "envval")
+			cfg, err := config.Load("")
+			if err != nil {
+				t.Fatalf("Load failed: %v", err)
+			}
+			if cfg.X402.FacilitatorToken != "envval" {
+				t.Fatalf("expected envval, got %q", cfg.X402.FacilitatorToken)
+			}
+		})
+	})
+
+	t.Run("env-cleared", func(t *testing.T) {
+		tmp := t.TempDir()
+		testutil.WithWorkingDir(t, tmp, func() {
+			// config file again contains a token that should be ignored
+			writeFile(t, filepath.Join(tmp, ".dir2mcp.yaml"), "x402_facilitator_token: should-not-be-used\n")
+			// simulate a previously-set environment variable, then remove it.
+			// we call Setenv first so the testing harness tracks the variable, but
+			// immediately Unsetenv to ensure config.Load("") sees no value.  The
+			// subtest is named "env-cleared" and below we assert that
+			// cfg.X402.FacilitatorToken ends up empty once the env var is removed.
+			t.Setenv("DIR2MCP_X402_FACILITATOR_TOKEN", "envval")
+			// clearing should be done with Unsetenv so Load() sees no value
+			if err := os.Unsetenv("DIR2MCP_X402_FACILITATOR_TOKEN"); err != nil {
+				t.Fatalf("Unsetenv failed: %v", err)
+			}
+			cfg, err := config.Load("")
+			if err != nil {
+				t.Fatalf("Load failed: %v", err)
+			}
+			if cfg.X402.FacilitatorToken != "" {
+				t.Fatalf("expected token to be empty after env cleared, got %q", cfg.X402.FacilitatorToken)
+			}
+		})
+	})
+}
+
+func TestLoad_InvalidX402ToolsCallEnabledEnvWarning(t *testing.T) {
+	tmp := t.TempDir()
+
+	testutil.WithWorkingDir(t, tmp, func() {
+		t.Setenv("DIR2MCP_X402_TOOLS_CALL_ENABLED", "notabool")
+		cfg, err := config.Load("")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		// default should remain true
+		if !cfg.X402.ToolsCallEnabled {
+			t.Fatalf("expected default ToolsCallEnabled=true, got %v", cfg.X402.ToolsCallEnabled)
+		}
+		if len(cfg.Warnings) == 0 {
+			t.Fatal("expected at least one warning")
+		}
+		found := false
+		for _, w := range cfg.Warnings {
+			if strings.Contains(w.Error(), "DIR2MCP_X402_TOOLS_CALL_ENABLED") {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("warning list did not contain expected message: %v", cfg.Warnings)
 		}
 	})
 }

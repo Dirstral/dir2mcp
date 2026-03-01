@@ -204,7 +204,12 @@ Prepare endpoint + token:
 
 ```bash
 BASE_URL="https://mcp.example.com/mcp"
-TOKEN="${DIR2MCP_AUTH_TOKEN:-$(cat .dir2mcp/secret.token)}"
+# read token, fail explicitly if file inaccessible
+TOKEN="${DIR2MCP_AUTH_TOKEN:-$(cat .dir2mcp/secret.token 2>/dev/null)}"
+if [ -z "$TOKEN" ]; then
+  echo "error: could not read auth token (check .dir2mcp/secret.token or DIR2MCP_AUTH_TOKEN)" >&2
+  exit 1
+fi
 ```
 
 1. Initialize and capture `MCP-Session-Id`:
@@ -212,15 +217,30 @@ TOKEN="${DIR2MCP_AUTH_TOKEN:-$(cat .dir2mcp/secret.token)}"
 ```bash
 INIT_HEADERS="$(mktemp)"
 INIT_BODY="$(mktemp)"
+# ensure temporary headers/body files are removed on exit or interrupt
+trap 'rm -f "$INIT_HEADERS" "$INIT_BODY"' EXIT
 curl -sS -D "$INIT_HEADERS" -o "$INIT_BODY" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $TOKEN" \
   -H "MCP-Protocol-Version: 2025-11-25" \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
-  "$BASE_URL"
+  "$BASE_URL" || {
+    echo "error: initialize request failed" >&2
+    cat "$INIT_HEADERS" >&2
+    cat "$INIT_BODY" >&2
+    exit 1
+}
 
-SESSION_ID="$(awk -F': ' 'BEGIN{IGNORECASE=1} /^MCP-Session-Id:/{gsub("\r","",$2); print $2; exit}' "$INIT_HEADERS")"
-test -n "$SESSION_ID"
+# HTTP header names are case-insensitive per RFC 7230.  The awk
+# command lowercases each header line, matches a prefix of
+# "mcp-session-id:", strips any CR characters from the second field,
+# and then prints that field (the session ID) once found.
+SESSION_ID="$(awk -F': ' 'tolower($0) ~ /^mcp-session-id:/{gsub("\r","",$2); print $2; exit}' "$INIT_HEADERS")"
+if [ -z "$SESSION_ID" ]; then
+  echo "error: could not extract MCP-Session-Id from initialization response" >&2
+  cat "$INIT_HEADERS" >&2
+  exit 1
+fi
 ```
 
 2. Verify tool discovery (`tools/list`):
