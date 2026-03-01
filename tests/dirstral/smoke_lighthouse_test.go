@@ -3,6 +3,7 @@ package test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -111,8 +112,11 @@ func isAddressInUseError(err error) bool {
 	if err == nil {
 		return false
 	}
+	if errors.Is(err, syscall.EADDRINUSE) {
+		return true
+	}
 	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "address already in use") || strings.Contains(msg, "bind:") || strings.Contains(msg, "exit status 1")
+	return strings.Contains(msg, "address already in use") || strings.Contains(msg, "bind:")
 }
 
 func waitFor(t *testing.T, timeout time.Duration, ok func() bool) {
@@ -227,7 +231,7 @@ func runFakeDir2MCPBinary() error {
 	errCh := make(chan error, 1)
 	go func() {
 		err := server.ListenAndServe()
-		if err != nil && err != http.ErrServerClosed {
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 			return
 		}
