@@ -62,10 +62,13 @@ func (s *fakeIngestStore) InsertChunkWithSpans(_ context.Context, chunk model.Ch
 		return 0, fmt.Errorf("expected %d span(s), got %d", s.expectedSpanCount, len(spans))
 	}
 
+	// assign an ID for correlation purposes
+	chunk.ChunkID = uint64(len(s.chunks) + 1)
+
 	s.chunks = append(s.chunks, chunk)
 	// always append all provided spans so tests can inspect them
 	s.spans = append(s.spans, spans...)
-	return int64(len(s.chunks)), nil
+	return int64(chunk.ChunkID), nil
 }
 
 func (s *fakeIngestStore) SoftDeleteChunksFromOrdinal(_ context.Context, _ int64, _ int) error {
@@ -479,7 +482,7 @@ func TestReadOrComputeOCR_EnforceErrorIgnored(t *testing.T) {
 	if res != "XYZ" {
 		t.Fatalf("unexpected ocr result: %s", res)
 	}
-	if !strings.Contains(buf.String(), "enforceOCRCachePolicy") {
+	if !strings.Contains(buf.String(), "enforceCachePolicy") {
 		t.Fatalf("expected log about enforcement failure, got %q", buf.String())
 	}
 }

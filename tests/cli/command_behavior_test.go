@@ -42,6 +42,9 @@ type commandTestRetrieverStub struct {
 	lastAskQuestion string
 	lastAskQuery    model.SearchQuery
 	lastSearchQuery model.SearchQuery
+
+	// used by the new IndexingComplete accessor
+	indexingComplete bool
 }
 
 func (s *commandTestRetrieverStub) Search(_ context.Context, q model.SearchQuery) ([]model.SearchHit, error) {
@@ -70,6 +73,13 @@ func (s *commandTestRetrieverStub) OpenFile(_ context.Context, _ string, _ model
 func (s *commandTestRetrieverStub) Stats(_ context.Context) (model.Stats, error) {
 	return model.Stats{}, model.ErrNotImplemented
 }
+
+func (s *commandTestRetrieverStub) IndexingComplete(_ context.Context) (bool, error) {
+	return s.indexingComplete, nil
+}
+
+// compile-time assertion ensuring our stub satisfies the Retriever interface
+var _ model.Retriever = (*commandTestRetrieverStub)(nil)
 
 func TestStatusReadsCorpusSnapshotHuman(t *testing.T) {
 	tmp := t.TempDir()
@@ -471,6 +481,56 @@ func TestAskJSONOutput(t *testing.T) {
 	}
 	if !payload.IndexingComplete {
 		t.Fatalf("expected indexing_complete=true, got payload=%+v", payload)
+	}
+}
+
+// Search-only mode with JSON output should still report the current indexing
+// state. The implementation obtains the boolean via the dedicated
+// IndexingComplete accessor, so only Search (not Ask) is invoked.
+func TestAskSearchOnlyJSONIncludesIndexingComplete(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("MISTRAL_API_KEY", "test-key")
+
+	stub := &commandTestRetrieverStub{
+		searchHits: []model.SearchHit{
+			{ChunkID: 10, RelPath: "docs/a.md", DocType: "md", RepType: "raw_text", Score: 0.9, Snippet: "alpha"},
+		},
+		indexingComplete: true,
+	}
+	var stdout, stderr bytes.Buffer
+	app := cli.NewAppWithIOAndHooks(&stdout, &stderr, cli.RuntimeHooks{
+		NewStore: func(config.Config) model.Store { return &commandTestNoopStore{} },
+		NewRetriever: func(config.Config, model.Store) model.Retriever {
+			return stub
+		},
+	})
+
+	withWorkingDir(t, tmp, func() {
+		code := app.RunWithContext(context.Background(), []string{"--json", "ask", "--mode", "search_only", "alpha"})
+		if code != 0 {
+			t.Fatalf("unexpected exit code: %d stderr=%s", code, stderr.String())
+		}
+	})
+
+	if !stub.searchCalled {
+		t.Fatal("expected Search to be called")
+	}
+	if stub.askCalled {
+		t.Fatal("did not expect Ask to be called now that a dedicated accessor exists")
+	}
+
+	var payload struct {
+		Question         string                   `json:"question"`
+		Answer           string                   `json:"answer"`
+		Citations        []map[string]interface{} `json:"citations"`
+		Hits             []map[string]interface{} `json:"hits"`
+		IndexingComplete bool                     `json:"indexing_complete"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal ask payload: %v\nraw=%s", err, stdout.String())
+	}
+	if !payload.IndexingComplete {
+		t.Fatalf("expected indexing_complete=true got %+v", payload)
 	}
 }
 

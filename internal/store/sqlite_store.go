@@ -258,7 +258,7 @@ CREATE INDEX IF NOT EXISTS idx_chunks_rep_id ON chunks(rep_id);
 CREATE INDEX IF NOT EXISTS idx_chunks_embedding_status ON chunks(embedding_status);
 CREATE INDEX IF NOT EXISTS idx_chunks_index_kind ON chunks(index_kind);
 CREATE INDEX IF NOT EXISTS idx_chunks_rel_path_deleted ON chunks(rel_path, deleted);
-CREATE INDEX IF NOT EXISTS idx_spans_chunk_id ON spans(chunk_id);
+CREATE INDEX IF NOT EXISTS idx_spans_chunk_id_span_id ON spans(chunk_id, span_id);
 `
 	if _, err := db.ExecContext(ctx, schema); err != nil {
 		_ = db.Close()
@@ -823,13 +823,27 @@ func (s *SQLiteStore) NextPending(ctx context.Context, limit int, indexKind stri
 	}
 
 	args := []any{"pending"}
-	query := `SELECT chunk_id, rel_path, doc_type, rep_type, text, index_kind FROM chunks WHERE embedding_status = ? AND deleted = 0 AND chunk_id > 0`
+	query := `WITH filtered_chunks AS (
+	            SELECT c.chunk_id, c.rel_path, c.doc_type, c.rep_type, c.text, c.index_kind
+	            FROM chunks c
+	            WHERE c.embedding_status = ? AND c.deleted = 0 AND c.chunk_id > 0
+	          ),
+	          ranked_spans AS (
+	            SELECT s.chunk_id, s.span_kind, s.start, s."end",
+	                   ROW_NUMBER() OVER (PARTITION BY s.chunk_id ORDER BY s.span_id) AS rn
+	            FROM spans s
+	            JOIN filtered_chunks fc ON fc.chunk_id = s.chunk_id
+	          )
+	          SELECT fc.chunk_id, fc.rel_path, fc.doc_type, fc.rep_type, fc.text, fc.index_kind,
+	                 COALESCE(sp.span_kind, ''), COALESCE(sp.start, 0), COALESCE(sp.end, 0)
+	          FROM filtered_chunks fc
+	          LEFT JOIN ranked_spans sp ON sp.chunk_id = fc.chunk_id AND sp.rn = 1`
 	if strings.TrimSpace(indexKind) != "" {
-		query += " AND index_kind = ?"
+		query += " WHERE fc.index_kind = ?"
 		args = append(args, indexKind)
 	}
 	args = append(args, limit)
-	query += " ORDER BY chunk_id LIMIT ?"
+	query += " ORDER BY fc.chunk_id LIMIT ?"
 
 	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -846,21 +860,25 @@ func (s *SQLiteStore) NextPending(ctx context.Context, limit int, indexKind stri
 			repType string
 			text    string
 			idxKind string
+			spanK   string
+			spanS   int
+			spanE   int
 		)
-		if err := rows.Scan(&chunkID, &relPath, &docType, &repType, &text, &idxKind); err != nil {
+		if err := rows.Scan(&chunkID, &relPath, &docType, &repType, &text, &idxKind, &spanK, &spanS, &spanE); err != nil {
 			return nil, err
 		}
 		if chunkID <= 0 {
 			return nil, fmt.Errorf("invalid non-positive chunk_id from database: %d", chunkID)
 		}
 		uid := uint64(chunkID)
+		span := spanFromRow(spanK, spanS, spanE)
 		tasks = append(tasks, model.NewChunkTask(uid, text, idxKind, model.ChunkMetadata{
 			ChunkID: uid,
 			RelPath: relPath,
 			DocType: docType,
 			RepType: repType,
 			Snippet: snippet(text, 240),
-			Span:    model.Span{Kind: "lines"},
+			Span:    span,
 		}))
 	}
 	return tasks, rows.Err()
@@ -880,15 +898,27 @@ func (s *SQLiteStore) ListEmbeddedChunkMetadata(ctx context.Context, indexKind s
 	}
 
 	args := []any{"ok"}
-	query := `SELECT chunk_id, rel_path, doc_type, rep_type, text, index_kind
-	          FROM chunks
-	          WHERE embedding_status = ? AND deleted = 0 AND chunk_id > 0`
+	query := `WITH filtered_chunks AS (
+	            SELECT c.chunk_id, c.rel_path, c.doc_type, c.rep_type, c.text, c.index_kind
+	            FROM chunks c
+	            WHERE c.embedding_status = ? AND c.deleted = 0 AND c.chunk_id > 0
+	          ),
+	          ranked_spans AS (
+	            SELECT s.chunk_id, s.span_kind, s.start, s."end",
+	                   ROW_NUMBER() OVER (PARTITION BY s.chunk_id ORDER BY s.span_id) AS rn
+	            FROM spans s
+	            JOIN filtered_chunks fc ON fc.chunk_id = s.chunk_id
+	          )
+	          SELECT fc.chunk_id, fc.rel_path, fc.doc_type, fc.rep_type, fc.text, fc.index_kind,
+	                 COALESCE(sp.span_kind, ''), COALESCE(sp.start, 0), COALESCE(sp.end, 0)
+	          FROM filtered_chunks fc
+	          LEFT JOIN ranked_spans sp ON sp.chunk_id = fc.chunk_id AND sp.rn = 1`
 	if strings.TrimSpace(indexKind) != "" {
-		query += ` AND index_kind = ?`
+		query += ` WHERE fc.index_kind = ?`
 		args = append(args, indexKind)
 	}
 	args = append(args, limit, offset)
-	query += ` ORDER BY chunk_id LIMIT ? OFFSET ?`
+	query += ` ORDER BY fc.chunk_id LIMIT ? OFFSET ?`
 
 	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -905,14 +935,18 @@ func (s *SQLiteStore) ListEmbeddedChunkMetadata(ctx context.Context, indexKind s
 			repType string
 			text    string
 			kind    string
+			spanK   string
+			spanS   int
+			spanE   int
 		)
-		if err := rows.Scan(&chunkID, &relPath, &docType, &repType, &text, &kind); err != nil {
+		if err := rows.Scan(&chunkID, &relPath, &docType, &repType, &text, &kind, &spanK, &spanS, &spanE); err != nil {
 			return nil, err
 		}
 		if chunkID <= 0 {
 			return nil, fmt.Errorf("invalid non-positive chunk_id from database: %d", chunkID)
 		}
 		uid := uint64(chunkID)
+		span := spanFromRow(spanK, spanS, spanE)
 		out = append(out, model.ChunkTask{
 			Label:     uid,
 			Text:      text,
@@ -923,11 +957,31 @@ func (s *SQLiteStore) ListEmbeddedChunkMetadata(ctx context.Context, indexKind s
 				DocType: docType,
 				RepType: repType,
 				Snippet: snippet(text, 240),
-				Span:    model.Span{Kind: "lines"},
+				Span:    span,
 			},
 		})
 	}
 	return out, rows.Err()
+}
+
+func spanFromRow(kind string, start, end int) model.Span {
+	switch strings.ToLower(strings.TrimSpace(kind)) {
+	case "page":
+		if start <= 0 || end <= 0 || end != start {
+			return model.Span{Kind: "lines"}
+		}
+		return model.Span{Kind: "page", Page: start}
+	case "time":
+		if start < 0 || end < 0 || end < start {
+			return model.Span{Kind: "lines"}
+		}
+		return model.Span{Kind: "time", StartMS: start, EndMS: end}
+	case "lines":
+		if start > 0 && end >= start {
+			return model.Span{Kind: "lines", StartLine: start, EndLine: end}
+		}
+	}
+	return model.Span{Kind: "lines"}
 }
 
 func (s *SQLiteStore) MarkEmbedded(ctx context.Context, labels []uint64) error {
