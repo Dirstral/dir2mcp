@@ -302,8 +302,13 @@ func TestChunkTranscriptByTime_SplitsLongTimestampWindow(t *testing.T) {
 	if chunks[0].Span.EndMS <= chunks[0].Span.StartMS {
 		t.Fatalf("expected positive duration span, got %+v", chunks[0].Span)
 	}
-	if len([]rune(chunks[0].Text)) > 1300 {
-		t.Fatalf("expected first split chunk to be bounded, got %d runes", len([]rune(chunks[0].Text)))
+	// ensure we respect the same chunking parameters defined in the ingest
+	// package; previously a hardcoded 1300 was used which could drift if the
+	// implementation changed.  The limit here corresponds to
+	// ingest.TranscriptChunkMaxChars (see splitTranscriptSegmentWithTiming).
+	if len([]rune(chunks[0].Text)) > ingest.TranscriptChunkMaxChars {
+		t.Fatalf("expected first split chunk to be bounded, got %d runes (limit %d)",
+			len([]rune(chunks[0].Text)), ingest.TranscriptChunkMaxChars)
 	}
 }
 
