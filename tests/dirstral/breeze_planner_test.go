@@ -1,0 +1,103 @@
+package test
+
+import (
+	"context"
+	"strings"
+	"testing"
+
+	"dir2mcp/internal/dirstral/breeze"
+	"dir2mcp/internal/protocol"
+)
+
+func TestPlannerModelProfileAffectsStrategyAndSynthesis(t *testing.T) {
+	largePlan, err := breeze.PlanTurn("explain indexing", "mistral-large-latest")
+	if err != nil {
+		t.Fatalf("large plan error: %v", err)
+	}
+	if len(largePlan.Steps) != 2 {
+		t.Fatalf("expected large model to use two-step plan, got %d", len(largePlan.Steps))
+	}
+	if largePlan.Steps[0].Tool != protocol.ToolNameSearch || largePlan.Steps[1].Tool != protocol.ToolNameAsk {
+		t.Fatalf("unexpected large model tool sequence: %#v", largePlan.Steps)
+	}
+	if largePlan.Synthesis != "analytical" {
+		t.Fatalf("expected analytical synthesis for large model, got %q", largePlan.Synthesis)
+	}
+
+	smallPlan, err := breeze.PlanTurn("explain indexing", "mistral-small-latest")
+	if err != nil {
+		t.Fatalf("small plan error: %v", err)
+	}
+	if len(smallPlan.Steps) != 1 {
+		t.Fatalf("expected small model to use one-step plan, got %d", len(smallPlan.Steps))
+	}
+	if smallPlan.Steps[0].Tool != protocol.ToolNameAsk {
+		t.Fatalf("expected small model to ask directly, got %q", smallPlan.Steps[0].Tool)
+	}
+	if smallPlan.Synthesis != "concise" {
+		t.Fatalf("expected concise synthesis for small model, got %q", smallPlan.Synthesis)
+	}
+}
+
+func TestPlannerSupportsClearCommand(t *testing.T) {
+	plan, err := breeze.PlanTurn("/clear", "mistral-small-latest")
+	if err != nil {
+		t.Fatalf("plan error: %v", err)
+	}
+	if !plan.Clear {
+		t.Fatal("expected /clear to set Clear=true")
+	}
+	if len(plan.Steps) != 0 {
+		t.Fatalf("expected no tool steps for /clear, got %d", len(plan.Steps))
+	}
+}
+
+func TestParseInputMapsCommonCommands(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  breeze.ParsedInput
+	}{
+		{name: "quit", input: "/quit", want: breeze.ParsedInput{Quit: true}},
+		{name: "help", input: "/help", want: breeze.ParsedInput{Help: true}},
+		{name: "clear", input: "/clear", want: breeze.ParsedInput{Clear: true}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := breeze.ParseInput(tc.input, "mistral-small-latest")
+			if got.Quit != tc.want.Quit || got.Help != tc.want.Help || got.Clear != tc.want.Clear {
+				t.Fatalf("unexpected parsed flags: got %+v want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseInputOpenWithoutPathFallsBackToHelp(t *testing.T) {
+	got := breeze.ParseInput("/open", "mistral-small-latest")
+	if !got.Help {
+		t.Fatalf("expected /open without path to map to help, got %+v", got)
+	}
+}
+
+func TestRequiresApprovalPolicy(t *testing.T) {
+	if breeze.RequiresApproval(protocol.ToolNameSearch) {
+		t.Fatal("search should be auto-approved")
+	}
+	if !breeze.RequiresApproval("dir2mcp.delete_everything") {
+		t.Fatal("unknown tools should require approval")
+	}
+}
+
+func TestExecutePlanEmptyReturnsNoOutput(t *testing.T) {
+	res, err := breeze.ExecutePlan(context.Background(), nil, breeze.TurnPlan{})
+	if err != nil {
+		t.Fatalf("expected no error for empty plan, got %v", err)
+	}
+	if res == nil {
+		t.Fatal("expected non-nil result for empty plan")
+	}
+	if strings.TrimSpace(res.Output) != "" {
+		t.Fatalf("expected empty output for empty plan, got %q", res.Output)
+	}
+}
