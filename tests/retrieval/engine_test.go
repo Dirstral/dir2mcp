@@ -86,6 +86,11 @@ func newFakeMistralEmbeddingServer() *httptest.Server {
 			http.NotFound(w, r)
 			return
 		}
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
 
 		var req struct {
 			Input []string `json:"input"`
