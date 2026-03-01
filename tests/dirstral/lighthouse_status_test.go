@@ -89,8 +89,8 @@ func TestStatusIncludesConnectionContractDetails(t *testing.T) {
 	writeConnectionFixture(t, root, map[string]any{
 		"url": server.URL,
 		"headers": map[string]any{
-			"MCP-Protocol-Version": coreconfig.DefaultProtocolVersion,
-			"Authorization":        "Bearer <token-from-secret.token>",
+			protocol.MCPProtocolVersionHeader: coreconfig.DefaultProtocolVersion,
+			"Authorization":                   "Bearer <token-from-secret.token>",
 		},
 		"session": map[string]any{
 			"uses_mcp_session_id":    true,
@@ -174,7 +174,7 @@ func TestStatusDerivesAuthSourceFromTokenFileIndicator(t *testing.T) {
 	writeConnectionFixture(t, root, map[string]any{
 		"url": server.URL,
 		"headers": map[string]any{
-			"MCP-Protocol-Version": coreconfig.DefaultProtocolVersion,
+			protocol.MCPProtocolVersionHeader: coreconfig.DefaultProtocolVersion,
 		},
 		"session": map[string]any{
 			"uses_mcp_session_id": false,
