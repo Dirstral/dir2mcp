@@ -154,7 +154,9 @@ func TestMCPPaymentRequiredActionableMessageWithHints(t *testing.T) {
 
 	client := mcp.NewWithTransport(server.URL, "streamable-http", false)
 	ctx := context.Background()
-	_ = client.Initialize(ctx)
+	if err := client.Initialize(ctx); err != nil {
+		t.Fatalf("initialize failed: %v", err)
+	}
 
 	_, err := client.CallTool(ctx, protocol.ToolNameStats, map[string]any{})
 	if err == nil {
