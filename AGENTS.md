@@ -81,5 +81,3 @@ codex mcp add context7 -- npx -y @upstash/context7-mcp
   - `off` = disabled
   - `on` = fail-open on incomplete payment config
   - `required` = strict gating/validation
-- `internal/retrieval/engine.go` `Ask()` is a stub — tracked in #70. Use `retrieval.Service` for retrieval work.
-- `retrieval.Service.Stats()` returns `ErrNotImplemented` — tracked in #71.
