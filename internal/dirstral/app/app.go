@@ -160,12 +160,16 @@ func buildLighthouseIntro(health host.HealthInfo) []string {
 	endpoint := host.OrUnknown(health.MCPURL)
 	protocol := host.OrUnknown(health.ProtocolHeader)
 	auth := host.OrUnknown(health.AuthSourceType)
-	return []string{
+	lines := []string{
 		"Manage local dir2mcp host process (remote checks use DIRSTRAL_MCP_URL).",
 		"Status: " + state,
 		"Endpoint: " + endpoint,
 		"Protocol: " + protocol + " · Auth source: " + auth,
 	}
+	if health.AuthDiagnostic != "" {
+		lines = append(lines, "Diagnostic: "+health.AuthDiagnostic)
+	}
+	return lines
 }
 
 func (m appModel) View() string {
