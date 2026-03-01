@@ -38,6 +38,29 @@ func TestX402ToolsCall_UnpaidReturns402WithPaymentRequiredHeader(t *testing.T) {
 	assertCanonicalErrorCode(t, readAllBytes(t, resp.Body), "PAYMENT_REQUIRED")
 }
 
+func TestX402ToolsCall_ModeOnIncompleteConfigFailOpen(t *testing.T) {
+	cfg := config.Default()
+	cfg.AuthMode = "none"
+	cfg.X402.Mode = "on"
+	cfg.X402.ToolsCallEnabled = true
+	// Intentionally incomplete x402 config; mode=on should not gate tools/call.
+
+	server := httptest.NewServer(mcp.NewServer(cfg, nil).Handler())
+	defer server.Close()
+
+	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
+	resp := postRPCWithHeaders(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":1001,"method":"tools/call","params":{"name":"dir2mcp.stats","arguments":{}}}`, nil)
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		payload, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status=%d want=%d body=%s", resp.StatusCode, http.StatusOK, string(payload))
+	}
+	if strings.TrimSpace(resp.Header.Get("PAYMENT-REQUIRED")) != "" {
+		t.Fatal("expected PAYMENT-REQUIRED header to be absent when mode=on config is incomplete")
+	}
+}
+
 func TestX402ToolsCall_PaidRetrySucceedsAndReturnsPaymentResponse(t *testing.T) {
 	fac := newFacilitatorStub(t)
 	fac.verifyStatus = http.StatusOK
@@ -282,6 +305,7 @@ func x402EnabledTestConfig(resourceBaseURL string) config.Config {
 	cfg := config.Default()
 	cfg.X402.Mode = "on"
 	cfg.X402.ToolsCallEnabled = true
+	cfg.X402.FacilitatorURL = "https://facilitator.example.com"
 	cfg.X402.ResourceBaseURL = resourceBaseURL
 	cfg.X402.Scheme = "exact"
 	cfg.X402.PriceAtomic = "1000"

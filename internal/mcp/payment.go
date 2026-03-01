@@ -32,6 +32,14 @@ func (s *Server) initPaymentConfig() {
 		return
 	}
 
+	// In "on" mode we fail open: if strict payment config is incomplete,
+	// keep tools/call ungated instead of enabling a runtime-bricking gate.
+	if mode == x402.ModeOn {
+		if err := s.cfg.ValidateX402(true); err != nil {
+			return
+		}
+	}
+
 	s.x402Requirement = x402.Requirement{
 		Scheme:   strings.TrimSpace(s.cfg.X402.Scheme),
 		Network:  strings.TrimSpace(s.cfg.X402.Network),
@@ -237,8 +245,9 @@ func (s *Server) getPaymentExecutionOutcome(key string) (paymentExecutionOutcome
 	if strings.TrimSpace(key) == "" {
 		return paymentExecutionOutcome{}, false
 	}
-	s.paymentMu.RLock()
-	defer s.paymentMu.RUnlock()
+	s.paymentMu.Lock()
+	defer s.paymentMu.Unlock()
+	s.prunePaymentOutcomesLocked(time.Now().UTC())
 	outcome, ok := s.paymentOutcomes[key]
 	return outcome, ok
 }
@@ -249,7 +258,10 @@ func (s *Server) setPaymentExecutionOutcome(key string, outcome paymentExecution
 	}
 	s.paymentMu.Lock()
 	defer s.paymentMu.Unlock()
+	now := time.Now().UTC()
+	s.prunePaymentOutcomesLocked(now)
 	s.paymentOutcomes[key] = outcome
+	s.prunePaymentOutcomesLocked(now)
 }
 
 func (s *Server) markPaymentExecutionSettled(key, paymentResponse string) paymentExecutionOutcome {

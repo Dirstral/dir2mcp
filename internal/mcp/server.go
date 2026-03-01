@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -31,6 +32,11 @@ const (
 	sessionCleanupInterval = time.Hour
 	rateLimitCleanupEvery  = 5 * time.Minute
 	rateLimitBucketMaxAge  = 10 * time.Minute
+	// Replay outcomes are only useful while signatures are still valid.
+	// Keep a small buffer over common short-lived signature windows.
+	paymentOutcomeTTL             = 10 * time.Minute
+	paymentOutcomeCleanupInterval = time.Minute
+	paymentOutcomeMaxEntries      = 5000
 )
 
 // DefaultSearchK is used when tools/call search arguments omit k or provide
@@ -57,6 +63,8 @@ type Server struct {
 	paymentLogPath  string
 	paymentMu       sync.RWMutex
 	paymentOutcomes map[string]paymentExecutionOutcome
+	paymentTTL      time.Duration
+	paymentMaxItems int
 
 	eventEmitter func(level, event string, data interface{})
 }
@@ -132,6 +140,8 @@ func NewServer(cfg config.Config, retriever model.Retriever, opts ...ServerOptio
 		retriever:       retriever,
 		sessions:        make(map[string]time.Time),
 		paymentOutcomes: make(map[string]paymentExecutionOutcome),
+		paymentTTL:      paymentOutcomeTTL,
+		paymentMaxItems: paymentOutcomeMaxEntries,
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -203,6 +213,9 @@ func (s *Server) RunOnListener(ctx context.Context, ln net.Listener) error {
 	go s.runSessionCleanup(runCtx)
 	if s.rateLimiter != nil {
 		go s.runRateLimitCleanup(runCtx)
+	}
+	if s.x402Enabled {
+		go s.runPaymentOutcomeCleanup(runCtx)
 	}
 
 	server := &http.Server{
@@ -539,6 +552,65 @@ func (s *Server) cleanupExpiredSessions(now time.Time) {
 		if now.Sub(lastSeen) > sessionTTL {
 			delete(s.sessions, id)
 		}
+	}
+}
+
+func (s *Server) runPaymentOutcomeCleanup(ctx context.Context) {
+	ticker := time.NewTicker(paymentOutcomeCleanupInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-ticker.C:
+			s.cleanupPaymentOutcomes(now)
+		}
+	}
+}
+
+func (s *Server) cleanupPaymentOutcomes(now time.Time) {
+	s.paymentMu.Lock()
+	defer s.paymentMu.Unlock()
+	s.prunePaymentOutcomesLocked(now)
+}
+
+func (s *Server) prunePaymentOutcomesLocked(now time.Time) {
+	ttl := s.paymentTTL
+	if ttl <= 0 {
+		ttl = paymentOutcomeTTL
+	}
+
+	cutoff := now.Add(-ttl)
+	for key, outcome := range s.paymentOutcomes {
+		if outcome.UpdatedAt.IsZero() || outcome.UpdatedAt.Before(cutoff) {
+			delete(s.paymentOutcomes, key)
+		}
+	}
+
+	maxItems := s.paymentMaxItems
+	if maxItems <= 0 {
+		maxItems = paymentOutcomeMaxEntries
+	}
+	if len(s.paymentOutcomes) <= maxItems {
+		return
+	}
+
+	type entry struct {
+		key string
+		ts  time.Time
+	}
+	entries := make([]entry, 0, len(s.paymentOutcomes))
+	for key, outcome := range s.paymentOutcomes {
+		entries = append(entries, entry{key: key, ts: outcome.UpdatedAt})
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].ts.Before(entries[j].ts)
+	})
+
+	toDrop := len(entries) - maxItems
+	for i := 0; i < toDrop; i++ {
+		delete(s.paymentOutcomes, entries[i].key)
 	}
 }
 
