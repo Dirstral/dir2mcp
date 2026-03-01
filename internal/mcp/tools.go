@@ -1948,7 +1948,7 @@ func transcribeOutputSchema() map[string]interface{} {
 				},
 			},
 		},
-		"required": []string{"rel_path", "provider", "model", "indexed"},
+		"required": []string{"rel_path", "provider", "model", "indexed", "transcribed"},
 	}
 }
 
