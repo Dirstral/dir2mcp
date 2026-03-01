@@ -251,6 +251,7 @@ func (m *model) save() {
 
 	// Save secrets to .env.local.
 	secretFailures := make([]string, 0)
+	failedSecretKeys := map[string]bool{}
 	for _, f := range m.fields {
 		if !f.Sensitive {
 			continue
@@ -266,16 +267,31 @@ func (m *model) save() {
 			err = config.SaveSecret(envKey, f.Value)
 		}
 		if err != nil {
+			failedSecretKeys[f.Key] = true
 			secretFailures = append(secretFailures, fmt.Sprintf("%s: %v", f.Key, err))
 		}
 	}
 	if len(secretFailures) > 0 {
+		m.applyPersistedSources(failedSecretKeys)
+
+		newBaseline := snapshotValues(m.fields)
+		for key := range failedSecretKeys {
+			if oldValue, ok := m.baseline[key]; ok {
+				newBaseline[key] = oldValue
+			} else {
+				delete(newBaseline, key)
+			}
+		}
+		m.baseline = newBaseline
+		m.invalidatePendingChanges()
+		m.recomputeDirty()
+
 		m.errMsg = fmt.Sprintf("Save secrets failed for %s. Some changes may have been saved.", strings.Join(secretFailures, "; "))
 		m.statusMsg = ""
 		return
 	}
 
-	m.applyPersistedSources()
+	m.applyPersistedSources(nil)
 
 	m.baseline = snapshotValues(m.fields)
 	m.invalidatePendingChanges()
@@ -321,13 +337,16 @@ func (m *model) recomputeDirty() {
 	m.dirty = len(m.pendingChanges()) > 0
 }
 
-func (m *model) applyPersistedSources() {
+func (m *model) applyPersistedSources(failedSecretKeys map[string]bool) {
 	for i := range m.fields {
 		before := m.baseline[m.fields[i].Key]
 		if m.fields[i].Value == before {
 			continue
 		}
 		if m.fields[i].Sensitive {
+			if failedSecretKeys != nil && failedSecretKeys[m.fields[i].Key] {
+				continue
+			}
 			if strings.TrimSpace(m.fields[i].Value) == "" {
 				m.fields[i].Source = config.SourceDefault
 			} else {
