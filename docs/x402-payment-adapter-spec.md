@@ -14,8 +14,7 @@ Provide a clear, versioned contract so that:
 
 ## Usage in dir2mcp
 
-When x402 gating is enabled (`--x402-mode` flag in the CLI or `x402.mode` in config), dir2mcp will invoke the adapter on inbound requests for routes like `/v1/ask` or `/v1/retrieve`. Depending on the facilitator's response, the server either allows the request to proceed or returns a `402 Payment Required` response with `PAYMENT-REQUIRED` header data. Clients must then obtain and attach a `PAYMENT-SIGNATURE` before retrying.
-
+When x402 gating is enabled (`--x402-mode` flag in the CLI or `x402.mode` in config), dir2mcp invokes the adapter at the MCP request boundary (typically `POST /mcp` for `tools/call`, or selected tool names). Depending on the facilitator's response, the server either allows the request to proceed or returns `402 Payment Required` with `PAYMENT-REQUIRED` header data. Clients must then obtain and attach `PAYMENT-SIGNATURE` before retrying.
 ### Example configuration snippet
 
 ```yaml
