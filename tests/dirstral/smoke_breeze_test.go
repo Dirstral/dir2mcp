@@ -7,58 +7,45 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"testing"
 
 	"dir2mcp/internal/dirstral/breeze"
+	"dir2mcp/internal/dirstral/mcp"
 	"dir2mcp/internal/protocol"
 )
 
 func TestSmokeBreezeJSONOverStdio(t *testing.T) {
-	inR, inW, err := os.Pipe()
+	envPath, err := exec.LookPath("env")
 	if err != nil {
-		t.Fatalf("stdin pipe: %v", err)
+		envPath = "env"
 	}
-	outR, outW, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("stdout pipe: %v", err)
+	endpoint := fmt.Sprintf("%s GO_WANT_HELPER_PROCESS=1 %s -test.run=TestHelperProcessBreezeSmokeMCPStdio --", envPath, os.Args[0])
+
+	client := mcp.NewWithTransport(endpoint, "stdio", false)
+	defer func() {
+		_ = client.Close()
+	}()
+	if err := client.Initialize(context.Background()); err != nil {
+		t.Fatalf("initialize stdio mcp client: %v", err)
 	}
-	defer func() {
-		_ = inR.Close()
-		_ = inW.Close()
-		_ = outR.Close()
-		_ = outW.Close()
-	}()
+	if _, err := client.ListTools(context.Background()); err != nil {
+		t.Fatalf("list tools: %v", err)
+	}
 
-	oldIn := os.Stdin
-	oldOut := os.Stdout
-	os.Stdin = inR
-	os.Stdout = outW
-	defer func() {
-		os.Stdin = oldIn
-		os.Stdout = oldOut
-	}()
-
-	_, _ = inW.WriteString("/list src\n/quit\n")
-	_ = inW.Close()
-
-	endpoint := fmt.Sprintf("/usr/bin/env GO_WANT_HELPER_PROCESS=1 %s -test.run=TestHelperProcessBreezeSmokeMCPStdio --", os.Args[0])
+	in := bytes.NewBufferString("/list src\n/quit\n")
+	out := &bytes.Buffer{}
 	opts := breeze.Options{
 		MCPURL:    endpoint,
 		Transport: "stdio",
 		Model:     "mistral-small-latest",
 		JSON:      true,
 	}
-	if err := breeze.Run(context.Background(), opts); err != nil {
+	if err := breeze.RunJSONLoopWithIO(context.Background(), client, opts, in, out); err != nil {
 		t.Fatalf("breeze run failed: %v", err)
 	}
 
-	_ = outW.Close()
-	outBytes := &bytes.Buffer{}
-	if _, err := outBytes.ReadFrom(outR); err != nil {
-		t.Fatalf("read stdout: %v", err)
-	}
-
-	events := decodeEvents(t, outBytes.Bytes())
+	events := decodeEvents(t, out.Bytes())
 	if len(events) < 3 {
 		t.Fatalf("expected at least 3 events, got %d", len(events))
 	}
