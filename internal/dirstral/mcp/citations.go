@@ -39,6 +39,7 @@ func formatMs(ms int) string {
 
 func intVal(v any) int {
 	const maxInt = int(^uint(0) >> 1)
+	const minInt = -maxInt - 1
 
 	switch t := v.(type) {
 	case int:
@@ -46,6 +47,12 @@ func intVal(v any) int {
 	case int32:
 		return int(t)
 	case int64:
+		if t > int64(maxInt) {
+			return maxInt
+		}
+		if t < int64(minInt) {
+			return minInt
+		}
 		return int(t)
 	case uint:
 		if t > uint(maxInt) {
@@ -63,6 +70,12 @@ func intVal(v any) int {
 		return int(t)
 	case json.Number:
 		if i, err := t.Int64(); err == nil {
+			if i > int64(maxInt) {
+				return maxInt
+			}
+			if i < int64(minInt) {
+				return minInt
+			}
 			return int(i)
 		}
 		if f, err := t.Float64(); err == nil {
