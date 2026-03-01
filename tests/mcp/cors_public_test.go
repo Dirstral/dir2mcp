@@ -125,6 +125,12 @@ func TestCORS_PreflightDisallowedOriginNoCORSHeaders(t *testing.T) {
 	if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "" {
 		t.Fatalf("Access-Control-Allow-Origin=%q want empty", got)
 	}
+	if got := resp.Header.Get("Access-Control-Allow-Methods"); got != "" {
+		t.Fatalf("Access-Control-Allow-Methods=%q want empty", got)
+	}
+	if got := resp.Header.Get("Access-Control-Allow-Headers"); got != "" {
+		t.Fatalf("Access-Control-Allow-Headers=%q want empty", got)
+	}
 }
 
 // TestCORS_DisallowedOriginNoHeaders verifies disallowed origins are rejected without CORS allow-origin headers.
