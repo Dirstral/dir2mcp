@@ -94,11 +94,13 @@ func canonicalCodeFromText(text string) string {
 		"RATE-LIMIT",
 		"RATE_LIMIT",
 		"RATE LIMIT EXCEEDED",
-		"LIMIT EXCEEDED",
-		"QUOTA",
-		"THROTTLE",
-		"THROTTLED",
 		"TOO MANY REQUESTS",
+	) {
+		return CanonicalCodeRateLimited
+	}
+	if containsAnyWithContext(upper,
+		[]string{"QUOTA", "LIMIT EXCEEDED", "THROTTLE", "THROTTLED"},
+		[]string{"REQUEST", "API", "RATE", "HTTP", "CALL"},
 	) {
 		return CanonicalCodeRateLimited
 	}
@@ -120,6 +122,23 @@ func containsAny(value string, patterns ...string) bool {
 		}
 	}
 	return false
+}
+
+func containsAnyWithContext(value string, patterns []string, contextWords []string) bool {
+	if len(patterns) == 0 || len(contextWords) == 0 {
+		return false
+	}
+	hasContext := false
+	for _, contextWord := range contextWords {
+		if containsCanonicalPhrase(value, contextWord) {
+			hasContext = true
+			break
+		}
+	}
+	if !hasContext {
+		return false
+	}
+	return containsAny(value, patterns...)
 }
 
 func containsCanonicalPhrase(value, phrase string) bool {
