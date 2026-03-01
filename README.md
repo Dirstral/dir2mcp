@@ -19,6 +19,9 @@ Deploy any local directory as an MCP knowledge server with indexing, retrieval, 
 - Multimodal ingestion: text/code, OCR, transcripts, structured annotations
 - Citation-aware retrieval and RAG-style answering
 - Optional facilitator-backed x402 (payment/request‑gating protocol) payment gating for `tools/call`
+- Monorepo layout with two binaries:
+  - `dir2mcp`: MCP server and indexing/runtime host
+  - `dirstral`: terminal client (Breeze/Tempest/Lighthouse/Settings)
 
 ## Quickstart
 
@@ -33,7 +36,17 @@ cp .env.example .env        # add your API keys
 # cp .env.example .env.local
 make build
 ./dir2mcp up
+./dirstral breeze
 ```
+
+`DIRSTRAL_MCP_URL` controls where Breeze/Tempest connect (local or remote).
+Lighthouse process management (`lighthouse up|status|down`) is local-only. Use
+`dirstral lighthouse remote` to probe a remote MCP endpoint without process control.
+
+Or build each binary directly:
+
+- `go build -o dir2mcp ./cmd/dir2mcp/`
+- `go build -o dirstral ./cmd/dirstral/`
 
 The server prints its MCP endpoint URL on startup. Point your MCP client at that URL.
 Precedence (highest to lowest): shell environment variables > `.env.local` > `.env`.

@@ -28,6 +28,7 @@ import (
 	"dir2mcp/internal/mcp"
 	"dir2mcp/internal/mistral"
 	"dir2mcp/internal/model"
+	"dir2mcp/internal/protocol"
 	"dir2mcp/internal/retrieval"
 	"dir2mcp/internal/store"
 )
@@ -351,8 +352,14 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	if opts.listen != "" {
 		cfg.ListenAddr = opts.listen
 	}
+	if strings.TrimSpace(cfg.ListenAddr) == "" {
+		cfg.ListenAddr = protocol.DefaultListenAddr
+	}
 	if opts.mcpPath != "" {
 		cfg.MCPPath = opts.mcpPath
+	}
+	if strings.TrimSpace(cfg.MCPPath) == "" {
+		cfg.MCPPath = protocol.DefaultMCPPath
 	}
 	if opts.auth != "" {
 		cfg.AuthMode = opts.auth
@@ -1673,7 +1680,7 @@ func isNumericPort(port string) bool {
 
 func buildConnectionPayload(cfg config.Config, url string, auth authMaterial) connectionPayload {
 	headers := map[string]string{
-		"MCP-Protocol-Version": cfg.ProtocolVersion,
+		protocol.MCPProtocolVersionHeader: cfg.ProtocolVersion,
 	}
 	if auth.mode != "none" {
 		headers["Authorization"] = auth.authorizationHint
@@ -1685,7 +1692,7 @@ func buildConnectionPayload(cfg config.Config, url string, auth authMaterial) co
 		Headers:   headers,
 		Session: connectionSession{
 			UsesMCPSessionID:     true,
-			HeaderName:           "MCP-Session-Id",
+			HeaderName:           protocol.MCPSessionHeader,
 			AssignedOnInitialize: true,
 		},
 		Public:      cfg.Public,
@@ -2038,7 +2045,7 @@ func (a *App) printHumanConnection(cfg config.Config, connection connectionPaylo
 		writef(a.stdout, "  Token file: %s\n", auth.tokenFile)
 	}
 	writeln(a.stdout, "  Headers:")
-	writef(a.stdout, "    MCP-Protocol-Version: %s\n", cfg.ProtocolVersion)
+	writef(a.stdout, "    %s: %s\n", protocol.MCPProtocolVersionHeader, cfg.ProtocolVersion)
 	if auth.mode != "none" {
 		writeln(a.stdout, "    Authorization: Bearer <token>")
 	}

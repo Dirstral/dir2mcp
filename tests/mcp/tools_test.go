@@ -19,6 +19,7 @@ import (
 	"dir2mcp/internal/config"
 	"dir2mcp/internal/mcp"
 	"dir2mcp/internal/model"
+	"dir2mcp/internal/protocol"
 	"dir2mcp/internal/store"
 )
 
@@ -56,15 +57,15 @@ func TestMCPToolsList_RegistersDayOneToolsWithSchemas(t *testing.T) {
 	}
 
 	expected := map[string]bool{
-		"dir2mcp.search":             false,
-		"dir2mcp.ask":                false,
-		"dir2mcp.ask_audio":          false,
-		"dir2mcp.transcribe":         false,
-		"dir2mcp.annotate":           false,
-		"dir2mcp.transcribe_and_ask": false,
-		"dir2mcp.open_file":          false,
-		"dir2mcp.list_files":         false,
-		"dir2mcp.stats":              false,
+		protocol.ToolNameSearch:           false,
+		protocol.ToolNameAsk:              false,
+		protocol.ToolNameAskAudio:         false,
+		protocol.ToolNameTranscribe:       false,
+		protocol.ToolNameAnnotate:         false,
+		protocol.ToolNameTranscribeAndAsk: false,
+		protocol.ToolNameOpenFile:         false,
+		protocol.ToolNameListFiles:        false,
+		protocol.ToolNameStats:            false,
 	}
 
 	for _, tool := range envelope.Result.Tools {
@@ -452,7 +453,7 @@ func setupMCPToolStore(t *testing.T, relPath, docType string, content []byte) (c
 	cfg := config.Default()
 	cfg.RootDir = rootDir
 	cfg.StateDir = stateDir
-	cfg.MCPPath = "/mcp"
+	cfg.MCPPath = protocol.DefaultMCPPath
 	cfg.AuthMode = "none"
 	return cfg, st, rootDir
 }
@@ -512,7 +513,7 @@ func TestMCPToolsCallAskAudio_AskNotImplementedReturnsGracefulSuccess(t *testing
 	if len(envelope.Result.Content) == 0 {
 		t.Fatal("expected at least one content item")
 	}
-	if !strings.Contains(strings.ToLower(envelope.Result.Content[0].Text), "dir2mcp.search") {
+	if !strings.Contains(strings.ToLower(envelope.Result.Content[0].Text), strings.ToLower(protocol.ToolNameSearch)) {
 		t.Fatalf("expected fallback guidance to dir2mcp.search, got %q", envelope.Result.Content[0].Text)
 	}
 }
@@ -1202,9 +1203,9 @@ func initializeSession(t *testing.T, url string) string {
 		payload, _ := io.ReadAll(resp.Body)
 		t.Fatalf("status=%d want=%d body=%s", resp.StatusCode, http.StatusOK, string(payload))
 	}
-	sessionID := resp.Header.Get("MCP-Session-Id")
+	sessionID := resp.Header.Get(protocol.MCPSessionHeader)
 	if sessionID == "" {
-		t.Fatal("missing MCP-Session-Id header")
+		t.Fatalf("missing %s header", protocol.MCPSessionHeader)
 	}
 	return sessionID
 }
@@ -1219,7 +1220,7 @@ func postRPC(t *testing.T, url, sessionID, body string) *http.Response {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if sessionID != "" {
-		req.Header.Set("MCP-Session-Id", sessionID)
+		req.Header.Set(protocol.MCPSessionHeader, sessionID)
 	}
 
 	resp, err := http.DefaultClient.Do(req)

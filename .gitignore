@@ -15,6 +15,7 @@ secret.token
 bin/
 dist/
 /dir2mcp
+/dirstral
 .gocache/
 .gomodcache/
 .golangci-lint-cache/
