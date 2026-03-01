@@ -103,8 +103,8 @@ func (e *jsonRPCError) isPaymentRequired() bool {
 	if e == nil {
 		return false
 	}
-	if e.HTTPStatus != http.StatusPaymentRequired {
-		return false
+	if e.HTTPStatus == http.StatusPaymentRequired {
+		return true
 	}
 	return e.PaymentRequiredPresent || e.PaymentRequiredHeader != nil || strings.TrimSpace(e.PaymentResponseHeader) != ""
 }

@@ -257,7 +257,7 @@ func (m *breezeModel) applyWindowSize(width, height int) {
 func (m breezeModel) renderHelpBlock(width, height int) string {
 	helpText := formatHelp()
 	if width < 56 || height < 14 {
-		helpText = "Help: /help, /quit, /clear, /list [prefix], /search <query>, /open <rel_path>. Press ? to close."
+		helpText = formatHelpCompact()
 	}
 
 	return lipgloss.NewStyle().
@@ -266,6 +266,35 @@ func (m breezeModel) renderHelpBlock(width, height int) string {
 		Padding(0, 1).
 		MaxWidth(max(width-2, 1)).
 		Render(helpText)
+}
+
+type helpCommand struct {
+	name        string
+	description string
+}
+
+var helpCommands = []helpCommand{
+	{name: "/help", description: "Show help"},
+	{name: "/quit", description: "Exit Breeze"},
+	{name: "/clear", description: "Clear chat history"},
+	{name: "/list [prefix]", description: "List indexed files"},
+	{name: "/search <query>", description: "Search corpus"},
+	{name: "/open <rel_path>", description: "Open file from index"},
+	{name: "/transcribe <rel_path>", description: "Force transcribe audio"},
+	{name: "/annotate <rel_path> <schema_json>", description: "Extract structured JSON"},
+	{name: "/transcribe_and_ask <rel_path> <question>", description: "Transcribe & Ask"},
+}
+
+func formatHelpCompact() string {
+	var b strings.Builder
+	b.WriteString(ui.Brand.Render("Help:\n"))
+	for _, command := range helpCommands {
+		fmt.Fprintf(&b, "  %s  %s\n", ui.Keyword.Render(command.name), ui.Muted.Render(command.description))
+	}
+	b.WriteString(ui.Dim("  Any other text is sent to " + protocol.ToolNameAsk))
+	b.WriteString("\n")
+	b.WriteString(ui.Dim("  Press ? to close."))
+	return b.String()
 }
 
 func (m *breezeModel) processInputCmd(input string) tea.Cmd {
@@ -332,32 +361,20 @@ func firstApprovalTool(plan TurnPlan) string {
 func formatHelp() string {
 	var b strings.Builder
 	b.WriteString(ui.Brand.Render("Commands:\n"))
-	fmt.Fprintf(&b, "  %s  %s\n", ui.Keyword.Render("/help"), ui.Muted.Render("Show help"))
-	fmt.Fprintf(&b, "  %s  %s\n", ui.Keyword.Render("/quit"), ui.Muted.Render("Exit Breeze"))
-	fmt.Fprintf(&b, "  %s  %s\n", ui.Keyword.Render("/clear"), ui.Muted.Render("Clear chat history"))
-	fmt.Fprintf(&b, "  %s  %s\n", ui.Keyword.Render("/list [prefix]"), ui.Muted.Render("List indexed files"))
-	fmt.Fprintf(&b, "  %s  %s\n", ui.Keyword.Render("/search <query>"), ui.Muted.Render("Search corpus"))
-	fmt.Fprintf(&b, "  %s  %s\n", ui.Keyword.Render("/open <rel_path>"), ui.Muted.Render("Open file from index"))
-	fmt.Fprintf(&b, "  %s  %s\n", ui.Keyword.Render("/transcribe <rel_path>"), ui.Muted.Render("Force transcribe audio"))
-	fmt.Fprintf(&b, "  %s  %s\n", ui.Keyword.Render("/annotate <rel_path> <schema_json>"), ui.Muted.Render("Extract structured JSON"))
-	fmt.Fprintf(&b, "  %s  %s\n", ui.Keyword.Render("/transcribe_and_ask <rel_path> <question>"), ui.Muted.Render("Transcribe & Ask"))
+	for _, command := range helpCommands {
+		fmt.Fprintf(&b, "  %s  %s\n", ui.Keyword.Render(command.name), ui.Muted.Render(command.description))
+	}
 	b.WriteString(ui.Dim("  Any other text is sent to " + protocol.ToolNameAsk))
 	return b.String()
 }
 
 func formatHelpPlain() string {
-	return strings.Join([]string{
-		"/help - Show help",
-		"/quit - Exit Breeze",
-		"/clear - Clear chat history",
-		"/list [prefix] - List indexed files",
-		"/search <query> - Search corpus",
-		"/open <rel_path> - Open file from index",
-		"/transcribe <rel_path> - Force transcribe audio",
-		"/annotate <rel_path> <schema_json> - Extract structured JSON",
-		"/transcribe_and_ask <rel_path> <question> - Transcribe & Ask",
-		"Any other text is sent to " + protocol.ToolNameAsk,
-	}, "\n")
+	lines := make([]string, 0, len(helpCommands)+1)
+	for _, command := range helpCommands {
+		lines = append(lines, command.name+" - "+command.description)
+	}
+	lines = append(lines, "Any other text is sent to "+protocol.ToolNameAsk)
+	return strings.Join(lines, "\n")
 }
 
 func renderResultString(tool string, res *mcp.ToolCallResult) string {
@@ -472,6 +489,13 @@ func renderAnnotateString(sc map[string]any) string {
 		bytes, err := json.MarshalIndent(jsonObj, "", "  ")
 		if err == nil {
 			b.WriteString(string(bytes))
+		} else {
+			compact, compactErr := json.Marshal(jsonObj)
+			if compactErr == nil {
+				fmt.Fprintf(&b, "annotation_json (marshal error: %v): %s", err, string(compact))
+			} else {
+				fmt.Fprintf(&b, "annotation_json (marshal error: %v; fallback error: %v): %v", err, compactErr, jsonObj)
+			}
 		}
 	}
 	if ordered := citationsFor(protocol.ToolNameAnnotate, sc); len(ordered) > 0 {
@@ -521,7 +545,7 @@ func renderTranscribeString(sc map[string]any) string {
 			}
 			b.WriteString(text)
 			if citation != "" {
-				fmt.Fprintf(&b, " %s", ui.Cyan.Render(citation))
+				fmt.Fprintf(&b, " %s", ui.Citation(citation))
 			}
 			b.WriteString("\n")
 		}
@@ -551,7 +575,7 @@ func renderTranscribeString(sc map[string]any) string {
 			}
 			b.WriteString(text)
 			if citation != "" {
-				fmt.Fprintf(&b, " %s", ui.Cyan.Render(citation))
+				fmt.Fprintf(&b, " %s", ui.Citation(citation))
 			}
 		} else {
 			b.WriteString("Transcription complete.")
