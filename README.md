@@ -169,44 +169,9 @@ ElevenLabs integrations should read `ELEVENLABS_API_KEY` and `ELEVENLABS_BASE_UR
 - Allowed origins are deny-by-default except local development origins (`http://localhost`, `http://127.0.0.1`).
   Add hosted browser origins explicitly with `DIR2MCP_ALLOWED_ORIGINS` or `--allowed-origins`.
 
-### Deployment patterns
+### Deployment pattern (Cloudflare Tunnel)
 
-#### Pattern A: reverse proxy (Nginx)
-
-Run the MCP server with auth enabled (and an explicit listen address):
-
-```bash
-export MISTRAL_API_KEY=your_key_here
-export DIR2MCP_ALLOWED_ORIGINS=https://elevenlabs.io
-./dir2mcp up --listen 127.0.0.1:8080 --auth auto
-```
-
-Then front it with TLS at Nginx:
-
-```nginx
-server {
-  listen 443 ssl;
-  server_name mcp.example.com;
-
-  # TLS cert configuration omitted for brevity.
-
-  location /mcp {
-    proxy_pass http://127.0.0.1:8080/mcp;
-    proxy_http_version 1.1;
-    proxy_set_header Host $host;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto $scheme;
-    proxy_set_header Authorization $http_authorization;
-    proxy_set_header Origin $http_origin;
-    proxy_set_header MCP-Protocol-Version $http_mcp_protocol_version;
-    proxy_set_header MCP-Session-Id $http_mcp_session_id;
-  }
-}
-```
-
-Keep the MCP path unchanged end-to-end (`/mcp` unless you intentionally set a custom `--mcp-path`).
-
-#### Pattern B: Cloudflare Tunnel
+#### Cloudflare Tunnel
 
 You can publish an HTTPS hostname through Cloudflare Tunnel while keeping MCP on a private local listener.
 
