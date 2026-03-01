@@ -317,7 +317,7 @@ func (s *Server) markPaymentExecutionSettled(key, paymentResponse string) paymen
 	outcome, ok := s.paymentOutcomes[key]
 	if !ok {
 		// nothing to settle; avoid creating a partial entry
-		s.emitPaymentEvent("warn", "payment_outcome_missing", map[string]interface{}{"key": key})
+		s.emitPaymentEvent("warning", "payment_outcome_missing", map[string]interface{}{"key": key})
 		return paymentExecutionOutcome{}
 	}
 	outcome.Settled = true
@@ -463,7 +463,7 @@ func (s *Server) emitPaymentLogWarning(err error) {
 	if err == nil {
 		return
 	}
-	s.emitPaymentEvent("warn", "payment_log_write_failed", map[string]interface{}{
+	s.emitPaymentEvent("warning", "payment_log_write_failed", map[string]interface{}{
 		"msg":  "payment log write failed",
 		"path": s.paymentLogPath,
 		"err":  err.Error(),
