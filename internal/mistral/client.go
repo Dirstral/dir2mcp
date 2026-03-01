@@ -37,8 +37,8 @@ const (
 	// Client struct if they need to target a different version in the future.
 	DefaultOCRModel = "mistral-ocr-latest"
 	// DefaultChatModel is the default model name used for chat/completion
-	// requests.  It is intentionally not version-pinned so that operators may
-	// provide aliases (e.g. "mistral-small-latest") without editing code.
+	// requests.  Operators may override this via Client.DefaultChatModel to use
+	// aliases (e.g. "mistral-small-latest") without editing code.
 	DefaultChatModel = "mistral-small-2506"
 	// DefaultTranscribeModel is the default model used for audio
 	// transcription requests.
