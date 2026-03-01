@@ -1,6 +1,7 @@
 package test
 
 import (
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -55,6 +56,19 @@ func TestRenderLogoThreeTiers(t *testing.T) {
 }
 
 func TestTerminalWidthParsingAndFallback(t *testing.T) {
+	// Force stdout to a non-TTY so TerminalWidth() consistently exercises
+	// COLUMNS parsing/fallback instead of real terminal dimensions.
+	devNull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatalf("open %s: %v", os.DevNull, err)
+	}
+	oldOut := os.Stdout
+	os.Stdout = devNull
+	t.Cleanup(func() {
+		os.Stdout = oldOut
+		_ = devNull.Close()
+	})
+
 	t.Setenv("COLUMNS", " 121 ")
 	if got := app.TerminalWidth(); got != 121 {
 		t.Fatalf("unexpected terminal width: %d", got)
