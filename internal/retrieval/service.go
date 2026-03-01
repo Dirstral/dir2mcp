@@ -83,6 +83,8 @@ type Service struct {
 	chunkByLabel        map[uint64]model.SearchHit
 	chunkByIndex        map[string]map[uint64]model.SearchHit
 	rootDir             string
+	stateDir            string
+	protocolVersion     string
 	pathExcludes        []string
 	// cached compiled regexps for exclude patterns; keys are normalized patterns
 	excludeRegexps map[string]*regexp.Regexp
@@ -120,10 +122,12 @@ func NewService(store model.Store, index model.Index, embedder model.Embedder, g
 			"text": make(map[uint64]model.SearchHit),
 			"code": make(map[uint64]model.SearchHit),
 		},
-		rootDir:        ".",
-		excludeRegexps: make(map[string]*regexp.Regexp),
-		pathExcludes:   append([]string(nil), defaultPathExcludes...),
-		secretPatterns: compiledPatterns,
+		rootDir:         ".",
+		stateDir:        filepath.Join(".", ".dir2mcp"),
+		protocolVersion: "2025-11-25",
+		excludeRegexps:  make(map[string]*regexp.Regexp),
+		pathExcludes:    append([]string(nil), defaultPathExcludes...),
+		secretPatterns:  compiledPatterns,
 	}
 }
 
@@ -206,6 +210,26 @@ func (s *Service) SetRootDir(root string) {
 	}
 	s.metaMu.Lock()
 	s.rootDir = root
+	s.metaMu.Unlock()
+}
+
+func (s *Service) SetStateDir(stateDir string) {
+	stateDir = strings.TrimSpace(stateDir)
+	if stateDir == "" {
+		stateDir = filepath.Join(".", ".dir2mcp")
+	}
+	s.metaMu.Lock()
+	s.stateDir = stateDir
+	s.metaMu.Unlock()
+}
+
+func (s *Service) SetProtocolVersion(protocolVersion string) {
+	protocolVersion = strings.TrimSpace(protocolVersion)
+	if protocolVersion == "" {
+		protocolVersion = "2025-11-25"
+	}
+	s.metaMu.Lock()
+	s.protocolVersion = protocolVersion
 	s.metaMu.Unlock()
 }
 
@@ -580,8 +604,135 @@ func (s *Service) openFile(ctx context.Context, relPath string, span model.Span,
 }
 
 func (s *Service) Stats(ctx context.Context) (model.Stats, error) {
-	_ = ctx
-	return model.Stats{}, model.ErrNotImplemented
+	if err := ctx.Err(); err != nil {
+		return model.Stats{}, err
+	}
+
+	s.metaMu.RLock()
+	rootDir := strings.TrimSpace(s.rootDir)
+	stateDir := strings.TrimSpace(s.stateDir)
+	protocolVersion := strings.TrimSpace(s.protocolVersion)
+	st := s.store
+	s.metaMu.RUnlock()
+
+	if rootDir == "" {
+		rootDir = "."
+	}
+	if stateDir == "" {
+		stateDir = filepath.Join(rootDir, ".dir2mcp")
+	}
+	if protocolVersion == "" {
+		protocolVersion = "2025-11-25"
+	}
+
+	out := model.Stats{
+		Root:            rootDir,
+		StateDir:        stateDir,
+		ProtocolVersion: protocolVersion,
+		CorpusStats:     model.CorpusStats{DocCounts: map[string]int64{}},
+	}
+	if st == nil {
+		return out, nil
+	}
+
+	if agg, ok := st.(interface {
+		CorpusStats(context.Context) (model.CorpusStats, error)
+	}); ok {
+		corpusStats, err := agg.CorpusStats(ctx)
+		if err == nil {
+			return applyCorpusStats(out, corpusStats), nil
+		}
+		if !errors.Is(err, model.ErrNotImplemented) {
+			return model.Stats{}, err
+		}
+	}
+
+	docStatus, docCounts, totalDocs, err := collectStoreStatsFallback(ctx, st)
+	if err != nil {
+		return model.Stats{}, err
+	}
+	out.DocCounts = docCounts
+	out.TotalDocs = totalDocs
+	out.Scanned = docStatus.scanned
+	out.Indexed = docStatus.indexed
+	out.Skipped = docStatus.skipped
+	out.Deleted = docStatus.deleted
+	out.Errors = docStatus.errors
+	return out, nil
+}
+
+type docStatusCounts struct {
+	scanned int64
+	indexed int64
+	skipped int64
+	deleted int64
+	errors  int64
+}
+
+func applyCorpusStats(base model.Stats, corpus model.CorpusStats) model.Stats {
+	base.Scanned = corpus.Scanned
+	base.Indexed = corpus.Indexed
+	base.Skipped = corpus.Skipped
+	base.Deleted = corpus.Deleted
+	base.Representations = corpus.Representations
+	base.ChunksTotal = corpus.ChunksTotal
+	base.EmbeddedOK = corpus.EmbeddedOK
+	base.Errors = corpus.Errors
+	base.TotalDocs = corpus.TotalDocs
+	if len(corpus.DocCounts) == 0 {
+		base.DocCounts = map[string]int64{}
+	} else {
+		base.DocCounts = make(map[string]int64, len(corpus.DocCounts))
+		for docType, count := range corpus.DocCounts {
+			base.DocCounts[docType] = count
+		}
+	}
+	return base
+}
+
+func collectStoreStatsFallback(ctx context.Context, st model.Store) (docStatusCounts, map[string]int64, int64, error) {
+	const pageSize = 500
+	offset := 0
+	counts := make(map[string]int64)
+	status := docStatusCounts{}
+	var totalDocs int64
+
+	for {
+		docs, total, err := st.ListFiles(ctx, "", "", pageSize, offset)
+		if err != nil {
+			return docStatusCounts{}, nil, 0, err
+		}
+		for _, doc := range docs {
+			status.scanned++
+			if doc.Deleted {
+				status.deleted++
+				continue
+			}
+
+			docType := strings.TrimSpace(doc.DocType)
+			if docType == "" {
+				docType = "unknown"
+			}
+			counts[docType]++
+			totalDocs++
+
+			switch strings.ToLower(strings.TrimSpace(doc.Status)) {
+			case "skipped":
+				status.skipped++
+			case "error":
+				status.errors++
+			default:
+				status.indexed++
+			}
+		}
+
+		offset += len(docs)
+		if len(docs) == 0 || int64(offset) >= total {
+			break
+		}
+	}
+
+	return status, counts, totalDocs, nil
 }
 
 func (s *Service) searchHitForLabel(indexName string, label uint64) model.SearchHit {

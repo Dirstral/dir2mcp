@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -18,6 +19,7 @@ import (
 	"dir2mcp/internal/config"
 	"dir2mcp/internal/mcp"
 	"dir2mcp/internal/model"
+	"dir2mcp/internal/protocol"
 	"dir2mcp/internal/store"
 )
 
@@ -55,15 +57,15 @@ func TestMCPToolsList_RegistersDayOneToolsWithSchemas(t *testing.T) {
 	}
 
 	expected := map[string]bool{
-		"dir2mcp.search":             false,
-		"dir2mcp.ask":                false,
-		"dir2mcp.ask_audio":          false,
-		"dir2mcp.transcribe":         false,
-		"dir2mcp.annotate":           false,
-		"dir2mcp.transcribe_and_ask": false,
-		"dir2mcp.open_file":          false,
-		"dir2mcp.list_files":         false,
-		"dir2mcp.stats":              false,
+		protocol.ToolNameSearch:           false,
+		protocol.ToolNameAsk:              false,
+		protocol.ToolNameAskAudio:         false,
+		protocol.ToolNameTranscribe:       false,
+		protocol.ToolNameAnnotate:         false,
+		protocol.ToolNameTranscribeAndAsk: false,
+		protocol.ToolNameOpenFile:         false,
+		protocol.ToolNameListFiles:        false,
+		protocol.ToolNameStats:            false,
 	}
 
 	for _, tool := range envelope.Result.Tools {
@@ -101,9 +103,49 @@ func TestMCPToolsCallTranscribe_MissingRelPath(t *testing.T) {
 	assertToolCallErrorCode(t, resp, "MISSING_FIELD")
 }
 
+func requireRetryableAndResetBody(t *testing.T, resp *http.Response) {
+	t.Helper()
+	// read and validate that the response has a retryable error flag inside
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("failed to read response body: %v", err)
+	}
+
+	var payload struct {
+		Result struct {
+			StructuredContent map[string]interface{} `json:"structuredContent"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatalf("failed to unmarshal response body: %v; body=%s", err, string(body))
+	}
+
+	errObjRaw, ok := payload.Result.StructuredContent["error"]
+	if !ok {
+		t.Fatalf("response body missing structuredContent.error: %s", string(body))
+	}
+	errObj, ok := errObjRaw.(map[string]interface{})
+	if !ok {
+		t.Fatalf("structuredContent.error is not an object: %#v", errObjRaw)
+	}
+	retryableVal, ok := errObj["retryable"]
+	if !ok {
+		t.Fatalf("response body missing structuredContent.error.retryable: %s", string(body))
+	}
+	retryableBool, ok := retryableVal.(bool)
+	if !ok {
+		t.Fatalf("retryable field is not a boolean: %#v", retryableVal)
+	}
+	if !retryableBool {
+		t.Fatalf("expected retryable=true, got %v", retryableBool)
+	}
+
+	// reset body so callers can read it again (assertToolCallErrorCode will)
+	resp.Body = io.NopCloser(bytes.NewReader(body))
+}
+
 func TestMCPToolsCallTranscribe_ProviderFailureIsRetryable(t *testing.T) {
 	cfg, st, _ := setupMCPToolStore(t, "voice.wav", "audio", []byte("RIFF0000WAVEfmt data"))
-	cfg.AuthMode = "none"
 	cfg.MistralAPIKey = "test-key"
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -126,56 +168,26 @@ func TestMCPToolsCallTranscribe_ProviderFailureIsRetryable(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected HTTP 200 for retryable provider failure, got %d", resp.StatusCode)
 	}
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatalf("failed to read response body: %v", err)
-	}
-	// decode JSON and verify the nested tool-level retryable flag in
-	// result.structuredContent.error.retryable.
-	var payload struct {
-		Result struct {
-			StructuredContent map[string]interface{} `json:"structuredContent"`
-		} `json:"result"`
-	}
-	if err := json.Unmarshal(body, &payload); err != nil {
-		t.Fatalf("failed to unmarshal response body: %v; body=%s", err, string(body))
-	}
-	errObjRaw, ok := payload.Result.StructuredContent["error"]
-	if !ok {
-		t.Fatalf("response body missing structuredContent.error: %s", string(body))
-	}
-	errObj, ok := errObjRaw.(map[string]interface{})
-	if !ok {
-		t.Fatalf("structuredContent.error is not an object: %#v", errObjRaw)
-	}
-	retryableVal, ok := errObj["retryable"]
-	if !ok {
-		t.Fatalf("response body missing structuredContent.error.retryable: %s", string(body))
-	}
-	retryableBool, ok := retryableVal.(bool)
-	if !ok {
-		t.Fatalf("retryable field is not a boolean: %#v", retryableVal)
-	}
-	if !retryableBool {
-		t.Fatalf("expected retryable=true, got %v", retryableBool)
-	}
-	resp.Body = io.NopCloser(bytes.NewReader(body))
+
+	requireRetryableAndResetBody(t, resp)
 	assertToolCallErrorCode(t, resp, "TRANSCRIBE_FAILED")
 }
 
 func TestMCPToolsCallTranscribe_Success(t *testing.T) {
 	cfg, st, _ := setupMCPToolStore(t, "voice.wav", "audio", []byte("RIFF0000WAVEfmt data"))
-	cfg.AuthMode = "none"
 	cfg.MistralAPIKey = "test-key"
 	var gotLanguage string
 
+	// use a channel to propagate handler errors back to the main goroutine
+	errCh := make(chan error, 1)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/audio/transcriptions" {
 			http.NotFound(w, r)
 			return
 		}
 		if err := r.ParseMultipartForm(8 << 20); err != nil {
-			t.Fatalf("parse multipart form: %v", err)
+			errCh <- fmt.Errorf("parse multipart form: %v", err)
+			return
 		}
 		gotLanguage = r.FormValue("language")
 		_, _ = io.Copy(io.Discard, r.Body)
@@ -192,6 +204,12 @@ func TestMCPToolsCallTranscribe_Success(t *testing.T) {
 	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
 	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":32,"method":"tools/call","params":{"name":"dir2mcp.transcribe","arguments":{"rel_path":"voice.wav","timestamps":true,"language":"fr"}}}`)
 	defer func() { _ = resp.Body.Close() }()
+	// check if the upstream handler encountered an error
+	select {
+	case err := <-errCh:
+		t.Fatalf("upstream handler error: %v", err)
+	default:
+	}
 	if resp.StatusCode != http.StatusOK {
 		payload, _ := io.ReadAll(resp.Body)
 		t.Fatalf("status=%d want=%d body=%s", resp.StatusCode, http.StatusOK, string(payload))
@@ -218,11 +236,13 @@ func TestMCPToolsCallTranscribe_Success(t *testing.T) {
 	if got, ok := envelope.Result.StructuredContent["transcribed"].(bool); !ok || !got {
 		t.Fatalf("expected transcribed=true, got %#v", envelope.Result.StructuredContent["transcribed"])
 	}
+	if got, ok := envelope.Result.StructuredContent["indexed"].(bool); !ok || !got {
+		t.Fatalf("expected indexed=true, got %#v", envelope.Result.StructuredContent["indexed"])
+	}
 }
 
 func TestMCPToolsCallAnnotate_MissingSchema(t *testing.T) {
 	cfg, st, _ := setupMCPToolStore(t, "note.txt", "text", []byte("alpha note"))
-	cfg.AuthMode = "none"
 	server := httptest.NewServer(mcp.NewServer(cfg, nil, mcp.WithStore(st)).Handler())
 	defer server.Close()
 
@@ -234,7 +254,6 @@ func TestMCPToolsCallAnnotate_MissingSchema(t *testing.T) {
 
 func TestMCPToolsCallAnnotate_ProviderFailure(t *testing.T) {
 	cfg, st, _ := setupMCPToolStore(t, "note.txt", "text", []byte("alpha note"))
-	cfg.AuthMode = "none"
 	cfg.MistralAPIKey = "test-key"
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -258,7 +277,6 @@ func TestMCPToolsCallAnnotate_ProviderFailure(t *testing.T) {
 
 func TestMCPToolsCallAnnotate_Success(t *testing.T) {
 	cfg, st, _ := setupMCPToolStore(t, "note.txt", "text", []byte("alpha note"))
-	cfg.AuthMode = "none"
 	cfg.MistralAPIKey = "test-key"
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -306,6 +324,26 @@ func TestMCPToolsCallAnnotate_Success(t *testing.T) {
 	}
 }
 
+func TestMCPToolsCallAnnotate_PromptTooLarge(t *testing.T) {
+	cfg, st, _ := setupMCPToolStore(t, "note.txt", "text", []byte("small"))
+	cfg.MistralAPIKey = "test-key"
+
+	server := httptest.NewServer(mcp.NewServer(cfg, nil, mcp.WithStore(st)).Handler())
+	defer server.Close()
+
+	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
+	// create a ridiculously large schema to push prompt over our hard limit
+	bigSchema := map[string]interface{}{"foo": strings.Repeat("x", 250000)}
+	schemaBytes, err := json.Marshal(bigSchema)
+	if err != nil {
+		t.Fatalf("marshal schema: %v", err)
+	}
+	rpc := fmt.Sprintf(`{"jsonrpc":"2.0","id":40,"method":"tools/call","params":{"name":"dir2mcp.annotate","arguments":{"rel_path":"note.txt","schema_json":%s}}}`, string(schemaBytes))
+	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, rpc)
+	defer func() { _ = resp.Body.Close() }()
+	assertToolCallErrorCode(t, resp, "ANNOTATE_FAILED")
+}
+
 func TestMCPToolsCallTranscribeAndAsk_MissingQuestion(t *testing.T) {
 	cfg := config.Default()
 	cfg.AuthMode = "none"
@@ -321,7 +359,6 @@ func TestMCPToolsCallTranscribeAndAsk_MissingQuestion(t *testing.T) {
 
 func TestMCPToolsCallTranscribeAndAsk_Success(t *testing.T) {
 	cfg, st, _ := setupMCPToolStore(t, "voice.wav", "audio", []byte("RIFF0000WAVEfmt data"))
-	cfg.AuthMode = "none"
 	cfg.MistralAPIKey = "test-key"
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -416,7 +453,7 @@ func setupMCPToolStore(t *testing.T, relPath, docType string, content []byte) (c
 	cfg := config.Default()
 	cfg.RootDir = rootDir
 	cfg.StateDir = stateDir
-	cfg.MCPPath = "/mcp"
+	cfg.MCPPath = protocol.DefaultMCPPath
 	cfg.AuthMode = "none"
 	return cfg, st, rootDir
 }
@@ -476,7 +513,7 @@ func TestMCPToolsCallAskAudio_AskNotImplementedReturnsGracefulSuccess(t *testing
 	if len(envelope.Result.Content) == 0 {
 		t.Fatal("expected at least one content item")
 	}
-	if !strings.Contains(strings.ToLower(envelope.Result.Content[0].Text), "dir2mcp.search") {
+	if !strings.Contains(strings.ToLower(envelope.Result.Content[0].Text), strings.ToLower(protocol.ToolNameSearch)) {
 		t.Fatalf("expected fallback guidance to dir2mcp.search, got %q", envelope.Result.Content[0].Text)
 	}
 }
@@ -654,6 +691,12 @@ func TestMCPToolsCallStats_ReturnsStructuredContent(t *testing.T) {
 		t.Fatalf("unexpected protocol_version: %#v", envelope.Result.StructuredContent["protocol_version"])
 	}
 
+	if got, ok := envelope.Result.StructuredContent["doc_counts_available"].(bool); !ok {
+		t.Fatalf("expected doc_counts_available boolean, got %#v", envelope.Result.StructuredContent["doc_counts_available"])
+	} else if got {
+		t.Fatalf("expected doc_counts_available=false when retriever missing, got true")
+	}
+
 	indexingRaw, ok := envelope.Result.StructuredContent["indexing"].(map[string]interface{})
 	if !ok {
 		t.Fatalf("expected indexing object, got %#v", envelope.Result.StructuredContent["indexing"])
@@ -669,6 +712,89 @@ func TestMCPToolsCallStats_ReturnsStructuredContent(t *testing.T) {
 	sttProvider, ok := modelsRaw["stt_provider"].(string)
 	if !ok || sttProvider == "" {
 		t.Fatalf("expected non-empty string models.stt_provider, got %#v", modelsRaw["stt_provider"])
+	}
+}
+
+func TestMCPToolsCallStats_UsesRetrieverStats(t *testing.T) {
+	cfg := config.Default()
+	cfg.AuthMode = "none"
+
+	retriever := &askAudioRetrieverStub{
+		statsConfigured: true,
+		stats: model.Stats{
+			Root:            "/repo",
+			StateDir:        "/repo/.dir2mcp",
+			ProtocolVersion: cfg.ProtocolVersion,
+			CorpusStats: model.CorpusStats{
+				DocCounts:       map[string]int64{"code": 2, "md": 1},
+				TotalDocs:       3,
+				Scanned:         4,
+				Indexed:         2,
+				Skipped:         1,
+				Deleted:         1,
+				Representations: 6,
+				ChunksTotal:     8,
+				EmbeddedOK:      7,
+				Errors:          1,
+			},
+		},
+	}
+
+	server := httptest.NewServer(mcp.NewServer(cfg, retriever).Handler())
+	defer server.Close()
+
+	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
+	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":33,"method":"tools/call","params":{"name":"dir2mcp.stats","arguments":{}}}`)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		payload, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status=%d want=%d body=%s", resp.StatusCode, http.StatusOK, string(payload))
+	}
+
+	var envelope struct {
+		Result struct {
+			IsError           bool                   `json:"isError"`
+			StructuredContent map[string]interface{} `json:"structuredContent"`
+		} `json:"result"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if envelope.Result.IsError {
+		t.Fatal("expected stats tool call to succeed")
+	}
+	if got := envelope.Result.StructuredContent["root"]; got != "/repo" {
+		t.Fatalf("unexpected root: %#v", got)
+	}
+	if got := envelope.Result.StructuredContent["state_dir"]; got != "/repo/.dir2mcp" {
+		t.Fatalf("unexpected state_dir: %#v", got)
+	}
+	if got := envelope.Result.StructuredContent["total_docs"]; got != float64(3) {
+		t.Fatalf("unexpected total_docs: %#v", got)
+	}
+
+	docCounts, ok := envelope.Result.StructuredContent["doc_counts"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected doc_counts object, got %#v", envelope.Result.StructuredContent["doc_counts"])
+	}
+	if docCounts["code"] != float64(2) || docCounts["md"] != float64(1) {
+		t.Fatalf("unexpected doc_counts payload: %#v", docCounts)
+	}
+	if got, ok := envelope.Result.StructuredContent["doc_counts_available"].(bool); !ok {
+		t.Fatalf("expected doc_counts_available boolean, got %#v", envelope.Result.StructuredContent["doc_counts_available"])
+	} else if !got {
+		t.Fatalf("expected doc_counts_available=true when retriever provided stats, got %v", got)
+	}
+
+	indexingRaw, ok := envelope.Result.StructuredContent["indexing"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected indexing object, got %#v", envelope.Result.StructuredContent["indexing"])
+	}
+	if indexingRaw["scanned"] != float64(4) || indexingRaw["representations"] != float64(6) || indexingRaw["chunks_total"] != float64(8) {
+		t.Fatalf("unexpected indexing payload: %#v", indexingRaw)
+	}
+	if !retriever.statsCalled.Load() {
+		t.Fatal("expected retriever.Stats to be called")
 	}
 }
 
@@ -1018,6 +1144,10 @@ func (s *failingListFilesStore) Close() error {
 	return nil
 }
 
+// compile-time assertion: ensure our stub satisfies the Store interface used by
+// mcp.WithStore.  This will fail to compile if the interface changes.
+var _ model.Store = (*failingListFilesStore)(nil)
+
 // assertToolCallErrorCode validates that a tools/call response returned a
 // tool-level error payload with the expected canonical error code.
 func assertToolCallErrorCode(t *testing.T, resp *http.Response, wantCode string) {
@@ -1075,9 +1205,9 @@ func initializeSession(t *testing.T, url string) string {
 		payload, _ := io.ReadAll(resp.Body)
 		t.Fatalf("status=%d want=%d body=%s", resp.StatusCode, http.StatusOK, string(payload))
 	}
-	sessionID := resp.Header.Get("MCP-Session-Id")
+	sessionID := resp.Header.Get(protocol.MCPSessionHeader)
 	if sessionID == "" {
-		t.Fatal("missing MCP-Session-Id header")
+		t.Fatalf("missing %s header", protocol.MCPSessionHeader)
 	}
 	return sessionID
 }
@@ -1092,7 +1222,7 @@ func postRPC(t *testing.T, url, sessionID, body string) *http.Response {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if sessionID != "" {
-		req.Header.Set("MCP-Session-Id", sessionID)
+		req.Header.Set(protocol.MCPSessionHeader, sessionID)
 	}
 
 	resp, err := http.DefaultClient.Do(req)
@@ -1105,6 +1235,10 @@ func postRPC(t *testing.T, url, sessionID, body string) *http.Response {
 type askAudioRetrieverStub struct {
 	askResult model.AskResult
 	askErr    error
+	stats     model.Stats
+	statsErr  error
+
+	statsConfigured bool
 	// values produced by Search mode
 	searchHits []model.SearchHit
 	searchErr  error
@@ -1120,6 +1254,7 @@ type askAudioRetrieverStub struct {
 	// tracking for assertions (read from HTTP handler goroutines)
 	searchCalled atomic.Bool
 	askCalled    atomic.Bool
+	statsCalled  atomic.Bool
 
 	// indexing state for the new accessor
 	// this field is only written during initialization and then read by
@@ -1162,7 +1297,14 @@ func (s *askAudioRetrieverStub) OpenFile(_ context.Context, _ string, _ model.Sp
 }
 
 func (s *askAudioRetrieverStub) Stats(_ context.Context) (model.Stats, error) {
-	return model.Stats{}, model.ErrNotImplemented
+	s.statsCalled.Store(true)
+	if s.statsErr != nil {
+		return model.Stats{}, s.statsErr
+	}
+	if !s.statsConfigured {
+		return model.Stats{}, model.ErrNotImplemented
+	}
+	return s.stats, nil
 }
 
 func (s *askAudioRetrieverStub) IndexingComplete(_ context.Context) (bool, error) {

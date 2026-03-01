@@ -20,6 +20,16 @@ import (
 	"dir2mcp/internal/model"
 )
 
+// annotationChunk* constants mirror the hardcoded parameters previously
+// used when splitting annotation JSON/text into segments for indexing. They
+// centralize tuning values and improve readability of call sites in this
+// file. The defaults were 1200, 200 and 120 respectively.
+const (
+	annotationChunkSize    = 1200
+	annotationChunkOverlap = 200
+	annotationChunkMinSize = 120
+)
+
 type Service struct {
 	cfg           config.Config
 	store         model.Store
@@ -93,6 +103,22 @@ func NewService(cfg config.Config, store model.Store) *Service {
 		svc.repGen = NewRepresentationGenerator(rs)
 	}
 	return svc
+}
+
+// healthCheckInterval returns the configured base poll interval for connector
+// health probes. It mirrors the behaviour described in VISION.md: when the
+// configuration value is zero (or the receiver is nil) the default from
+// config.Default().HealthCheckInterval is returned. Actual polling routines
+// should call this method to obtain a duration rather than hardcoding any fixed
+// interval.
+func (s *Service) healthCheckInterval() time.Duration {
+	if s == nil {
+		return config.Default().HealthCheckInterval
+	}
+	if s.cfg.HealthCheckInterval > 0 {
+		return s.cfg.HealthCheckInterval
+	}
+	return config.Default().HealthCheckInterval
 }
 
 // SetLogger sets a custom logger on the service. Passing nil restores the
@@ -748,7 +774,8 @@ func (s *Service) StoreAnnotationRepresentations(ctx context.Context, doc model.
 	}
 	jsonText := string(jsonBytes)
 
-	flattened := flattenJSONForIndexing(annotation)
+	flattened := s.flattenJSONForIndexing(annotation)
+	trimmed := strings.TrimSpace(flattened)
 	preview := flattened
 	if runes := []rune(preview); len(runes) > 240 {
 		preview = string(runes[:240]) + "..."
@@ -766,11 +793,17 @@ func (s *Service) StoreAnnotationRepresentations(ctx context.Context, doc model.
 		if upsertErr != nil {
 			return fmt.Errorf("upsert annotation json representation: %w", upsertErr)
 		}
-		if upsertErr := s.repGen.upsertChunksForRepresentationWithStore(ctx, tx, jsonRepID, "text", chunkTextByChars(jsonText, 1200, 200, 120)); upsertErr != nil {
+		if upsertErr := s.repGen.upsertChunksForRepresentationWithStore(ctx, tx, jsonRepID, "text", chunkTextByChars(jsonText, annotationChunkSize, annotationChunkOverlap, annotationChunkMinSize)); upsertErr != nil {
 			return fmt.Errorf("persist annotation json chunks: %w", upsertErr)
 		}
 
 		if !indexFlattenedText {
+			return nil
+		}
+
+		// don't index an empty or whitespace-only flattened string; it only
+		// creates useless representations/chunks.
+		if trimmed == "" {
 			return nil
 		}
 
@@ -785,13 +818,18 @@ func (s *Service) StoreAnnotationRepresentations(ctx context.Context, doc model.
 		if upsertErr != nil {
 			return fmt.Errorf("upsert annotation text representation: %w", upsertErr)
 		}
-		if upsertErr := s.repGen.upsertChunksForRepresentationWithStore(ctx, tx, textRepID, "text", chunkTextByChars(flattened, 1200, 200, 120)); upsertErr != nil {
+		if upsertErr := s.repGen.upsertChunksForRepresentationWithStore(ctx, tx, textRepID, "text", chunkTextByChars(flattened, annotationChunkSize, annotationChunkOverlap, annotationChunkMinSize)); upsertErr != nil {
 			return fmt.Errorf("persist annotation text chunks: %w", upsertErr)
 		}
 		return nil
 	})
 	if err != nil {
 		return "", err
+	}
+	// Count JSON representation; count text representation only if created.
+	s.addRepresentations(1)
+	if indexFlattenedText && trimmed != "" {
+		s.addRepresentations(1)
 	}
 	return preview, nil
 }
@@ -1003,7 +1041,12 @@ func (s *Service) ReadOrComputeTranscript(ctx context.Context, doc model.Documen
 	return s.readOrComputeTranscript(ctx, doc, content)
 }
 
-func flattenJSONForIndexing(v interface{}) string {
+// flattenJSONForIndexing walks an arbitrary JSON-like structure and
+// builds a string suitable for indexing. When a value cannot be marshaled we
+// log the failure to the provided logger and continue; previously this helper
+// used the package-global log.Printf which made testing and customization
+// difficult.
+func (s *Service) flattenJSONForIndexing(v interface{}) string {
 	var lines []string
 	var walk func(prefix string, value interface{})
 	walk = func(prefix string, value interface{}) {
@@ -1028,7 +1071,11 @@ func flattenJSONForIndexing(v interface{}) string {
 			}
 		case string:
 			if text := strings.TrimSpace(typed); text != "" {
-				lines = append(lines, fmt.Sprintf("%s: %s", prefix, text))
+				if prefix != "" {
+					lines = append(lines, fmt.Sprintf("%s: %s", prefix, text))
+				} else {
+					lines = append(lines, text)
+				}
 			}
 		default:
 			b, err := json.Marshal(typed)
@@ -1037,18 +1084,30 @@ func flattenJSONForIndexing(v interface{}) string {
 				// so that other entries aren't dropped. include prefix, the
 				// value being marshaled and a reference to json.Marshal in the
 				// message so the source is obvious when debugging.
-				log.Printf("flattenJSONForIndexing: json.Marshal failed for prefix=%q type=%T error=%v (lines so far=%d)",
+				s.getLogger().Printf("flattenJSONForIndexing: json.Marshal failed for prefix=%q type=%T error=%v (lines so far=%d)",
 					prefix, typed, err, len(lines))
 				return
 			}
-			lines = append(lines, fmt.Sprintf("%s: %s", prefix, string(b)))
+			str := string(b)
+			if prefix != "" {
+				lines = append(lines, fmt.Sprintf("%s: %s", prefix, str))
+			} else {
+				lines = append(lines, str)
+			}
 		}
 	}
 
 	walk("", v)
 	out := strings.TrimSpace(strings.Join(lines, "\n"))
 	if out == "" {
-		raw, _ := json.Marshal(v)
+		raw, err := json.Marshal(v)
+		if err != nil {
+			// log marshal failure so that debugging can surface problematic
+			// values; returning early avoids converting a nil slice to string
+			// avoid logging raw value contents in case they contain sensitive data.
+			s.getLogger().Printf("flattenJSONForIndexing: fallback json.Marshal failed error=%v type=%T", err, v)
+			return ""
+		}
 		return string(raw)
 	}
 	return out

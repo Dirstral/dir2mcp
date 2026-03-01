@@ -1,387 +1,166 @@
+<p align="center">
+  <img src="assets/logo.png" alt="dir2mcp logo" width="720" />
+</p>
+
+<p align="center">
+  <a href="https://github.com/Dirstral/dir2mcp/actions/workflows/go.yml"><img src="https://github.com/Dirstral/dir2mcp/actions/workflows/go.yml/badge.svg" alt="CI"></a>
+  <a href="https://go.dev/"><img src="https://img.shields.io/badge/go-1.22+-00ADD8?logo=go" alt="Go 1.22+"></a>
+  <a href="https://goreportcard.com/report/github.com/Dirstral/dir2mcp"><img src="https://goreportcard.com/badge/github.com/Dirstral/dir2mcp" alt="Go Report Card"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
+</p>
+
 # dir2mcp
 
-`dir2mcp` is a deploy-first MCP server for private directory data.
+Deploy any local directory as an MCP knowledge server with indexing, retrieval, citations, and optional x402 request gating (x402 is a payment/request‑gating protocol).
 
-## Current status
+## Why dir2mcp
 
-This repository is currently spec-first. The core implementation is a Go single binary.
+- Single Go binary (`dir2mcp`) with local-first state in `.dir2mcp/`
+- MCP Streamable HTTP server with a stable tool surface
+- Multimodal ingestion: text/code, OCR, transcripts, structured annotations
+- Citation-aware retrieval and RAG-style answering
+- Optional facilitator-backed x402 payment gating for `tools/call`
+- Monorepo layout with two binaries:
+  - `dir2mcp`: MCP server and indexing/runtime host
+  - `dirstral`: terminal client (Breeze/Tempest/Lighthouse/Settings)
 
-## Build and run
+## Quickstart
 
-**1. Install Go** (if needed, macOS):
+**Prerequisites:** Go 1.22+ ([go.dev/dl](https://go.dev/dl/)) and `make`.
 
 ```bash
-brew install go
-```
-
-Or download from [go.dev/dl](https://go.dev/dl/).
-
-**2. Build the binary:**
-
-```bash
-cd /path/to/dir2mcp
+git clone https://github.com/Dirstral/dir2mcp
+cd dir2mcp
+cp .env.example .env        # add your API keys
+# optional: create `.env.local` for local overrides
+# (it takes precedence over `.env`)
+# cp .env.example .env.local
 make build
-```
-
-Or: `go build -o dir2mcp ./cmd/dir2mcp/`
-
-**3. Run:**
-
-```bash
-export MISTRAL_API_KEY=your_key_here
 ./dir2mcp up
+./dirstral breeze
 ```
+
+`DIRSTRAL_MCP_URL` controls where Breeze/Tempest connect (local or remote).
+Lighthouse process management (`lighthouse up|status|down`) is local-only. Use
+`dirstral lighthouse remote` to probe a remote MCP endpoint without process control.
+
+Or build each binary directly:
+
+- `go build -o dir2mcp ./cmd/dir2mcp/`
+- `go build -o dirstral ./cmd/dirstral/`
+
+The server prints its MCP endpoint URL on startup. Point your MCP client at that URL.
+Precedence (highest to lowest): shell environment variables > `.env.local` > `.env`.
+
+### Local development environment
+
+`dir2mcp` automatically loads both `.env` and `.env.local` from the working directory; `.env.local` overrides `.env`, and real shell environment variables take ultimate precedence.
+
+## CLI Commands
+
+| Command | Description |
+|---|---|
+| `up` | Start the MCP server and begin indexing |
+| `status` | Show corpus and indexing state |
+| `ask "<question>"` | Run a local RAG query |
+| `reindex` | Force full re-ingestion |
+| `config init` | Create a baseline `.dir2mcp.yaml` |
+| `config print` | Print effective config |
+| `version` | Print version |
+
+Running `dir2mcp` with no arguments prints usage, which you can consult anytime to see available commands.
+
+## MCP Tools
+
+| Tool | Description |
+|---|---|
+| `dir2mcp.search` | Semantic search over indexed content |
+| `dir2mcp.ask` | RAG-style question answering with citations |
+| `dir2mcp.ask_audio` | Ask with TTS audio response |
+| `dir2mcp.transcribe` | Transcribe an audio file from the corpus |
+| `dir2mcp.annotate` | Structured annotation of a document |
+| `dir2mcp.transcribe_and_ask` | Transcribe then ask over the result |
+| `dir2mcp.open_file` | Retrieve a file by path with span context |
+| `dir2mcp.list_files` | List indexed files with metadata |
+| `dir2mcp.stats` | Corpus statistics |
+
+## Configuration
+
+### YAML configuration (`.dir2mcp.yaml`)
+
+The primary on‑disk configuration file is `.dir2mcp.yaml` (created by `dir2mcp config init`).
+Use it for persistent, non‑sensitive settings such as connector definitions, defaults, and other options
+you might want to check into source control. Values defined here may be overridden at runtime by
+environment variables.
+
+### Environment variables (overrides / secrets)
+
+Sensitive keys and temporary runtime overrides are supplied via environment variables. They take
+precedence over entries in the YAML file and are convenient for API keys, tokens, or settings that
+vary by deployment. The commonly used variables are:
+
+| Variable | Required | Description |
+|---|---|---|
+| `MISTRAL_API_KEY` | Yes | Mistral API key for embeddings, OCR, and generation |
+| `MISTRAL_BASE_URL` | No | Mistral base URL (default: `https://api.mistral.ai`) |
+| `DIR2MCP_AUTH_TOKEN` | No | Auth token override |
+| `DIR2MCP_SESSION_INACTIVITY_TIMEOUT` | No | Session inactivity timeout (default: `24h`) |
+| `DIR2MCP_SESSION_TIMEOUT` | No | Deprecated alias for `DIR2MCP_SESSION_INACTIVITY_TIMEOUT`; still supported but deprecated |
+| `DIR2MCP_SESSION_MAX_LIFETIME` | No | Maximum session lifetime |
+| `DIR2MCP_HEALTH_CHECK_INTERVAL` | No | Connector health poll interval (default: `5s`) |
+| `DIR2MCP_ALLOWED_ORIGINS` | No | Comma-separated additional browser origins |
+| `DIR2MCP_X402_FACILITATOR_TOKEN` | No | x402 facilitator bearer token |
+| `ELEVENLABS_API_KEY` | No | ElevenLabs key for TTS/STT |
+| `ELEVENLABS_BASE_URL` | No | ElevenLabs base URL (default: `https://api.elevenlabs.io`) |
+
+## Security Defaults
+
+- Default listen address is local (`127.0.0.1:0`)
+- `--public` binds to `0.0.0.0` (unless explicit `--listen` is provided)
+- `--public` with `--auth none` is rejected unless `--force-insecure` is set
+- Browser origins are allowlisted (localhost defaults + explicit additions)
+
+## Optional x402 Mode
+
+x402 is optional and additive. Configure with `--x402 off|on|required` and facilitator settings.
+
+| Mode | Behavior |
+|---|---|
+| `off` | Disabled (default) |
+| `on` | Enabled; fail-open if config is incomplete |
+| `required` | Strict validation and gating |
+
+See [docs/x402-payment-adapter-spec.md](docs/x402-payment-adapter-spec.md) for the full facilitator adapter contract.
+
+## Project Status
+
+Core server, ingestion pipeline, retrieval, citations, and x402 gating are implemented. See [open issues](https://github.com/Dirstral/dir2mcp/issues) for in-progress work.
 
 ## Documentation
 
-- `VISION.md`: product vision, principles, use cases, and roadmap
-- `SPEC.md`: output/integration spec, tool contracts, config, security, and x402 requirements
-- `ECOSYSTEM.md`: discovery/trust/metering/payment ecosystem framing
-- `x402-payment-adapter-spec.md`: facilitator adapter contract for optional x402 mode
+- [docs/SPEC.md](docs/SPEC.md) — output contracts, interfaces, schema and operational details
+- [docs/VISION.md](docs/VISION.md) — product direction and architectural principles
+- [docs/ECOSYSTEM.md](docs/ECOSYSTEM.md) — discovery, trust, metering, payment ecosystem framing
+- [docs/x402-payment-adapter-spec.md](docs/x402-payment-adapter-spec.md) — facilitator-facing x402 adapter contract
 
-## Hackathon sequencing
-
-- Day 1: core MCP + indexing + retrieval + citations
-- Day 2 (optional): native x402 request gating via facilitator integration
-
-## Demo direction (current)
-
-For the hackathon demo we are not building a custom web frontend.
-
-- Voice UX is hosted by ElevenLabs Agents (talk-to page)
-- `dir2mcp` remains the MCP knowledge server and tool provider
-- Agent calls MCP tools over remote MCP (SSE/streamable HTTP)
-- Optional: keep `ask_audio` for direct tool-level TTS experiments
-
-### ElevenLabs approval settings (hosted demo)
-
-For predictable live-demo behavior, auto-approve only read-only knowledge tools:
-
-- `dir2mcp.search`
-- `dir2mcp.ask`
-- `dir2mcp.ask_audio`
-- `dir2mcp.open_file`
-- `dir2mcp.list_files`
-- `dir2mcp.stats`
-
-## MCP setup by client
-
-Recommended servers:
-
-- `everything`: MCP protocol reference server
-- `sequential-thinking`: structured planning helper
-- `playwright`: browser automation for local checks
-- `github`: GitHub MCP endpoint for issues/PR/repo workflows
-- `context7`: up-to-date library/framework docs
-
-### Codex
+## Development
 
 ```bash
-codex mcp add everything -- npx -y @modelcontextprotocol/server-everything
-codex mcp add sequential-thinking -- npx -y @modelcontextprotocol/server-sequential-thinking
-codex mcp add playwright -- npx -y @playwright/mcp
-codex mcp add github --url https://api.githubcopilot.com/mcp/ --bearer-token-env-var GITHUB_PERSONAL_ACCESS_TOKEN
-codex mcp add context7 -- npx -y @upstash/context7-mcp
+make check        # fmt + vet + lint + test
+make build        # build binary
+make benchmark    # run retrieval benchmarks
 ```
 
-### Claude Code
+API notes:
+- `retrieval.NewEngine` now requires a context as its first parameter:
+  `retrieval.NewEngine(ctx, stateDir, rootDir, cfg)`.
+- `Engine.Ask` gained a context-aware variant `AskWithContext`; the
+  original `Ask` continues to exist as a thin wrapper for compatibility.
 
-```bash
-claude mcp add --transport stdio everything -- npx -y @modelcontextprotocol/server-everything
-claude mcp add --transport stdio sequential-thinking -- npx -y @modelcontextprotocol/server-sequential-thinking
-claude mcp add --transport stdio playwright -- npx -y @playwright/mcp
-claude mcp add --transport stdio github -- npx -y @modelcontextprotocol/server-github
-claude mcp add --transport stdio context7 -- npx -y @upstash/context7-mcp
+`make check` includes `make lint`, which requires [`golangci-lint`](https://golangci-lint.run/welcome/install/) installed locally.
 
-# Verify
-claude mcp list
-```
+Contributor and agent guides: [AGENTS.md](AGENTS.md) · [CLAUDE.md](CLAUDE.md)
 
-### Mistral Vibe
+## License
 
-```bash
-mkdir -p ~/.vibe
-touch ~/.vibe/config.toml
-
-cat >> ~/.vibe/config.toml <<'EOCFG'
-[[mcp_servers]]
-name = "everything"
-transport = "stdio"
-command = "npx"
-args = ["-y", "@modelcontextprotocol/server-everything"]
-
-[[mcp_servers]]
-name = "sequential-thinking"
-transport = "stdio"
-command = "npx"
-args = ["-y", "@modelcontextprotocol/server-sequential-thinking"]
-
-[[mcp_servers]]
-name = "playwright"
-transport = "stdio"
-command = "npx"
-args = ["-y", "@playwright/mcp"]
-
-[[mcp_servers]]
-name = "github"
-transport = "stdio"
-command = "npx"
-args = ["-y", "@modelcontextprotocol/server-github"]
-
-[[mcp_servers]]
-name = "context7"
-transport = "streamable-http"
-url = "https://mcp.context7.com/mcp"
-api_key_env = "CONTEXT7_API_KEY"
-api_key_header = "Authorization"
-api_key_format = "Bearer {token}"
-EOCFG
-
-# Reload Vibe after editing config
-```
-
-## Environment variables
-
-```bash
-export GITHUB_PERSONAL_ACCESS_TOKEN=your_pat_here
-export CONTEXT7_API_KEY=your_context7_api_key
-export MISTRAL_API_KEY=your_mistral_api_key
-export MISTRAL_BASE_URL=https://api.mistral.ai
-export ELEVENLABS_API_KEY=your_elevenlabs_api_key
-export ELEVENLABS_BASE_URL=https://api.elevenlabs.io
-export DIR2MCP_ALLOWED_ORIGINS=https://elevenlabs.io
-```
-
-ElevenLabs integrations should read `ELEVENLABS_API_KEY` and `ELEVENLABS_BASE_URL` from env-backed config, not hardcoded literals.
-
-`DIR2MCP_ALLOWED_ORIGINS` appends extra allowed origins for browser requests while keeping localhost defaults (`http://localhost`, `http://127.0.0.1`) enabled.
-
-## Public deployment hardening (Issue #59)
-
-### `--public` behavior and auth requirements
-
-- `./dir2mcp up --public` sets `public=true` and (when `--listen` is not provided) binds to `0.0.0.0:<port>`.
-- `--public` with `--auth none` is blocked by default:
-  - `ERROR: CONFIG_INVALID: --public requires auth. Use --auth auto or --force-insecure to override (unsafe).`
-- `--auth auto` is the secure default for public exposure:
-  - if `DIR2MCP_AUTH_TOKEN` is set, that token is used
-  - otherwise a token is generated/stored at `.dir2mcp/secret.token`
-- Allowed origins are deny-by-default except local development origins (`http://localhost`, `http://127.0.0.1`).
-  Add hosted browser origins explicitly with `DIR2MCP_ALLOWED_ORIGINS` or `--allowed-origins`.
-
-### Deployment pattern (Cloudflare Tunnel)
-
-#### Cloudflare Tunnel
-
-You can publish an HTTPS hostname through Cloudflare Tunnel while keeping MCP on a private local listener.
-
-```yaml
-tunnel: dir2mcp-prod
-credentials-file: /etc/cloudflared/dir2mcp-prod.json
-ingress:
-  - hostname: mcp.example.com
-    service: http://127.0.0.1:8080
-  - service: http_status:404
-```
-
-Recommended hardening with tunnel deployments:
-
-- keep MCP auth enabled (`--auth auto` or `--auth file:<path>`)
-- keep origin allowlist minimal (`https://elevenlabs.io` plus your own hosted app domains)
-- avoid `--force-insecure` for any internet-reachable endpoint
-
-### Remote MCP verification checklist (local/reproducible)
-
-Start server:
-
-```bash
-export MISTRAL_API_KEY=your_key_here
-export DIR2MCP_ALLOWED_ORIGINS=https://elevenlabs.io
-./dir2mcp up --public --auth auto --listen 0.0.0.0:8080
-```
-
-Prepare endpoint + token:
-
-```bash
-BASE_URL="https://mcp.example.com/mcp"
-TOKEN="${DIR2MCP_AUTH_TOKEN:-$(cat .dir2mcp/secret.token)}"
-```
-
-1. Initialize and capture `MCP-Session-Id`:
-
-```bash
-INIT_HEADERS="$(mktemp)"
-INIT_BODY="$(mktemp)"
-curl -sS -D "$INIT_HEADERS" -o "$INIT_BODY" \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "MCP-Protocol-Version: 2025-11-25" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
-  "$BASE_URL"
-
-SESSION_ID="$(awk -F': ' 'BEGIN{IGNORECASE=1} /^MCP-Session-Id:/{gsub("\r","",$2); print $2; exit}' "$INIT_HEADERS")"
-test -n "$SESSION_ID"
-```
-
-2. Verify tool discovery (`tools/list`):
-
-```bash
-curl -sS \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "MCP-Protocol-Version: 2025-11-25" \
-  -H "MCP-Session-Id: $SESSION_ID" \
-  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
-  "$BASE_URL"
-```
-
-Expected: JSON-RPC success response containing `dir2mcp.*` tool names.
-
-3. Verify tool call success (`dir2mcp.stats`):
-
-```bash
-curl -sS \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "MCP-Protocol-Version: 2025-11-25" \
-  -H "MCP-Session-Id: $SESSION_ID" \
-  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"dir2mcp.stats","arguments":{}}}' \
-  "$BASE_URL"
-```
-
-Expected: JSON-RPC success response with `result` payload from `dir2mcp.stats`.
-
-### Remote MCP verification checklist (ElevenLabs hosted)
-
-1. Configure MCP server URL to your public HTTPS endpoint (including the exact MCP path, typically `/mcp`).
-2. Configure `Authorization: Bearer <token>` in ElevenLabs MCP connector settings.
-3. Ensure hosted origin(s) are allowlisted:
-   - minimum: `DIR2MCP_ALLOWED_ORIGINS=https://elevenlabs.io`
-4. From the ElevenLabs side, verify:
-   - tool discovery succeeds
-   - one tool call (for example `dir2mcp.stats`) succeeds
-5. Check server output/logs for:
-   - no `UNAUTHORIZED` errors
-   - no `FORBIDDEN_ORIGIN` errors
-   - successful MCP calls on the expected route path
-
-### Troubleshooting
-
-| Symptom | Likely cause | Fix |
-|---|---|---|
-| `401` with `UNAUTHORIZED` | Missing/invalid Bearer token | Send `Authorization: Bearer <token>`. If using `--auth auto`, verify `DIR2MCP_AUTH_TOKEN` or `.dir2mcp/secret.token`. |
-| `403` with `FORBIDDEN_ORIGIN` | Hosted origin not allowlisted | Add origin via `DIR2MCP_ALLOWED_ORIGINS` or `--allowed-origins`, then restart server. |
-| `404` / `405` / method mismatch | Wrong MCP path or HTTP method | Use `POST` against exact MCP route (`/mcp` unless overridden by `--mcp-path`). |
-| Session-related request errors | Missing or stale `MCP-Session-Id` | Run `initialize` first, then pass returned `MCP-Session-Id` for subsequent calls. |
-| Browser preflight appears successful but call still blocked | Disallowed origin receives no CORS allow-origin header | Check response headers; add exact origin to allowlist and retry. |
-
-## Local `.env` support
-
-For local development, `dir2mcp` automatically reads `.env` and `.env.local` from the working directory.
-
-Precedence:
-- Existing shell environment variables win
-- Then `.env.local`
-- Then `.env`
-
-Quick start:
-
-```bash
-cp .env.example .env
-```
-
-## Development checks
-
-```bash
-make fmt
-make vet
-make lint
-make test
-make check
-```
-
-Performance benchmark (large corpus retrieval path):
-
-```bash
-make benchmark
-```
-
-The `benchmark` target is preferred for consistency with other checks like
-`make fmt`/`make vet`/`make lint` and ensures the correct `go test`
-invocation (`-bench BenchmarkSearchBothLargeCorpus -run '^$' ./internal/retrieval`).
-
-Notes:
-- `make lint` requires `golangci-lint` installed locally.
-- CI runs lint + build + vet + test on pushes and PRs to `main`.
-
-### Optional integration test (Mistral API)
-
-Test organization:
-- `tests/` contains black-box/integration-style tests and uses `package tests`.
-- `internal/<pkg>/*_test.go` contains package-level white-box tests and may use unexported symbols.
-
-By default, integration tests are skipped. To run the live Mistral embedding integration test:
-
-```bash
-RUN_INTEGRATION_TESTS=1 go test -v ./tests/mistral -run Embed_Integration
-```
-
-Required env vars:
-- `MISTRAL_API_KEY`
-- optional `MISTRAL_BASE_URL` (defaults to `https://api.mistral.ai`)
-
-To run the live OCR integration test as well:
-
-```bash
-RUN_INTEGRATION_TESTS=1 \
-MISTRAL_OCR_SAMPLE=/absolute/path/to/sample.pdf \
-go test -v ./tests -run MistralOCR
-```
-
-`MISTRAL_OCR_SAMPLE` can be a local `.pdf`, `.png`, `.jpg`, or `.jpeg` file.
-
-To run the live transcription integration test (use your own audio file for speech‑to‑text):
-
-```bash
-RUN_INTEGRATION_TESTS=1 \
-MISTRAL_STT_SAMPLE=/absolute/path/to/sample.mp3 \
-go test -v ./tests/mistral -run Transcribe_Integration
-```
-
-`MISTRAL_STT_SAMPLE` may point to any local audio file that the Mistral STT service accepts (e.g. `.mp3`, `.wav`, `.m4a` or other supported codecs); the example above shows an MP3 sample together with the `Transcribe_Integration` test name so you can see both the env var and test at once.
-
-To run the live generation integration test:
-
-```bash
-RUN_INTEGRATION_TESTS=1 \
-go test -v ./tests/mistral -run Generate_Integration
-```
-
-## Ingestion notes
-
-- Incremental hashing:
-  - Document-level: `content_hash` decides whether representation regeneration is needed.
-  - `reindex` mode forces regeneration regardless of hash match.
-- `raw_text` chunking defaults:
-  - code: `200` lines with `30` line overlap
-  - text/md/data/html: `2500` chars with `250` char overlap (`min 200` chars)
-- Span persistence:
-  - raw text chunks persist `lines` spans
-  - OCR chunks persist `page` spans
-- OCR cache:
-  - OCR outputs are cached in `.dir2mcp/cache/ocr/<content-hash>.md`
-  - cache lifecycle supports automatic TTL and max-size pruning when limits are configured
-  - default behavior is unbounded (`ttl=0`, `maxBytes=0`)
-  - currently, cache-policy values are set programmatically by the embedding runtime (no dedicated CLI/config keys are exposed yet)
-  - repeat processing of unchanged OCR input reuses cache before provider calls
-  - manual pruning can still be useful, but automatic pruning reclaims space when TTL or max-size limits are set
-  - to check cache size: `du -sh .dir2mcp/cache/ocr/`
-  - to clear the cache: `rm -rf .dir2mcp/cache/ocr/*` (cache will be rebuilt on next OCR operation)
-- Transcript cache:
-  - audio transcript outputs are cached in `.dir2mcp/cache/transcribe/<content-hash>.txt`
-  - cache misses invoke the transcription provider; cache hits reuse the normalized transcript text
-  - the transcript cache shares the same TTL and maxBytes policy as the OCR cache. when either of those limits is configured, automatic pruning runs during normal cache access to evict stale or oversized entries. behavior and policy are otherwise identical to the OCR cache – there are no special differences.
-  - as with OCR, the default values (`ttl=0`, `maxBytes=0`) mean the cache is effectively unbounded.
-  - automatic pruning happens lazily when the cache is accessed and limits are exceeded; if you need to reclaim space immediately (for example before a large batch ingest) you can manually prune the cache by removing files under `.dir2mcp/cache/transcribe/`.
-  - to check cache size: `du -sh .dir2mcp/cache/transcribe/`
-  - to clear the cache (manual pruning): `rm -rf .dir2mcp/cache/transcribe/*` – the cache will be rebuilt on the next audio ingest
+MIT. See [LICENSE](LICENSE).

@@ -11,6 +11,7 @@ import (
 	"dir2mcp/internal/cli"
 	"dir2mcp/internal/config"
 	"dir2mcp/internal/mcp"
+	"dir2mcp/internal/protocol"
 )
 
 // TestCORS_PreflightReturns204 verifies allowed-origin preflight requests return 204 with CORS headers.
@@ -28,7 +29,7 @@ func TestCORS_PreflightReturns204(t *testing.T) {
 	}
 	req.Header.Set("Origin", "https://elevenlabs.io")
 	req.Header.Set("Access-Control-Request-Method", "POST")
-	req.Header.Set("Access-Control-Request-Headers", "Content-Type, Authorization, MCP-Protocol-Version")
+	req.Header.Set("Access-Control-Request-Headers", strings.Join([]string{"Content-Type", "Authorization", protocol.MCPProtocolVersionHeader}, ", "))
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -51,15 +52,18 @@ func TestCORS_PreflightReturns204(t *testing.T) {
 	}
 
 	acah := resp.Header.Get("Access-Control-Allow-Headers")
-	for _, expected := range []string{"Authorization", "MCP-Protocol-Version", "MCP-Session-Id"} {
+	for _, expected := range []string{"Authorization", protocol.MCPProtocolVersionHeader, protocol.MCPSessionHeader} {
 		if !strings.Contains(acah, expected) {
 			t.Fatalf("Access-Control-Allow-Headers=%q must contain %q", acah, expected)
 		}
 	}
 
 	aceh := resp.Header.Get("Access-Control-Expose-Headers")
-	if !strings.Contains(aceh, "MCP-Session-Id") {
-		t.Fatalf("Access-Control-Expose-Headers=%q must contain MCP-Session-Id", aceh)
+	if !strings.Contains(aceh, protocol.MCPSessionHeader) {
+		t.Fatalf("Access-Control-Expose-Headers=%q must contain %s", aceh, protocol.MCPSessionHeader)
+	}
+	if !strings.Contains(aceh, protocol.MCPSessionExpiredHeader) {
+		t.Fatalf("Access-Control-Expose-Headers=%q must contain %s", aceh, protocol.MCPSessionExpiredHeader)
 	}
 }
 
@@ -110,7 +114,7 @@ func TestCORS_PreflightDisallowedOriginNoCORSHeaders(t *testing.T) {
 	}
 	req.Header.Set("Origin", "https://evil.example.com")
 	req.Header.Set("Access-Control-Request-Method", "POST")
-	req.Header.Set("Access-Control-Request-Headers", "Content-Type, Authorization, MCP-Protocol-Version")
+	req.Header.Set("Access-Control-Request-Headers", strings.Join([]string{"Content-Type", "Authorization", protocol.MCPProtocolVersionHeader}, ", "))
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

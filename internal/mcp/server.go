@@ -1,18 +1,23 @@
 package mcp
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -20,16 +25,22 @@ import (
 	"dir2mcp/internal/appstate"
 	"dir2mcp/internal/config"
 	"dir2mcp/internal/model"
+	"dir2mcp/internal/protocol"
+	"dir2mcp/internal/x402"
 )
 
 const (
-	sessionHeaderName      = "MCP-Session-Id"
 	authTokenEnvVar        = "DIR2MCP_AUTH_TOKEN"
 	maxRequestBody         = 1 << 20
 	sessionTTL             = 24 * time.Hour
 	sessionCleanupInterval = time.Hour
 	rateLimitCleanupEvery  = 5 * time.Minute
 	rateLimitBucketMaxAge  = 10 * time.Minute
+	// Replay outcomes are only useful while signatures are still valid.
+	// Keep a small buffer over common short-lived signature windows.
+	paymentOutcomeTTL             = 10 * time.Minute
+	paymentOutcomeCleanupInterval = time.Minute
+	paymentOutcomeMaxEntries      = 5000
 )
 
 // DefaultSearchK is used when tools/call search arguments omit k or provide
@@ -38,6 +49,15 @@ const DefaultSearchK = 10
 
 // MaxSearchK is the highest allowed k value for search/ask requests.
 const MaxSearchK = 50
+
+// sessionInfo holds metadata tracked for each active session.  `created` is the
+// time the session was started; `lastSeen` is updated on each successful
+// request.  The server uses both values to enforce inactivity timeouts and
+// optional absolute lifetimes.
+type sessionInfo struct {
+	created  time.Time
+	lastSeen time.Time
+}
 
 type Server struct {
 	cfg       config.Config
@@ -49,9 +69,39 @@ type Server struct {
 	tools     map[string]toolDefinition
 
 	sessionMu sync.RWMutex
-	sessions  map[string]time.Time
+	// sessions maps session IDs to metadata.  lastSeen is updated on each
+	// successful request; created represents the time the session was
+	// initialized.  We use both values to enforce inactivity timeouts and
+	// optional absolute lifetimes.
+	sessions map[string]sessionInfo
 
 	rateLimiter *ipRateLimiter
+
+	x402Client      *x402.HTTPClient
+	x402Requirement x402.Requirement
+	x402Enabled     bool
+	paymentLogPath  string
+	paymentMu       sync.RWMutex
+	paymentOutcomes map[string]paymentExecutionOutcome
+	paymentTTL      time.Duration
+	paymentMaxItems int
+
+	// cached writer used by appendPaymentLog. protected by paymentLogMu.
+	paymentLogMu     sync.Mutex
+	paymentLogFile   *os.File
+	paymentLogWriter *bufio.Writer
+
+	// per-execution-key locks used to serialize payment handling for identical
+	// signatures+params.  Map is protected by execMu.  execCond is a condition
+	// variable that goroutines can wait on when they need to observe changes to
+	// the ref counts stored in execKeyMu.  It is always created with execMu as
+	// its Locker (see NewServer) so callers must hold execMu before calling
+	// Wait/Signal/Broadcast.
+	execMu    sync.Mutex
+	execCond  *sync.Cond
+	execKeyMu map[string]*keyMutex
+
+	eventEmitter func(level, event string, data interface{})
 }
 
 type rpcRequest struct {
@@ -74,6 +124,21 @@ type rpcError struct {
 	Data    *rpcErrorData `json:"data,omitempty"`
 }
 
+// rpcErrorData is attached to an rpcError when additional metadata is
+// required by the JSON-RPC response.  All fields are exported so that the
+// structure can be marshaled to JSON; presently the type contains only
+// primitive values.  The copy helper in mcp/payment.go relies on this
+// property to produce an independent duplicate.  If new fields are added that
+// are themselves reference types (slices, maps, pointers, etc.) the cloning
+// logic must be kept in sync (the deep-copy performed via JSON round-trip
+// already handles such extensions, so tests should guard against regressions).
+//
+// Keeping rpcErrorData simple helps avoid accidental sharing of mutable
+// state between the original and any clones.
+//
+// NOTE: because we use encoding/json for the deep copy, the layout of this
+// struct must remain JSON-encodable.  Adding unexported fields or custom
+// types will require updating cloneRPCError accordingly.
 type rpcErrorData struct {
 	Code      string `json:"code"`
 	Retryable bool   `json:"retryable"`
@@ -112,13 +177,25 @@ func WithTTS(tts TTSSynthesizer) ServerOption {
 	}
 }
 
+func WithEventEmitter(fn func(level, event string, data interface{})) ServerOption {
+	return func(s *Server) {
+		s.eventEmitter = fn
+	}
+}
+
 func NewServer(cfg config.Config, retriever model.Retriever, opts ...ServerOption) *Server {
 	s := &Server{
-		cfg:       cfg,
-		authToken: loadAuthToken(cfg),
-		retriever: retriever,
-		sessions:  make(map[string]time.Time),
+		cfg:             cfg,
+		authToken:       loadAuthToken(cfg),
+		retriever:       retriever,
+		sessions:        make(map[string]sessionInfo),
+		paymentOutcomes: make(map[string]paymentExecutionOutcome),
+		paymentTTL:      paymentOutcomeTTL,
+		paymentMaxItems: paymentOutcomeMaxEntries,
+		execKeyMu:       make(map[string]*keyMutex),
 	}
+	// cond must be set after the zero-value mutex has been created above
+	s.execCond = sync.NewCond(&s.execMu)
 	for _, opt := range opts {
 		if opt != nil {
 			opt(s)
@@ -130,6 +207,7 @@ func NewServer(cfg config.Config, retriever model.Retriever, opts ...ServerOptio
 	if cfg.Public && cfg.RateLimitRPS > 0 && cfg.RateLimitBurst > 0 {
 		s.rateLimiter = newIPRateLimiter(float64(cfg.RateLimitRPS), cfg.RateLimitBurst, cfg.TrustedProxies)
 	}
+	s.initPaymentConfig()
 	s.tools = s.buildToolRegistry()
 	return s
 }
@@ -149,8 +227,8 @@ func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 		if origin != "" && isOriginAllowed(origin, s.cfg.AllowedOrigins) {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, MCP-Protocol-Version, MCP-Session-Id")
-			w.Header().Set("Access-Control-Expose-Headers", "MCP-Session-Id")
+			w.Header().Set("Access-Control-Allow-Headers", fmt.Sprintf("Content-Type, Authorization, %s, %s, PAYMENT-SIGNATURE", protocol.MCPProtocolVersionHeader, protocol.MCPSessionHeader))
+			w.Header().Set("Access-Control-Expose-Headers", protocol.MCPSessionHeader+", PAYMENT-REQUIRED, PAYMENT-RESPONSE, "+protocol.MCPSessionExpiredHeader)
 			w.Header().Set("Access-Control-Max-Age", "86400")
 			w.Header().Set("Vary", "Origin")
 		}
@@ -181,6 +259,14 @@ func (s *Server) RunOnListener(ctx context.Context, ln net.Listener) error {
 	if ln == nil {
 		return errors.New("nil listener passed to RunOnListener")
 	}
+	// make sure any cached payment-log resources are flushed when the server
+	// stops; the deferred call is harmless if nothing was opened.  Log any
+	// error instead of silently discarding it.
+	defer func() {
+		if err := s.Close(); err != nil {
+			log.Printf("error closing payment log: %v", err)
+		}
+	}()
 
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -188,6 +274,9 @@ func (s *Server) RunOnListener(ctx context.Context, ln net.Listener) error {
 	go s.runSessionCleanup(runCtx)
 	if s.rateLimiter != nil {
 		go s.runRateLimitCleanup(runCtx)
+	}
+	if s.x402Enabled {
+		go s.runPaymentOutcomeCleanup(runCtx)
 	}
 
 	server := &http.Server{
@@ -222,7 +311,7 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 	if s.rateLimiter != nil {
 		if !s.rateLimiter.allow(realIP(r, s.rateLimiter)) {
 			w.Header().Set("Retry-After", "1")
-			writeError(w, http.StatusTooManyRequests, nil, -32000, "rate limit exceeded", "RATE_LIMIT_EXCEEDED", true)
+			writeError(w, http.StatusTooManyRequests, nil, -32000, "rate limit exceeded", protocol.ErrorCodeRateLimitExceeded, true)
 			return
 		}
 	}
@@ -275,9 +364,17 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.Method != "initialize" {
-		sessionID := strings.TrimSpace(r.Header.Get(sessionHeaderName))
-		if sessionID == "" || !s.hasActiveSession(sessionID, time.Now()) {
-			writeError(w, http.StatusNotFound, id, -32001, "session not found", "SESSION_NOT_FOUND", false)
+		sessionID := strings.TrimSpace(r.Header.Get(protocol.MCPSessionHeader))
+		if sessionID == "" {
+			writeError(w, http.StatusNotFound, id, -32001, "session not found", protocol.ErrorCodeSessionNotFound, false)
+			return
+		}
+		if ok, reason := s.hasActiveSession(sessionID, time.Now()); !ok {
+			// optional diagnostic header
+			if reason != "" {
+				w.Header().Set(protocol.MCPSessionExpiredHeader, reason)
+			}
+			writeError(w, http.StatusNotFound, id, -32001, "session not found", protocol.ErrorCodeSessionNotFound, false)
 			return
 		}
 	}
@@ -302,7 +399,7 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusAccepted)
 			return
 		}
-		s.handleToolsCall(r.Context(), w, req.Params, id)
+		s.handleToolsCallRequest(r.Context(), w, r, req.Params, id)
 	default:
 		if !hasID {
 			w.WriteHeader(http.StatusAccepted)
@@ -325,7 +422,7 @@ func (s *Server) handleInitialize(w http.ResponseWriter, id interface{}, hasID b
 	}
 	s.storeSession(sessionID)
 
-	w.Header().Set(sessionHeaderName, sessionID)
+	w.Header().Set(protocol.MCPSessionHeader, sessionID)
 	writeResult(w, http.StatusOK, id, map[string]interface{}{
 		"protocolVersion": s.cfg.ProtocolVersion,
 		"capabilities": map[string]interface{}{
@@ -352,18 +449,18 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
 	const bearerPrefix = "bearer "
 
 	if len(authHeader) < len(bearerPrefix) || strings.ToLower(authHeader[:len(bearerPrefix)]) != bearerPrefix {
-		writeError(w, http.StatusUnauthorized, nil, -32000, "missing or invalid bearer token", "UNAUTHORIZED", false)
+		writeError(w, http.StatusUnauthorized, nil, -32000, "missing or invalid bearer token", protocol.ErrorCodeUnauthorized, false)
 		return false
 	}
 
 	providedToken := strings.TrimSpace(authHeader[len(bearerPrefix):])
 	if expectedToken == "" || providedToken == "" {
-		writeError(w, http.StatusUnauthorized, nil, -32000, "missing or invalid bearer token", "UNAUTHORIZED", false)
+		writeError(w, http.StatusUnauthorized, nil, -32000, "missing or invalid bearer token", protocol.ErrorCodeUnauthorized, false)
 		return false
 	}
 
 	if subtle.ConstantTimeCompare([]byte(providedToken), []byte(expectedToken)) != 1 {
-		writeError(w, http.StatusUnauthorized, nil, -32000, "missing or invalid bearer token", "UNAUTHORIZED", false)
+		writeError(w, http.StatusUnauthorized, nil, -32000, "missing or invalid bearer token", protocol.ErrorCodeUnauthorized, false)
 		return false
 	}
 
@@ -465,31 +562,60 @@ func writeResponse(w http.ResponseWriter, statusCode int, response rpcResponse) 
 	_ = json.NewEncoder(w).Encode(response)
 }
 
-func (s *Server) hasActiveSession(id string, now time.Time) bool {
+// resolveSessionTimeouts returns the effective inactivity and max-life
+// durations for sessions.  The helper centralizes the logic of choosing the
+// hard‑coded default `sessionTTL` when a custom inactivity timeout isn't set
+// and pulling the configured max lifetime.  Both hasActiveSession and
+// cleanupExpiredSessions rely on the same rules so they call this helper to
+// avoid divergence.
+func (s *Server) resolveSessionTimeouts() (inactivity, maxLife time.Duration) {
+	inactivity = sessionTTL
+	if s.cfg.SessionInactivityTimeout > 0 {
+		inactivity = s.cfg.SessionInactivityTimeout
+	}
+	maxLife = s.cfg.SessionMaxLifetime
+	return
+}
+
+func (s *Server) hasActiveSession(id string, now time.Time) (bool, string) {
+	// returns (active, reason) reason is empty when active or unknown
+	// otherwise one of "inactivity" or "max-lifetime".
+
+	inactivity, maxLife := s.resolveSessionTimeouts()
+
 	s.sessionMu.Lock()
 	defer s.sessionMu.Unlock()
 
-	lastSeen, ok := s.sessions[id]
+	si, ok := s.sessions[id]
 	if !ok {
-		return false
+		return false, ""
 	}
-	if now.Sub(lastSeen) > sessionTTL {
+	if now.Sub(si.lastSeen) > inactivity {
 		delete(s.sessions, id)
-		return false
+		log.Printf("session %s expired due to inactivity", maskSessionID(id))
+		return false, "inactivity"
+	}
+	if maxLife > 0 && now.Sub(si.created) > maxLife {
+		delete(s.sessions, id)
+		log.Printf("session %s expired due to max lifetime", maskSessionID(id))
+		return false, "max-lifetime"
 	}
 
-	s.sessions[id] = now
-	return true
+	// update lastSeen
+	si.lastSeen = now
+	s.sessions[id] = si
+	return true, ""
 }
 
 func (s *Server) storeSession(id string) {
 	s.sessionMu.Lock()
 	defer s.sessionMu.Unlock()
-	s.sessions[id] = time.Now()
+	now := time.Now()
+	s.sessions[id] = sessionInfo{created: now, lastSeen: now}
 }
 
 func (s *Server) runSessionCleanup(ctx context.Context) {
-	ticker := time.NewTicker(sessionCleanupInterval)
+	ticker := time.NewTicker(s.sessionSweepInterval())
 	defer ticker.Stop()
 
 	for {
@@ -500,6 +626,33 @@ func (s *Server) runSessionCleanup(ctx context.Context) {
 			s.cleanupExpiredSessions(now)
 		}
 	}
+}
+
+func (s *Server) sessionSweepInterval() time.Duration {
+	inactivity, maxLife := s.resolveSessionTimeouts()
+	sweep := sessionCleanupInterval
+	if inactivity < sweep {
+		sweep = inactivity
+	}
+	if maxLife > 0 && maxLife < sweep {
+		sweep = maxLife
+	}
+	// Sweep more aggressively than the timeout window to avoid stale sessions
+	// lingering until the full timeout elapses.
+	sweep /= 2
+	if sweep < time.Second {
+		sweep = time.Second
+	}
+	return sweep
+}
+
+func maskSessionID(id string) string {
+	trimmed := strings.TrimSpace(id)
+	if trimmed == "" {
+		return "<empty>"
+	}
+	sum := sha256.Sum256([]byte(trimmed))
+	return hex.EncodeToString(sum[:4])
 }
 
 func (s *Server) runRateLimitCleanup(ctx context.Context) {
@@ -517,13 +670,84 @@ func (s *Server) runRateLimitCleanup(ctx context.Context) {
 }
 
 func (s *Server) cleanupExpiredSessions(now time.Time) {
+	// mirror the logic from hasActiveSession but without logging or updating
+	inactivity, maxLife := s.resolveSessionTimeouts()
+
 	s.sessionMu.Lock()
 	defer s.sessionMu.Unlock()
 
-	for id, lastSeen := range s.sessions {
-		if now.Sub(lastSeen) > sessionTTL {
+	for id, si := range s.sessions {
+		if now.Sub(si.lastSeen) > inactivity {
+			delete(s.sessions, id)
+			continue
+		}
+		if maxLife > 0 && now.Sub(si.created) > maxLife {
 			delete(s.sessions, id)
 		}
+	}
+}
+
+func (s *Server) runPaymentOutcomeCleanup(ctx context.Context) {
+	ticker := time.NewTicker(paymentOutcomeCleanupInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-ticker.C:
+			s.cleanupPaymentOutcomes(now)
+		}
+	}
+}
+
+func (s *Server) cleanupPaymentOutcomes(now time.Time) {
+	s.paymentMu.Lock()
+	defer s.paymentMu.Unlock()
+	s.prunePaymentOutcomesLocked(now)
+}
+
+func (s *Server) prunePaymentOutcomesLocked(now time.Time) {
+	ttl := s.paymentTTL
+	if ttl <= 0 {
+		ttl = paymentOutcomeTTL
+	}
+
+	cutoff := now.Add(-ttl)
+	for key, outcome := range s.paymentOutcomes {
+		if outcome.UpdatedAt.IsZero() || outcome.UpdatedAt.Before(cutoff) {
+			delete(s.paymentOutcomes, key)
+		}
+	}
+
+	maxItems := s.paymentMaxItems
+	if maxItems <= 0 {
+		maxItems = paymentOutcomeMaxEntries
+	}
+	if len(s.paymentOutcomes) <= maxItems {
+		return
+	}
+
+	type entry struct {
+		key string
+		ts  time.Time
+	}
+	entries := make([]entry, 0, len(s.paymentOutcomes))
+	for key, outcome := range s.paymentOutcomes {
+		entries = append(entries, entry{key: key, ts: outcome.UpdatedAt})
+	}
+	// ensure deterministic eviction order when timestamps are equal by
+	// performing a stable sort and using the key as a tie-breaker.
+	sort.SliceStable(entries, func(i, j int) bool {
+		if entries[i].ts.Equal(entries[j].ts) {
+			return entries[i].key < entries[j].key
+		}
+		return entries[i].ts.Before(entries[j].ts)
+	})
+
+	toDrop := len(entries) - maxItems
+	for i := 0; i < toDrop; i++ {
+		delete(s.paymentOutcomes, entries[i].key)
 	}
 }
 
@@ -596,4 +820,37 @@ func isOriginAllowed(origin string, allowlist []string) bool {
 		}
 	}
 	return false
+}
+
+// Close flushes and closes any cached payment log writer and file.
+//
+// The method is safe to call multiple times (idempotent) and is typically
+// invoked during server shutdown to guarantee that any buffered payments are
+// persisted. It acquires the paymentLogMu mutex, clears
+// s.paymentLogWriter and s.paymentLogFile under that lock, and returns a
+// combined error using errors.Join if flushing or closing fails.
+func (s *Server) Close() error {
+	s.paymentLogMu.Lock()
+	defer s.paymentLogMu.Unlock()
+
+	var errs []error
+	if s.paymentLogWriter != nil {
+		if err := s.paymentLogWriter.Flush(); err != nil {
+			errs = append(errs, fmt.Errorf("payment log flush: %w", err))
+		}
+		s.paymentLogWriter = nil
+	}
+	if s.paymentLogFile != nil {
+		// ensure on-disk durability: sync before closing.
+		if err := s.paymentLogFile.Sync(); err != nil {
+			errs = append(errs, fmt.Errorf("payment log file sync: %w", err))
+		}
+		if err := s.paymentLogFile.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("payment log file close: %w", err))
+		}
+		s.paymentLogFile = nil
+	}
+	// errors.Join will return nil when "errs" is empty, which keeps behavior
+	// consistent with the previous implementation.
+	return errors.Join(errs...)
 }

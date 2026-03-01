@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"dir2mcp/internal/config"
 	"dir2mcp/tests/testutil"
@@ -102,6 +103,44 @@ func TestSaveFile_WritesNonSecretYAML(t *testing.T) {
 	}
 	if strings.Contains(text, "super-secret") || strings.Contains(text, "another-secret") {
 		t.Fatalf("saved yaml must not include secret values, got:\n%s", text)
+	}
+}
+
+func TestSaveFile_RejectsInvalidConfig(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  config.Config
+	}{
+		{
+			name: "negative-inactivity",
+			cfg: func() config.Config {
+				c := config.Default()
+				c.SessionInactivityTimeout = -1 * time.Second
+				return c
+			}(),
+		},
+		{
+			name: "max-lifetime-shorter-than-inactivity",
+			cfg: func() config.Config {
+				c := config.Default()
+				c.SessionInactivityTimeout = 10 * time.Minute
+				c.SessionMaxLifetime = 5 * time.Minute
+				return c
+			}(),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			path := filepath.Join(tmp, ".dir2mcp.yaml")
+			cfg := tc.cfg
+			if err := config.SaveFile(path, cfg); err == nil {
+				t.Fatal("expected error saving invalid config, got nil")
+			} else if !strings.Contains(err.Error(), "validate config") {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
 	}
 }
 

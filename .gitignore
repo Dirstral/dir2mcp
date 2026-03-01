@@ -15,6 +15,7 @@ secret.token
 bin/
 dist/
 /dir2mcp
+/dirstral
 .gocache/
 .gomodcache/
 .golangci-lint-cache/
@@ -29,6 +30,9 @@ coverage.out
 
 # Logs
 *.log
+
+# Local agent instructions
+# the AGENTS.md file is intentionally tracked for repository documentation; remove it from ignore
 
 # IDE/editor local settings
 .vscode/

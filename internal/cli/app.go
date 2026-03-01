@@ -15,6 +15,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -27,6 +28,7 @@ import (
 	"dir2mcp/internal/mcp"
 	"dir2mcp/internal/mistral"
 	"dir2mcp/internal/model"
+	"dir2mcp/internal/protocol"
 	"dir2mcp/internal/retrieval"
 	"dir2mcp/internal/store"
 )
@@ -42,9 +44,12 @@ const (
 )
 
 const (
-	authTokenEnvVar    = "DIR2MCP_AUTH_TOKEN"
-	connectionFileName = "connection.json"
-	secretTokenName    = "secret.token"
+	authTokenEnvVar = "DIR2MCP_AUTH_TOKEN"
+	// environment variable for the x402 facilitator bearer token; CLI honors
+	// this value (but it is *not* persisted to disk) in addition to flags.
+	x402FacilitatorTokenEnvVar = "DIR2MCP_X402_FACILITATOR_TOKEN"
+	connectionFileName         = "connection.json"
+	secretTokenName            = "secret.token"
 )
 
 var commands = map[string]struct{}{
@@ -83,6 +88,10 @@ type activeDocCountStore interface {
 	ActiveDocCounts(ctx context.Context) (map[string]int64, int64, error)
 }
 
+type corpusStatsStore interface {
+	CorpusStats(ctx context.Context) (model.CorpusStats, error)
+}
+
 type RuntimeHooks struct {
 	NewIngestor  func(config.Config, model.Store) model.Ingestor
 	NewStore     func(config.Config) model.Store
@@ -96,18 +105,60 @@ type globalOptions struct {
 
 type upOptions struct {
 	globalOptions
-	readOnly            bool
-	public              bool
-	forceInsecure       bool
-	x402ResourceBaseURL string
-	auth                string
-	listen              string
-	mcpPath             string
-	allowedOrigins      string
+	readOnly           bool
+	public             bool
+	forceInsecure      bool
+	x402Mode           string
+	x402FacilitatorURL string
+	// token values may come from a flag, environment variable, or file path
+	x402FacilitatorToken     string
+	x402FacilitatorTokenFile string
+	// original direct token flag presence; true when the user supplied
+	// --x402-facilitator-token and it was non-empty before any precedence
+	// logic cleared it in favor of a file path.
+	x402FacilitatorTokenDirectSet bool
+	x402ResourceBaseURL           string
+	x402Network                   string
+	x402Price                     string
+	x402Scheme                    string
+	x402Asset                     string
+	x402PayTo                     string
+	x402ToolsCallEnabled          bool
+	x402ToolsCallEnabledIsSet     bool
+	auth                          string
+	listen                        string
+	mcpPath                       string
+	allowedOrigins                string
 	// overrideable models, set via flags or env/config
 	embedModelText string
 	embedModelCode string
 	chatModel      string
+}
+
+type optionalBoolFlag struct {
+	value bool
+	set   bool
+}
+
+func (o *optionalBoolFlag) String() string {
+	if o == nil {
+		return "false"
+	}
+	return strconv.FormatBool(o.value)
+}
+
+func (o *optionalBoolFlag) Set(s string) error {
+	parsed, err := strconv.ParseBool(strings.TrimSpace(s))
+	if err != nil {
+		return err
+	}
+	o.value = parsed
+	o.set = true
+	return nil
+}
+
+func (o *optionalBoolFlag) IsBoolFlag() bool {
+	return true
 }
 
 type askOptions struct {
@@ -156,6 +207,9 @@ type ndjsonEmitter struct {
 	out     io.Writer
 }
 
+// corpusSnapshot is a point-in-time summary of the indexed corpus written to
+// corpus.json in the state directory. See corpusIndexing for field semantics,
+// including the sentinel value used for unavailable counters.
 type corpusSnapshot struct {
 	Timestamp    string           `json:"ts"`
 	Indexing     corpusIndexing   `json:"indexing"`
@@ -165,6 +219,10 @@ type corpusSnapshot struct {
 	CacheableFor string           `json:"cacheable_for,omitempty"`
 }
 
+// corpusIndexing holds indexing progress counters. Representations,
+// ChunksTotal, and EmbeddedOK carry -1 when not available — for example on
+// the ListFiles-only fallback path where those metrics cannot be derived from
+// the store. Consumers should treat -1 as "unknown", not as an error.
 type corpusIndexing struct {
 	Mode            string `json:"mode"`
 	Running         bool   `json:"running"`
@@ -176,6 +234,7 @@ type corpusIndexing struct {
 	ChunksTotal     int64  `json:"chunks_total"`
 	EmbeddedOK      int64  `json:"embedded_ok"`
 	Errors          int64  `json:"errors"`
+	Unknown         int64  `json:"unknown"`
 }
 
 func NewApp() *App {
@@ -320,12 +379,24 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 		writef(a.stderr, "load config: %v\n", err)
 		return exitConfigInvalid
 	}
+	// warn the user if a direct facilitator token was supplied but is being
+	// ignored in favor of a file path. parseUpOptions recorded the original
+	// flag presence in x402FacilitatorTokenDirectSet.
+	if opts.x402FacilitatorTokenDirectSet && opts.x402FacilitatorTokenFile != "" {
+		writef(a.stderr, "warning: --x402-facilitator-token ignored; using --x402-facilitator-token-file\n")
+	}
 
 	if opts.listen != "" {
 		cfg.ListenAddr = opts.listen
 	}
+	if strings.TrimSpace(cfg.ListenAddr) == "" {
+		cfg.ListenAddr = protocol.DefaultListenAddr
+	}
 	if opts.mcpPath != "" {
 		cfg.MCPPath = opts.mcpPath
+	}
+	if strings.TrimSpace(cfg.MCPPath) == "" {
+		cfg.MCPPath = protocol.DefaultMCPPath
 	}
 	if opts.auth != "" {
 		cfg.AuthMode = opts.auth
@@ -341,6 +412,51 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	}
 	if strings.TrimSpace(opts.chatModel) != "" {
 		cfg.ChatModel = strings.TrimSpace(opts.chatModel)
+	}
+	if strings.TrimSpace(opts.x402Mode) != "" {
+		cfg.X402.Mode = strings.TrimSpace(opts.x402Mode)
+	}
+	if strings.TrimSpace(opts.x402FacilitatorURL) != "" {
+		cfg.X402.FacilitatorURL = strings.TrimSpace(opts.x402FacilitatorURL)
+	}
+	// precedence: file path > env var > flag
+	if opts.x402FacilitatorTokenFile != "" {
+		data, err := os.ReadFile(filepath.Clean(opts.x402FacilitatorTokenFile))
+		if err != nil {
+			writef(a.stderr, "failed to read x402 facilitator token file: %v\n", err)
+			return exitConfigInvalid
+		}
+		token := strings.TrimSpace(string(data))
+		if token == "" {
+			writef(a.stderr, "x402 facilitator token file is empty\n")
+			return exitConfigInvalid
+		}
+		cfg.X402.FacilitatorToken = token
+	} else if token := strings.TrimSpace(os.Getenv(x402FacilitatorTokenEnvVar)); token != "" {
+		cfg.X402.FacilitatorToken = token
+	} else if strings.TrimSpace(opts.x402FacilitatorToken) != "" {
+		cfg.X402.FacilitatorToken = strings.TrimSpace(opts.x402FacilitatorToken)
+	}
+	if strings.TrimSpace(opts.x402ResourceBaseURL) != "" {
+		cfg.X402.ResourceBaseURL = strings.TrimSpace(opts.x402ResourceBaseURL)
+	}
+	if strings.TrimSpace(opts.x402Network) != "" {
+		cfg.X402.Network = strings.TrimSpace(opts.x402Network)
+	}
+	if strings.TrimSpace(opts.x402Price) != "" {
+		cfg.X402.PriceAtomic = strings.TrimSpace(opts.x402Price)
+	}
+	if strings.TrimSpace(opts.x402Scheme) != "" {
+		cfg.X402.Scheme = strings.TrimSpace(opts.x402Scheme)
+	}
+	if strings.TrimSpace(opts.x402Asset) != "" {
+		cfg.X402.Asset = strings.TrimSpace(opts.x402Asset)
+	}
+	if strings.TrimSpace(opts.x402PayTo) != "" {
+		cfg.X402.PayTo = strings.TrimSpace(opts.x402PayTo)
+	}
+	if opts.x402ToolsCallEnabledIsSet {
+		cfg.X402.ToolsCallEnabled = opts.x402ToolsCallEnabled
 	}
 	if opts.public {
 		cfg.Public = true
@@ -365,7 +481,12 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 		writeln(a.stderr, "CONFIG_INVALID: --mcp-path must start with '/'")
 		return exitConfigInvalid
 	}
-	_ = opts.x402ResourceBaseURL
+
+	strictX402 := strings.EqualFold(strings.TrimSpace(cfg.X402.Mode), "required")
+	if err := cfg.ValidateX402(strictX402); err != nil {
+		writef(a.stderr, "CONFIG_INVALID: %v\n", err)
+		return exitConfigInvalid
+	}
 
 	if err := ensureRootAccessible(cfg.RootDir); err != nil {
 		writef(a.stderr, "root inaccessible: %v\n", err)
@@ -374,6 +495,16 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 
 	if err := os.MkdirAll(cfg.StateDir, 0o755); err != nil {
 		writef(a.stderr, "create state dir: %v\n", err)
+		return exitRootInaccessible
+	}
+	// create payments subdirectory while x402 configuration has been
+	// validated above. creating the state directory first ensures the
+	// parent exists. the call is intentionally unconditional here: we ensure
+	// the directory exists regardless of mode, avoiding inconsistent state.
+	// because it's done after x402 validation, a valid config (including
+	// mode="off") won't leave an inconsistent state.
+	if err := os.MkdirAll(filepath.Join(cfg.StateDir, "payments"), 0o755); err != nil {
+		writef(a.stderr, "create payments dir: %v\n", err)
 		return exitRootInaccessible
 	}
 
@@ -438,6 +569,8 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	ret := retrieval.NewService(st, textIx, client, client)
 	ret.SetCodeIndex(codeIx)
 	ret.SetRootDir(cfg.RootDir)
+	ret.SetStateDir(cfg.StateDir)
+	ret.SetProtocolVersion(cfg.ProtocolVersion)
 
 	// events are emitted to stdout only after we create the emitter; moving
 	// creation before the preload call lets us report failures from that
@@ -467,6 +600,7 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	serverOptions := []mcp.ServerOption{
 		mcp.WithStore(st),
 		mcp.WithIndexingState(indexingState),
+		mcp.WithEventEmitter(emitter.Emit),
 	}
 	if strings.TrimSpace(cfg.ElevenLabsAPIKey) != "" {
 		ttsClient := elevenlabs.NewClient(cfg.ElevenLabsAPIKey, cfg.ElevenLabsTTSVoiceID)
@@ -573,7 +707,7 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	}
 
 	ingestErrCh := make(chan error, 1)
-	go runCorpusWriter(runCtx, cfg.StateDir, st, indexingState, a.stderr)
+	go runCorpusWriter(runCtx, cfg.StateDir, st, indexingState, a.stderr, emitter)
 
 	if opts.readOnly {
 		close(ingestErrCh)
@@ -609,11 +743,11 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 		case ingestErr, ok := <-ingestErrCh:
 			if !ok {
 				ingestErrCh = nil
-				_ = writeCorpusSnapshot(runCtx, cfg.StateDir, st, indexingState)
+				_ = writeCorpusSnapshot(runCtx, cfg.StateDir, st, indexingState, a.stderr, emitter)
 				continue
 			}
 			if ingestErr == nil {
-				_ = writeCorpusSnapshot(runCtx, cfg.StateDir, st, indexingState)
+				_ = writeCorpusSnapshot(runCtx, cfg.StateDir, st, indexingState, a.stderr, emitter)
 				continue
 			}
 			writef(a.stderr, "ingestion failed: %v\n", ingestErr)
@@ -768,7 +902,8 @@ func (a *App) runStatus(ctx context.Context, global globalOptions, args []string
 			writef(a.stderr, "initialize metadata store: %v\n", initErr)
 			return exitIndexLoadFailure
 		}
-		snapshot, err = buildCorpusSnapshot(ctx, st, nil)
+		emitter := newNDJSONEmitter(a.stdout, global.jsonOutput)
+		snapshot, err = buildCorpusSnapshot(ctx, st, nil, a.stderr, emitter)
 		if err != nil {
 			writef(a.stderr, "build status snapshot: %v\n", err)
 			return exitGeneric
@@ -808,10 +943,11 @@ func (a *App) runStatus(ctx context.Context, global globalOptions, args []string
 		s.stat("skipped", snapshot.Indexing.Skipped),
 		s.stat("deleted", snapshot.Indexing.Deleted),
 	)
-	writef(a.stdout, "    %s  %s  %s",
+	writef(a.stdout, "    %s  %s  %s  %s",
 		s.stat("reps", snapshot.Indexing.Representations),
 		s.stat("chunks", snapshot.Indexing.ChunksTotal),
 		s.stat("embedded", snapshot.Indexing.EmbeddedOK),
+		s.stat("unknown", snapshot.Indexing.Unknown),
 	)
 	if snapshot.Indexing.Errors > 0 {
 		writef(a.stdout, "  %s", s.Red.Render(fmt.Sprintf("errors=%d", snapshot.Indexing.Errors)))
@@ -1165,6 +1301,8 @@ func (a *App) buildRetrieverForAsk(ctx context.Context, cfg config.Config, st mo
 	ret := retrieval.NewService(st, textIx, client, client)
 	ret.SetCodeIndex(codeIx)
 	ret.SetRootDir(cfg.RootDir)
+	ret.SetStateDir(cfg.StateDir)
+	ret.SetProtocolVersion(cfg.ProtocolVersion)
 
 	if metadataStore, ok := st.(embeddedChunkLister); ok {
 		if _, err := preloadEmbeddedChunkMetadata(ctx, metadataStore, ret); err != nil && !errors.Is(err, model.ErrNotImplemented) {
@@ -1362,7 +1500,18 @@ func parseUpOptions(global globalOptions, args []string) (upOptions, error) {
 	fs.BoolVar(&opts.readOnly, "read-only", false, "run in read-only mode")
 	fs.BoolVar(&opts.public, "public", false, "bind to all interfaces for external access")
 	fs.BoolVar(&opts.forceInsecure, "force-insecure", false, "allow public mode without auth (unsafe)")
+	fs.StringVar(&opts.x402Mode, "x402", "", "x402 mode: off|on|required")
+	fs.StringVar(&opts.x402FacilitatorURL, "x402-facilitator-url", "", "x402 facilitator base URL")
+	fs.StringVar(&opts.x402FacilitatorToken, "x402-facilitator-token", "", "x402 facilitator bearer token (insecure; token may also be provided via env or file)")
+	fs.StringVar(&opts.x402FacilitatorTokenFile, "x402-facilitator-token-file", "", "path to file containing x402 facilitator bearer token")
 	fs.StringVar(&opts.x402ResourceBaseURL, "x402-resource-base-url", "", "x402 resource base URL")
+	fs.StringVar(&opts.x402Network, "x402-network", "", "x402 network (CAIP-2)")
+	fs.StringVar(&opts.x402Price, "x402-price", "", "x402 atomic price per call")
+	fs.StringVar(&opts.x402Scheme, "x402-scheme", "", "x402 payment scheme")
+	fs.StringVar(&opts.x402Asset, "x402-asset", "", "x402 asset identifier")
+	fs.StringVar(&opts.x402PayTo, "x402-pay-to", "", "x402 pay-to address")
+	toolsCallEnabledFlag := &optionalBoolFlag{}
+	fs.Var(toolsCallEnabledFlag, "x402-tools-call-enabled", "enable x402 gating for tools/call")
 	fs.StringVar(&opts.auth, "auth", "", "auth mode: auto|none|file:<path>")
 	fs.StringVar(&opts.listen, "listen", "", "listen address")
 	fs.StringVar(&opts.mcpPath, "mcp-path", "", "MCP route path")
@@ -1373,6 +1522,22 @@ func parseUpOptions(global globalOptions, args []string) (upOptions, error) {
 	if err := fs.Parse(args); err != nil {
 		return upOptions{}, err
 	}
+	if toolsCallEnabledFlag.set {
+		opts.x402ToolsCallEnabled = toolsCallEnabledFlag.value
+		opts.x402ToolsCallEnabledIsSet = true
+	}
+
+	// if both forms of the facilitator token are supplied, the file wins.  the
+	// CLI parsing layer clears the direct-token field when a file path is
+	// present so that callers (including tests) can rely on mutual
+	// exclusivity without re‑implementing precedence logic. preserve whether
+	// the direct flag was originally set so we can warn later in the CLI flow.
+	directSet := strings.TrimSpace(opts.x402FacilitatorToken) != ""
+	if opts.x402FacilitatorTokenFile != "" && directSet {
+		opts.x402FacilitatorTokenDirectSet = true
+		opts.x402FacilitatorToken = ""
+	}
+
 	if fs.NArg() > 0 {
 		return upOptions{}, fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))
 	}
@@ -1587,7 +1752,7 @@ func isNumericPort(port string) bool {
 
 func buildConnectionPayload(cfg config.Config, url string, auth authMaterial) connectionPayload {
 	headers := map[string]string{
-		"MCP-Protocol-Version": cfg.ProtocolVersion,
+		protocol.MCPProtocolVersionHeader: cfg.ProtocolVersion,
 	}
 	if auth.mode != "none" {
 		headers["Authorization"] = auth.authorizationHint
@@ -1599,7 +1764,7 @@ func buildConnectionPayload(cfg config.Config, url string, auth authMaterial) co
 		Headers:   headers,
 		Session: connectionSession{
 			UsesMCPSessionID:     true,
-			HeaderName:           "MCP-Session-Id",
+			HeaderName:           protocol.MCPSessionHeader,
 			AssignedOnInitialize: true,
 		},
 		Public:      cfg.Public,
@@ -1621,16 +1786,16 @@ func newNDJSONEmitter(out io.Writer, enabled bool) *ndjsonEmitter {
 	return &ndjsonEmitter{enabled: enabled, out: out}
 }
 
-func runCorpusWriter(ctx context.Context, stateDir string, st model.Store, indexingState *appstate.IndexingState, stderr io.Writer) {
-	runCorpusWriterWithInterval(ctx, stateDir, st, indexingState, stderr, 5*time.Second)
+func runCorpusWriter(ctx context.Context, stateDir string, st model.Store, indexingState *appstate.IndexingState, stderr io.Writer, emitter *ndjsonEmitter) {
+	runCorpusWriterWithInterval(ctx, stateDir, st, indexingState, stderr, emitter, 5*time.Second)
 }
 
-func runCorpusWriterWithInterval(ctx context.Context, stateDir string, st model.Store, indexingState *appstate.IndexingState, stderr io.Writer, interval time.Duration) {
+func runCorpusWriterWithInterval(ctx context.Context, stateDir string, st model.Store, indexingState *appstate.IndexingState, stderr io.Writer, emitter *ndjsonEmitter, interval time.Duration) {
 	if interval <= 0 {
 		interval = 5 * time.Second
 	}
 	// Emit an initial snapshot immediately, then refresh while indexing runs.
-	if err := writeCorpusSnapshot(ctx, stateDir, st, indexingState); err != nil {
+	if err := writeCorpusSnapshot(ctx, stateDir, st, indexingState, stderr, emitter); err != nil {
 		writef(stderr, "write corpus snapshot: %v\n", err)
 	}
 
@@ -1644,15 +1809,15 @@ func runCorpusWriterWithInterval(ctx context.Context, stateDir string, st model.
 			if indexingState != nil && !indexingState.Snapshot().Running {
 				continue
 			}
-			if err := writeCorpusSnapshot(ctx, stateDir, st, indexingState); err != nil {
+			if err := writeCorpusSnapshot(ctx, stateDir, st, indexingState, stderr, emitter); err != nil {
 				writef(stderr, "write corpus snapshot: %v\n", err)
 			}
 		}
 	}
 }
 
-func writeCorpusSnapshot(ctx context.Context, stateDir string, st model.Store, indexingState *appstate.IndexingState) error {
-	snapshot, err := buildCorpusSnapshot(ctx, st, indexingState)
+func writeCorpusSnapshot(ctx context.Context, stateDir string, st model.Store, indexingState *appstate.IndexingState, stderr io.Writer, emitter *ndjsonEmitter) error {
+	snapshot, err := buildCorpusSnapshot(ctx, st, indexingState, stderr, emitter)
 	if err != nil {
 		return err
 	}
@@ -1699,12 +1864,14 @@ func writeCorpusSnapshot(ctx context.Context, stateDir string, st model.Store, i
 	return nil
 }
 
-func buildCorpusSnapshot(ctx context.Context, st model.Store, indexingState *appstate.IndexingState) (corpusSnapshot, error) {
-	docCounts, totalDocs, err := collectActiveDocCounts(ctx, st)
+func buildCorpusSnapshot(ctx context.Context, st model.Store, indexingState *appstate.IndexingState, stderr io.Writer, emitter *ndjsonEmitter) (corpusSnapshot, error) {
+	corpusStats, err := collectCorpusStats(ctx, st, stderr, emitter)
 	if err != nil {
 		return corpusSnapshot{}, err
 	}
 
+	docCounts := corpusStats.DocCounts
+	totalDocs := corpusStats.TotalDocs
 	codeDocs := docCounts["code"]
 	codeRatio := 0.0
 	if totalDocs > 0 {
@@ -1714,6 +1881,16 @@ func buildCorpusSnapshot(ctx context.Context, st model.Store, indexingState *app
 	idx := appstate.IndexingSnapshot{Mode: appstate.ModeIncremental}
 	if indexingState != nil {
 		idx = indexingState.Snapshot()
+	} else {
+		idx.Scanned = corpusStats.Scanned
+		idx.Indexed = corpusStats.Indexed
+		idx.Skipped = corpusStats.Skipped
+		idx.Deleted = corpusStats.Deleted
+		idx.Representations = corpusStats.Representations
+		idx.ChunksTotal = corpusStats.ChunksTotal
+		idx.EmbeddedOK = corpusStats.EmbeddedOK
+		idx.Errors = corpusStats.Errors
+		idx.Unknown = corpusStats.Unknown
 	}
 
 	return corpusSnapshot{
@@ -1729,10 +1906,55 @@ func buildCorpusSnapshot(ctx context.Context, st model.Store, indexingState *app
 			ChunksTotal:     idx.ChunksTotal,
 			EmbeddedOK:      idx.EmbeddedOK,
 			Errors:          idx.Errors,
+			Unknown:         idx.Unknown,
 		},
 		DocCounts: docCounts,
 		TotalDocs: totalDocs,
 		CodeRatio: codeRatio,
+	}, nil
+}
+
+func collectCorpusStats(ctx context.Context, st model.Store, stderr io.Writer, emitter *ndjsonEmitter) (model.CorpusStats, error) {
+	if st == nil {
+		return model.CorpusStats{DocCounts: map[string]int64{}}, nil
+	}
+
+	if agg, ok := st.(corpusStatsStore); ok {
+		stats, err := agg.CorpusStats(ctx)
+		if err == nil {
+			if stats.DocCounts == nil {
+				stats.DocCounts = map[string]int64{}
+			}
+			return stats, nil
+		}
+		if !errors.Is(err, model.ErrNotImplemented) {
+			return model.CorpusStats{}, fmt.Errorf("corpus stats: %w", err)
+		}
+	}
+
+	docCounts, totalDocs, err := collectActiveDocCounts(ctx, st)
+	if err != nil {
+		return model.CorpusStats{}, err
+	}
+
+	statusCounts, err := collectDocumentStatusCounts(ctx, st, stderr, emitter)
+	if err != nil {
+		return model.CorpusStats{}, err
+	}
+
+	return model.CorpusStats{
+		DocCounts: docCounts,
+		TotalDocs: totalDocs,
+		Scanned:   statusCounts.Scanned,
+		Indexed:   statusCounts.Indexed,
+		Skipped:   statusCounts.Skipped,
+		Deleted:   statusCounts.Deleted,
+		// Not derivable from ListFiles-only fallback path.
+		Representations: -1,
+		ChunksTotal:     -1,
+		EmbeddedOK:      -1,
+		Errors:          statusCounts.Errors,
+		Unknown:         statusCounts.Unknown,
 	}, nil
 }
 
@@ -1778,6 +2000,86 @@ func collectActiveDocCounts(ctx context.Context, st model.Store) (map[string]int
 	}
 
 	return counts, totalActive, nil
+}
+
+type documentStatusCounts struct {
+	Scanned int64
+	Indexed int64
+	Skipped int64
+	Deleted int64
+	Errors  int64
+	Unknown int64
+}
+
+func collectDocumentStatusCounts(ctx context.Context, st model.Store, stderr io.Writer, emitter *ndjsonEmitter) (documentStatusCounts, error) {
+	if st == nil {
+		return documentStatusCounts{}, nil
+	}
+
+	const pageSize = 500
+	offset := 0
+	counts := documentStatusCounts{}
+	unexpectedStatusCounts := make(map[string]int64)
+	unexpectedStatusExample := make(map[string]string)
+
+	for {
+		docs, total, err := st.ListFiles(ctx, "", "", pageSize, offset)
+		if err != nil {
+			return documentStatusCounts{}, fmt.Errorf("list files: %w", err)
+		}
+		for _, doc := range docs {
+			counts.Scanned++
+			if doc.Deleted {
+				counts.Deleted++
+				continue
+			}
+
+			switch strings.ToLower(strings.TrimSpace(doc.Status)) {
+			case "indexed", "ok":
+				counts.Indexed++
+			case "skipped":
+				counts.Skipped++
+			case "error":
+				counts.Errors++
+			default:
+				rawStatus := strings.TrimSpace(doc.Status)
+				if rawStatus == "" {
+					rawStatus = "<empty>"
+				}
+				counts.Unknown++
+				unexpectedStatusCounts[rawStatus]++
+				if _, exists := unexpectedStatusExample[rawStatus]; !exists {
+					unexpectedStatusExample[rawStatus] = strings.TrimSpace(doc.RelPath)
+				}
+			}
+		}
+
+		offset += len(docs)
+		if len(docs) == 0 || int64(offset) >= total {
+			break
+		}
+	}
+
+	if len(unexpectedStatusCounts) > 0 {
+		parts := make([]string, 0, len(unexpectedStatusCounts))
+		for statusVal, count := range unexpectedStatusCounts {
+			example := unexpectedStatusExample[statusVal]
+			parts = append(parts, fmt.Sprintf("%s=%d (example rel_path=%q)", statusVal, count, example))
+		}
+		sort.Strings(parts)
+		msg := fmt.Sprintf("unexpected document statuses encountered during scan: %s", strings.Join(parts, ", "))
+		if emitter != nil && emitter.enabled {
+			emitter.Emit("warning", "unexpected_document_statuses", map[string]interface{}{
+				"message":  msg,
+				"counts":   unexpectedStatusCounts,
+				"examples": unexpectedStatusExample,
+			})
+		} else {
+			writef(stderr, "warning: %s\n", msg)
+		}
+	}
+
+	return counts, nil
 }
 
 func (e *ndjsonEmitter) Emit(level, event string, data interface{}) {
@@ -1833,11 +2135,11 @@ func (a *App) printHumanConnection(cfg config.Config, connection connectionPaylo
 	writeln(a.stdout)
 
 	writef(a.stdout, "  %s\n", s.sectionHeader("Required headers"))
-	writef(a.stdout, "    %s %s\n", s.Dim.Render("MCP-Protocol-Version:"), cfg.ProtocolVersion)
+	writef(a.stdout, "    %s %s\n", s.Dim.Render(protocol.MCPProtocolVersionHeader+":"), cfg.ProtocolVersion)
 	if auth.mode != "none" {
 		writef(a.stdout, "    %s %s\n", s.Dim.Render("Authorization:"), "Bearer <token>")
 	}
-	writef(a.stdout, "    %s %s\n", s.Dim.Render("MCP-Session-Id:"), s.dim("(assigned after initialize response)"))
+	writef(a.stdout, "    %s %s\n", s.Dim.Render(protocol.MCPSessionHeader+":"), s.dim("(assigned after initialize response)"))
 	writeln(a.stdout)
 	writeln(a.stdout, s.separator(44))
 	writef(a.stdout, "  %s\n\n", s.Success.Render("Ready for connections"))

@@ -17,37 +17,36 @@ import (
 	"dir2mcp/internal/ingest"
 	"dir2mcp/internal/mistral"
 	"dir2mcp/internal/model"
+	"dir2mcp/internal/protocol"
 )
 
 const (
-	toolNameSearch           = "dir2mcp.search"
-	toolNameAsk              = "dir2mcp.ask"
-	toolNameAskAudio         = "dir2mcp.ask_audio"
-	toolNameTranscribe       = "dir2mcp.transcribe"
-	toolNameAnnotate         = "dir2mcp.annotate"
-	toolNameTranscribeAndAsk = "dir2mcp.transcribe_and_ask"
-	toolNameOpenFile         = "dir2mcp.open_file"
-	toolNameListFiles        = "dir2mcp.list_files"
-	toolNameStats            = "dir2mcp.stats"
-
 	defaultEmbedTextModel = "mistral-embed"
 	defaultEmbedCodeModel = "codestral-embed"
 	defaultOCRModel       = mistral.DefaultOCRModel
 	defaultSTTProvider    = "mistral"
 	defaultSTTModel       = "voxtral-mini-latest"
 	defaultChatModel      = mistral.DefaultChatModel
+
+	// maximum combined character count of schema+text+prompt instructions
+	// that will be sent to the Mistral client.  If an annotate request
+	// creates a longer prompt we reject it rather than relying on the
+	// provider to fail; this helps make errors predictable and avoids
+	// accidental OOMs or context-length errors coming back from the
+	// remote API.  The value is intentionally generous but still bounded.
+	maxMistralContextChars = 200000
 )
 
 var toolOrder = []string{
-	toolNameSearch,
-	toolNameAsk,
-	toolNameAskAudio,
-	toolNameTranscribe,
-	toolNameAnnotate,
-	toolNameTranscribeAndAsk,
-	toolNameOpenFile,
-	toolNameListFiles,
-	toolNameStats,
+	protocol.ToolNameSearch,
+	protocol.ToolNameAsk,
+	protocol.ToolNameAskAudio,
+	protocol.ToolNameTranscribe,
+	protocol.ToolNameAnnotate,
+	protocol.ToolNameTranscribeAndAsk,
+	protocol.ToolNameOpenFile,
+	protocol.ToolNameListFiles,
+	protocol.ToolNameStats,
 }
 
 type toolHandler func(context.Context, map[string]interface{}) (toolCallResult, *toolExecutionError)
@@ -94,64 +93,64 @@ type voiceAwareTTSSynthesizer interface {
 
 func (s *Server) buildToolRegistry() map[string]toolDefinition {
 	return map[string]toolDefinition{
-		toolNameSearch: {
-			Name:         toolNameSearch,
+		protocol.ToolNameSearch: {
+			Name:         protocol.ToolNameSearch,
 			Description:  "Semantic retrieval across indexed content.",
 			InputSchema:  searchInputSchema(),
 			OutputSchema: searchOutputSchema(),
 			handler:      s.handleSearchTool,
 		},
-		toolNameAsk: {
-			Name:         toolNameAsk,
+		protocol.ToolNameAsk: {
+			Name:         protocol.ToolNameAsk,
 			Description:  "RAG answer with citations; can run search-only mode.",
 			InputSchema:  askInputSchema(),
 			OutputSchema: askOutputSchema(),
 			handler:      s.handleAskTool,
 		},
-		toolNameAskAudio: {
-			Name:         toolNameAskAudio,
+		protocol.ToolNameAskAudio: {
+			Name:         protocol.ToolNameAskAudio,
 			Description:  "RAG answer with optional ElevenLabs audio synthesis.",
 			InputSchema:  askAudioInputSchema(),
 			OutputSchema: askAudioOutputSchema(),
 			handler:      s.handleAskAudioTool,
 		},
-		toolNameTranscribe: {
-			Name:         toolNameTranscribe,
+		protocol.ToolNameTranscribe: {
+			Name:         protocol.ToolNameTranscribe,
 			Description:  "Force transcription for an indexed audio document.",
 			InputSchema:  transcribeInputSchema(),
 			OutputSchema: transcribeOutputSchema(),
 			handler:      s.handleTranscribeTool,
 		},
-		toolNameAnnotate: {
-			Name:         toolNameAnnotate,
+		protocol.ToolNameAnnotate: {
+			Name:         protocol.ToolNameAnnotate,
 			Description:  "Structured extraction using provided JSON schema.",
 			InputSchema:  annotateInputSchema(),
 			OutputSchema: annotateOutputSchema(),
 			handler:      s.handleAnnotateTool,
 		},
-		toolNameTranscribeAndAsk: {
-			Name:         toolNameTranscribeAndAsk,
+		protocol.ToolNameTranscribeAndAsk: {
+			Name:         protocol.ToolNameTranscribeAndAsk,
 			Description:  "Ensure transcript exists for audio file, then answer a question with citations.",
 			InputSchema:  transcribeAndAskInputSchema(),
 			OutputSchema: transcribeAndAskOutputSchema(),
 			handler:      s.handleTranscribeAndAskTool,
 		},
-		toolNameOpenFile: {
-			Name:         toolNameOpenFile,
+		protocol.ToolNameOpenFile: {
+			Name:         protocol.ToolNameOpenFile,
 			Description:  "Open an exact source slice for verification.",
 			InputSchema:  openFileInputSchema(),
 			OutputSchema: openFileOutputSchema(),
 			handler:      s.handleOpenFileTool,
 		},
-		toolNameListFiles: {
-			Name:         toolNameListFiles,
+		protocol.ToolNameListFiles: {
+			Name:         protocol.ToolNameListFiles,
 			Description:  "List files under root for navigation and filter selection.",
 			InputSchema:  listFilesInputSchema(),
 			OutputSchema: listFilesOutputSchema(),
 			handler:      s.handleListFilesTool,
 		},
-		toolNameStats: {
-			Name:         toolNameStats,
+		protocol.ToolNameStats: {
+			Name:         protocol.ToolNameStats,
 			Description:  "Status/progress/health for indexing and models.",
 			InputSchema:  statsInputSchema(),
 			OutputSchema: statsOutputSchema(),
@@ -186,6 +185,19 @@ func (s *Server) handleToolsList(w http.ResponseWriter, id interface{}) {
 }
 
 func (s *Server) handleToolsCall(ctx context.Context, w http.ResponseWriter, rawParams json.RawMessage, id interface{}) {
+	result, statusCode, rpcErr := s.processToolsCall(ctx, rawParams)
+	if rpcErr != nil {
+		writeResponse(w, statusCode, rpcResponse{
+			JSONRPC: "2.0",
+			ID:      id,
+			Error:   rpcErr,
+		})
+		return
+	}
+	writeResult(w, statusCode, id, result)
+}
+
+func (s *Server) processToolsCall(ctx context.Context, rawParams json.RawMessage) (toolCallResult, int, *rpcError) {
 	params, err := parseToolsCallParams(rawParams)
 	if err != nil {
 		canonicalCode := "INVALID_FIELD"
@@ -193,27 +205,31 @@ func (s *Server) handleToolsCall(ctx context.Context, w http.ResponseWriter, raw
 		if errors.As(err, &vErr) && vErr.canonicalCode != "" {
 			canonicalCode = vErr.canonicalCode
 		}
-		writeError(w, http.StatusBadRequest, id, -32600, err.Error(), canonicalCode, false)
-		return
+		return toolCallResult{}, http.StatusBadRequest, &rpcError{
+			Code:    -32600,
+			Message: err.Error(),
+			Data: &rpcErrorData{
+				Code:      canonicalCode,
+				Retryable: false,
+			},
+		}
 	}
 
 	tool, ok := s.tools[params.Name]
 	if !ok {
-		writeResult(w, http.StatusOK, id, newToolErrorResult(toolExecutionError{
+		return newToolErrorResult(toolExecutionError{
 			Code:      "METHOD_NOT_FOUND",
 			Message:   fmt.Sprintf("unknown tool: %s", params.Name),
 			Retryable: false,
-		}))
-		return
+		}), http.StatusOK, nil
 	}
 
 	result, toolErr := tool.handler(ctx, params.Arguments)
 	if toolErr != nil {
-		writeResult(w, http.StatusOK, id, newToolErrorResult(*toolErr))
-		return
+		return newToolErrorResult(*toolErr), http.StatusOK, nil
 	}
 
-	writeResult(w, http.StatusOK, id, result)
+	return result, http.StatusOK, nil
 }
 
 func parseToolsCallParams(raw json.RawMessage) (toolsCallParams, error) {
@@ -263,28 +279,76 @@ func newToolErrorResult(toolErr toolExecutionError) toolCallResult {
 	}
 }
 
-func (s *Server) handleStatsTool(_ context.Context, args map[string]interface{}) (toolCallResult, *toolExecutionError) {
+func (s *Server) handleStatsTool(ctx context.Context, args map[string]interface{}) (toolCallResult, *toolExecutionError) {
 	if err := assertNoUnknownArguments(args, map[string]struct{}{}); err != nil {
 		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
 	}
 
+	retrievedStats := model.Stats{
+		Root:            s.cfg.RootDir,
+		StateDir:        s.cfg.StateDir,
+		ProtocolVersion: s.cfg.ProtocolVersion,
+		CorpusStats:     model.CorpusStats{DocCounts: map[string]int64{}},
+	}
+	statsFromRetriever := false
+	if s.retriever != nil {
+		stats, err := s.retriever.Stats(ctx)
+		if err != nil {
+			if !errors.Is(err, model.ErrNotImplemented) {
+				return toolCallResult{}, &toolExecutionError{Code: "STORE_CORRUPT", Message: err.Error(), Retryable: false}
+			}
+		} else {
+			statsFromRetriever = true
+			retrievedStats = stats
+			if retrievedStats.DocCounts == nil {
+				retrievedStats.DocCounts = map[string]int64{}
+			}
+			if strings.TrimSpace(retrievedStats.Root) == "" {
+				retrievedStats.Root = s.cfg.RootDir
+			}
+			if strings.TrimSpace(retrievedStats.StateDir) == "" {
+				retrievedStats.StateDir = s.cfg.StateDir
+			}
+			if strings.TrimSpace(retrievedStats.ProtocolVersion) == "" {
+				retrievedStats.ProtocolVersion = s.cfg.ProtocolVersion
+			}
+		}
+	}
+
 	snapshot := s.indexing.Snapshot()
+	if !statsFromRetriever {
+		retrievedStats.Scanned = snapshot.Scanned
+		retrievedStats.Indexed = snapshot.Indexed
+		retrievedStats.Skipped = snapshot.Skipped
+		retrievedStats.Deleted = snapshot.Deleted
+		retrievedStats.Representations = snapshot.Representations
+		retrievedStats.ChunksTotal = snapshot.ChunksTotal
+		retrievedStats.EmbeddedOK = snapshot.EmbeddedOK
+		retrievedStats.Errors = snapshot.Errors
+	}
 	structured := map[string]interface{}{
-		"root":             s.cfg.RootDir,
-		"state_dir":        s.cfg.StateDir,
-		"protocol_version": s.cfg.ProtocolVersion,
+		"root":             retrievedStats.Root,
+		"state_dir":        retrievedStats.StateDir,
+		"protocol_version": retrievedStats.ProtocolVersion,
+		"doc_counts":       retrievedStats.DocCounts,
+		"total_docs":       retrievedStats.TotalDocs,
+		// indicates whether the above counts originate from the underlying
+		// retriever.  when false the map will be zero-valued (not nil) and
+		// total_docs will be 0, so consumers must not assume those values
+		// represent an empty corpus without this flag.
+		"doc_counts_available": statsFromRetriever,
 		"indexing": map[string]interface{}{
 			"job_id":          snapshot.JobID,
 			"running":         snapshot.Running,
 			"mode":            snapshot.Mode,
-			"scanned":         snapshot.Scanned,
-			"indexed":         snapshot.Indexed,
-			"skipped":         snapshot.Skipped,
-			"deleted":         snapshot.Deleted,
-			"representations": snapshot.Representations,
-			"chunks_total":    snapshot.ChunksTotal,
-			"embedded_ok":     snapshot.EmbeddedOK,
-			"errors":          snapshot.Errors,
+			"scanned":         retrievedStats.Scanned,
+			"indexed":         retrievedStats.Indexed,
+			"skipped":         retrievedStats.Skipped,
+			"deleted":         retrievedStats.Deleted,
+			"representations": retrievedStats.Representations,
+			"chunks_total":    retrievedStats.ChunksTotal,
+			"embedded_ok":     retrievedStats.EmbeddedOK,
+			"errors":          retrievedStats.Errors,
 		},
 		"models": map[string]interface{}{
 			"embed_text":   defaultEmbedTextModel,
@@ -304,9 +368,9 @@ func (s *Server) handleStatsTool(_ context.Context, args map[string]interface{})
 	text := fmt.Sprintf(
 		"indexing running=%t scanned=%d indexed=%d errors=%d",
 		snapshot.Running,
-		snapshot.Scanned,
-		snapshot.Indexed,
-		snapshot.Errors,
+		retrievedStats.Scanned,
+		retrievedStats.Indexed,
+		retrievedStats.Errors,
 	)
 
 	return toolCallResult{
@@ -473,7 +537,7 @@ func (s *Server) handleSearchTool(ctx context.Context, args map[string]interface
 	}
 
 	if s.retriever == nil {
-		return toolCallResult{}, &toolExecutionError{Code: "INDEX_NOT_READY", Message: "retriever not configured", Retryable: false}
+		return toolCallResult{}, &toolExecutionError{Code: protocol.ErrorCodeIndexNotReady, Message: "retriever not configured", Retryable: false}
 	}
 	hits, searchErr := s.retriever.Search(ctx, model.SearchQuery{
 		Query:      query,
@@ -488,7 +552,7 @@ func (s *Server) handleSearchTool(ctx context.Context, args map[string]interface
 		message := "internal server error"
 		retryable := true
 		if errors.Is(searchErr, model.ErrIndexNotReady) || errors.Is(searchErr, model.ErrIndexNotConfigured) {
-			code = "INDEX_NOT_READY"
+			code = protocol.ErrorCodeIndexNotReady
 			message = "index not ready"
 		}
 		return toolCallResult{}, &toolExecutionError{Code: code, Message: message, Retryable: retryable}
@@ -546,7 +610,7 @@ func (s *Server) handleAskTool(ctx context.Context, args map[string]interface{})
 	}
 
 	if s.retriever == nil {
-		return toolCallResult{}, &toolExecutionError{Code: "INDEX_NOT_READY", Message: "retriever not configured", Retryable: false}
+		return toolCallResult{}, &toolExecutionError{Code: protocol.ErrorCodeIndexNotReady, Message: "retriever not configured", Retryable: false}
 	}
 
 	// default k should stay in sync with the schema and other tools.  the
@@ -610,10 +674,6 @@ func (s *Server) handleAskTool(ctx context.Context, args map[string]interface{})
 		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
 	}
 
-	if s.retriever == nil {
-		return toolCallResult{}, &toolExecutionError{Code: "INDEX_NOT_READY", Message: "retriever not configured", Retryable: false}
-	}
-
 	// branch early on search_only so we avoid asking the generator and can
 	// take advantage of Search-specific behaviour (and avoid throwing away the
 	// generated answer).
@@ -631,7 +691,7 @@ func (s *Server) handleAskTool(ctx context.Context, args map[string]interface{})
 			message := "internal server error"
 			retryable := true
 			if errors.Is(searchErr, model.ErrIndexNotReady) || errors.Is(searchErr, model.ErrIndexNotConfigured) {
-				code = "INDEX_NOT_READY"
+				code = protocol.ErrorCodeIndexNotReady
 				message = "index not ready"
 			}
 			return toolCallResult{}, &toolExecutionError{Code: code, Message: message, Retryable: retryable}
@@ -676,7 +736,7 @@ func (s *Server) handleAskTool(ctx context.Context, args map[string]interface{})
 		message := "internal server error"
 		retryable := true
 		if errors.Is(askErr, model.ErrIndexNotReady) || errors.Is(askErr, model.ErrIndexNotConfigured) {
-			code = "INDEX_NOT_READY"
+			code = protocol.ErrorCodeIndexNotReady
 			message = "index not ready"
 		}
 		return toolCallResult{}, &toolExecutionError{Code: code, Message: message, Retryable: retryable}
@@ -773,7 +833,7 @@ func (s *Server) handleAskAudioTool(ctx context.Context, args map[string]interfa
 	}
 
 	if s.retriever == nil {
-		return toolCallResult{}, &toolExecutionError{Code: "INDEX_NOT_READY", Message: "retriever not configured", Retryable: false}
+		return toolCallResult{}, &toolExecutionError{Code: protocol.ErrorCodeIndexNotReady, Message: "retriever not configured", Retryable: false}
 	}
 
 	if mode == "search_only" {
@@ -788,7 +848,7 @@ func (s *Server) handleAskAudioTool(ctx context.Context, args map[string]interfa
 		if searchErr != nil {
 			switch {
 			case errors.Is(searchErr, model.ErrIndexNotReady), errors.Is(searchErr, model.ErrIndexNotConfigured):
-				return toolCallResult{}, &toolExecutionError{Code: "INDEX_NOT_READY", Message: "index not ready", Retryable: true}
+				return toolCallResult{}, &toolExecutionError{Code: protocol.ErrorCodeIndexNotReady, Message: "index not ready", Retryable: true}
 			default:
 				return toolCallResult{}, &toolExecutionError{Code: "INTERNAL_ERROR", Message: "internal server error", Retryable: true}
 			}
@@ -837,12 +897,12 @@ func (s *Server) handleAskAudioTool(ctx context.Context, args map[string]interfa
 			}
 			return toolCallResult{
 				Content: []toolContentItem{
-					{Type: "text", Text: "ask_audio is not available yet; use dir2mcp.search while ask generation is being implemented"},
+					{Type: "text", Text: fmt.Sprintf("ask_audio is not available yet; use %s while ask generation is being implemented", protocol.ToolNameSearch)},
 				},
 				StructuredContent: fallbackStructured,
 			}, nil
 		case errors.Is(askErr, model.ErrIndexNotReady), errors.Is(askErr, model.ErrIndexNotConfigured):
-			return toolCallResult{}, &toolExecutionError{Code: "INDEX_NOT_READY", Message: "index not ready", Retryable: true}
+			return toolCallResult{}, &toolExecutionError{Code: protocol.ErrorCodeIndexNotReady, Message: "index not ready", Retryable: true}
 		default:
 			return toolCallResult{}, &toolExecutionError{Code: "INTERNAL_ERROR", Message: "internal server error", Retryable: true}
 		}
@@ -859,7 +919,7 @@ func (s *Server) handleAskAudioTool(ctx context.Context, args map[string]interfa
 	}
 
 	if s.tts == nil {
-		text := answerText + "\n\nAudio synthesis is disabled. Set ELEVENLABS_API_KEY to enable dir2mcp.ask_audio voice output."
+		text := answerText + "\n\nAudio synthesis is disabled. Set ELEVENLABS_API_KEY to enable " + protocol.ToolNameAskAudio + " voice output."
 		return toolCallResult{
 			Content: []toolContentItem{
 				{Type: "text", Text: text},
@@ -944,10 +1004,16 @@ func (s *Server) handleTranscribeTool(ctx context.Context, args map[string]inter
 		return toolCallResult{}, &toolExecutionError{Code: "DOC_TYPE_UNSUPPORTED", Message: "document is not audio", Retryable: false}
 	}
 
+	// if a language override is provided we always force a retranscription.
+	// this ensures that callers can request a specific language, but note that
+	// even if a cached transcript already exists the request will re-run the
+	// transcription step. repeated calls with the same language value therefore
+	// defeat caching and may incur extra API/cost overhead; clients should avoid
+	// doing so when possible.
 	if strings.TrimSpace(language) != "" {
 		retranscribe = true
 	}
-	transcript, transcribed, toolErr := s.ensureTranscriptForAudioDoc(ctx, doc, retranscribe, language)
+	transcript, transcribed, indexed, toolErr := s.ensureTranscriptForAudioDoc(ctx, doc, retranscribe, language)
 	if toolErr != nil {
 		return toolCallResult{}, toolErr
 	}
@@ -967,7 +1033,7 @@ func (s *Server) handleTranscribeTool(ctx context.Context, args map[string]inter
 		"rel_path":    relPath,
 		"provider":    defaultSTTProvider,
 		"model":       defaultSTTModel,
-		"indexed":     true,
+		"indexed":     indexed,
 		"segments":    segments,
 		"transcribed": transcribed,
 	}
@@ -1040,7 +1106,18 @@ func (s *Server) handleAnnotateTool(ctx context.Context, args map[string]interfa
 		return toolCallResult{}, toolErr
 	}
 
-	schemaBytes, _ := json.Marshal(schemaJSON)
+	schemaBytes, err := json.Marshal(schemaJSON)
+	if err != nil {
+		// schemaJSON should be a valid object but if marshaling fails we
+		// can't safely include it in the prompt.  Fail early with a
+		// descriptive error rather than sending malformed JSON to the
+		// model.
+		return toolCallResult{}, &toolExecutionError{
+			Code:      "ANNOTATE_FAILED",
+			Message:   fmt.Sprintf("failed to marshal schema JSON: %v", err),
+			Retryable: false,
+		}
+	}
 	prompt := strings.Join([]string{
 		"Extract a JSON object that strictly conforms to this schema:",
 		string(schemaBytes),
@@ -1049,18 +1126,35 @@ func (s *Server) handleAnnotateTool(ctx context.Context, args map[string]interfa
 		sourceText,
 	}, "\n\n")
 
+	// guard against overly large inputs that would blow past the model's
+	// context window.  We compute the rune count of the prompt because the
+	// provider limits are generally character‑based; using bytes could be
+	// slightly off when multi‑byte UTF‑8 is involved, but the constant is
+	// high enough that differences don't matter.  If the prompt is too long
+	// we fail with a mapped tool error rather than invoking client.Generate
+	// which would likely return a provider error.
+	if len([]rune(prompt)) > maxMistralContextChars {
+		// This is a local validation failure; return a toolExecutionError rather
+		// than mapping it to a provider error so callers know it didn't involve
+		// the external API.
+		return toolCallResult{}, &toolExecutionError{
+			Code:      "ANNOTATE_FAILED",
+			Message:   fmt.Sprintf("prompt length %d exceeds max context %d", len([]rune(prompt)), maxMistralContextChars),
+			Retryable: false,
+		}
+	}
+
 	generated, genErr := client.Generate(ctx, prompt)
 	if genErr != nil {
-		return toolCallResult{}, mapToolErrorFromProvider("ANNOTATE_FAILED", genErr)
+		return toolCallResult{}, s.mapToolErrorFromProvider("ANNOTATE_FAILED", genErr)
 	}
 	annotationObj, parseErr := parseJSONObjectFromModelOutput(generated)
 	if parseErr != nil {
 		return toolCallResult{}, &toolExecutionError{Code: "ANNOTATE_FAILED", Message: parseErr.Error(), Retryable: false}
 	}
 
-	if s.store == nil {
-		return toolCallResult{}, &toolExecutionError{Code: "STORE_CORRUPT", Message: "store not configured", Retryable: false}
-	}
+	// create a request-scoped ingest service to avoid cross-request mutation of
+	// OCR/transcriber settings under concurrency.
 	ing := ingest.NewService(s.cfg, s.store)
 	preview, persistErr := ing.StoreAnnotationRepresentations(ctx, doc, annotationObj, indexFlattenedText)
 	if persistErr != nil {
@@ -1122,7 +1216,7 @@ func (s *Server) handleTranscribeAndAskTool(ctx context.Context, args map[string
 	}
 
 	if s.retriever == nil {
-		return toolCallResult{}, &toolExecutionError{Code: "INDEX_NOT_READY", Message: "retriever not configured", Retryable: false}
+		return toolCallResult{}, &toolExecutionError{Code: protocol.ErrorCodeIndexNotReady, Message: "retriever not configured", Retryable: false}
 	}
 
 	doc, toolErr := s.lookupDocumentForTool(ctx, relPath)
@@ -1132,7 +1226,7 @@ func (s *Server) handleTranscribeAndAskTool(ctx context.Context, args map[string
 	if doc.DocType != "audio" {
 		return toolCallResult{}, &toolExecutionError{Code: "DOC_TYPE_UNSUPPORTED", Message: "document is not audio", Retryable: false}
 	}
-	_, transcribed, toolErr := s.ensureTranscriptForAudioDoc(ctx, doc, false, "")
+	_, transcribed, _, toolErr := s.ensureTranscriptForAudioDoc(ctx, doc, false, "")
 	if toolErr != nil {
 		return toolCallResult{}, toolErr
 	}
@@ -1145,7 +1239,7 @@ func (s *Server) handleTranscribeAndAskTool(ctx context.Context, args map[string
 	})
 	if askErr != nil {
 		if errors.Is(askErr, model.ErrIndexNotReady) || errors.Is(askErr, model.ErrIndexNotConfigured) {
-			return toolCallResult{}, &toolExecutionError{Code: "INDEX_NOT_READY", Message: "index not ready", Retryable: true}
+			return toolCallResult{}, &toolExecutionError{Code: protocol.ErrorCodeIndexNotReady, Message: "index not ready", Retryable: true}
 		}
 		return toolCallResult{}, &toolExecutionError{Code: "INTERNAL_ERROR", Message: "internal server error", Retryable: true}
 	}
@@ -1187,7 +1281,7 @@ func (s *Server) handleOpenFileTool(ctx context.Context, args map[string]interfa
 	}
 
 	if s.retriever == nil {
-		return toolCallResult{}, &toolExecutionError{Code: "INDEX_NOT_READY", Message: "retriever not configured", Retryable: false}
+		return toolCallResult{}, &toolExecutionError{Code: protocol.ErrorCodeIndexNotReady, Message: "retriever not configured", Retryable: false}
 	}
 
 	maxChars := 20000
@@ -1298,13 +1392,13 @@ func (s *Server) handleOpenFileTool(ctx context.Context, args map[string]interfa
 	if openErr != nil {
 		switch {
 		case errors.Is(openErr, model.ErrForbidden):
-			return toolCallResult{}, &toolExecutionError{Code: "FORBIDDEN", Message: "forbidden", Retryable: false}
+			return toolCallResult{}, &toolExecutionError{Code: protocol.ErrorCodePermissionDenied, Message: "forbidden", Retryable: false}
 		case errors.Is(openErr, model.ErrPathOutsideRoot):
 			return toolCallResult{}, &toolExecutionError{Code: "PATH_OUTSIDE_ROOT", Message: "path outside root", Retryable: false}
 		case errors.Is(openErr, model.ErrDocTypeUnsupported):
 			return toolCallResult{}, &toolExecutionError{Code: "DOC_TYPE_UNSUPPORTED", Message: "doc type unsupported", Retryable: false}
 		case errors.Is(openErr, os.ErrNotExist):
-			return toolCallResult{}, &toolExecutionError{Code: "NOT_FOUND", Message: "file not found", Retryable: false}
+			return toolCallResult{}, &toolExecutionError{Code: protocol.ErrorCodeFileNotFound, Message: "file not found", Retryable: false}
 		default:
 			return toolCallResult{}, &toolExecutionError{Code: "INTERNAL_ERROR", Message: "internal server error", Retryable: true}
 		}
@@ -1373,66 +1467,101 @@ func (s *Server) lookupDocumentForTool(ctx context.Context, relPath string) (mod
 	if err != nil {
 		switch {
 		case errors.Is(err, os.ErrNotExist), errors.Is(err, model.ErrNotFound):
-			return model.Document{}, &toolExecutionError{Code: "NOT_FOUND", Message: "file not found", Retryable: false}
+			return model.Document{}, &toolExecutionError{Code: protocol.ErrorCodeFileNotFound, Message: "file not found", Retryable: false}
 		default:
 			return model.Document{}, &toolExecutionError{Code: "STORE_CORRUPT", Message: err.Error(), Retryable: false}
 		}
 	}
 	if doc.Deleted {
-		return model.Document{}, &toolExecutionError{Code: "NOT_FOUND", Message: "file not found", Retryable: false}
+		return model.Document{}, &toolExecutionError{Code: protocol.ErrorCodeFileNotFound, Message: "file not found", Retryable: false}
 	}
 	return doc, nil
 }
 
-func (s *Server) ensureTranscriptForAudioDoc(ctx context.Context, doc model.Document, retranscribe bool, language string) (string, bool, *toolExecutionError) {
+func (s *Server) ensureTranscriptForAudioDoc(ctx context.Context, doc model.Document, retranscribe bool, language string) (string, bool, bool, *toolExecutionError) {
 	content, err := s.readDocumentContent(doc.RelPath)
 	if err != nil {
 		switch {
 		case errors.Is(err, os.ErrNotExist):
-			return "", false, &toolExecutionError{Code: "NOT_FOUND", Message: "file not found", Retryable: false}
+			return "", false, false, &toolExecutionError{Code: protocol.ErrorCodeFileNotFound, Message: "file not found", Retryable: false}
 		case errors.Is(err, model.ErrPathOutsideRoot):
-			return "", false, &toolExecutionError{Code: "PATH_OUTSIDE_ROOT", Message: err.Error(), Retryable: false}
+			return "", false, false, &toolExecutionError{Code: "PATH_OUTSIDE_ROOT", Message: err.Error(), Retryable: false}
 		default:
-			return "", false, &toolExecutionError{Code: "FORBIDDEN", Message: err.Error(), Retryable: false}
+			return "", false, false, &toolExecutionError{Code: protocol.ErrorCodePermissionDenied, Message: err.Error(), Retryable: false}
 		}
 	}
 
-	cachePath := filepath.Join(s.cfg.StateDir, "cache", "transcribe", ingest.ComputeContentHash(content)+".txt")
-	cacheExisted := true
+	// construct cache path using a hash of the content and the requested
+	// language. without the language there was a collision: a transcript
+	// generated in one language could be reused for a later request in a
+	// different language. adding the normalized language string to the
+	// filename ensures each locale has its own entry. if language is empty we
+	// fall back to a content-only key, meaning requests without a language
+	// still share a cache file.
+	langSuffix := ""
+	if l := strings.TrimSpace(language); l != "" {
+		// Sanitize to only allow safe characters in filename
+		safe := strings.Map(func(r rune) rune {
+			if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
+				return r
+			}
+			return -1
+		}, strings.ToLower(l))
+		if safe == "" {
+			safe = "unknown"
+		}
+		langSuffix = "-" + safe
+	}
+	cachePath := filepath.Join(s.cfg.StateDir, "cache", "transcribe", ingest.ComputeContentHash(content)+langSuffix+".txt")
+	// Determine whether we already have a usable cache file. We initially
+	// consider the cache "valid" if it exists on disk. When a retranscribe is
+	// requested we treat the cached file as stale regardless of whether it
+	// existed, so we force cacheValid=false and remove the file.
+	cacheValid := true
 	if _, statErr := os.Stat(cachePath); statErr != nil {
-		cacheExisted = false
+		cacheValid = false
 	}
 	if retranscribe {
-		cacheExisted = false
+		cacheValid = false
+		// remove any existing cache so that future callers don't accidentally
+		// read stale data; ignore not-exist errors since that's fine.
 		if rmErr := os.Remove(cachePath); rmErr != nil && !errors.Is(rmErr, fs.ErrNotExist) {
-			return "", false, &toolExecutionError{Code: "STORE_CORRUPT", Message: fmt.Sprintf("remove transcript cache: %v", rmErr), Retryable: false}
+			return "", false, false, &toolExecutionError{Code: "STORE_CORRUPT", Message: fmt.Sprintf("remove transcript cache: %v", rmErr), Retryable: false}
 		}
 	}
 
 	client, toolErr := s.newMistralClient()
 	if toolErr != nil {
-		return "", false, toolErr
+		return "", false, false, toolErr
 	}
 	if strings.TrimSpace(language) != "" {
 		client.DefaultTranscribeLanguage = strings.TrimSpace(language)
 	}
 	ing := ingest.NewService(s.cfg, s.store)
 	ing.SetTranscriber(client)
-	if genErr := ing.GenerateTranscriptRepresentation(ctx, doc, content); genErr != nil {
-		return "", false, mapToolErrorFromProvider("TRANSCRIBE_FAILED", genErr)
-	}
 
+	// generate transcript text first so we can accurately determine whether
+	// there is anything worth indexing.
 	transcript, readErr := ing.ReadOrComputeTranscript(ctx, doc, content)
 	if readErr != nil {
-		return "", false, mapToolErrorFromProvider("TRANSCRIBE_FAILED", readErr)
+		return "", false, false, s.mapToolErrorFromProvider("TRANSCRIBE_FAILED", readErr)
 	}
-	return transcript, !cacheExisted, nil
+
+	indexed := false
+	if strings.TrimSpace(transcript) != "" {
+		// only attempt to persist a representation when we actually have text
+		if genErr := ing.GenerateTranscriptRepresentation(ctx, doc, content); genErr != nil {
+			return "", false, false, s.mapToolErrorFromProvider("TRANSCRIBE_FAILED", genErr)
+		}
+		indexed = true
+	}
+	return transcript, !cacheValid, indexed, nil
 }
 
 func (s *Server) sourceTextForAnnotation(ctx context.Context, doc model.Document) (string, string, *toolExecutionError) {
 	switch doc.DocType {
 	case "audio":
-		text, _, toolErr := s.ensureTranscriptForAudioDoc(ctx, doc, false, "")
+		text, _, _, toolErr := s.ensureTranscriptForAudioDoc(ctx, doc, false, "")
 		if toolErr != nil {
 			return "", "", toolErr
 		}
@@ -1442,11 +1571,11 @@ func (s *Server) sourceTextForAnnotation(ctx context.Context, doc model.Document
 		if err != nil {
 			switch {
 			case errors.Is(err, os.ErrNotExist):
-				return "", "", &toolExecutionError{Code: "NOT_FOUND", Message: "file not found", Retryable: false}
+				return "", "", &toolExecutionError{Code: protocol.ErrorCodeFileNotFound, Message: "file not found", Retryable: false}
 			case errors.Is(err, model.ErrPathOutsideRoot):
 				return "", "", &toolExecutionError{Code: "PATH_OUTSIDE_ROOT", Message: err.Error(), Retryable: false}
 			default:
-				return "", "", &toolExecutionError{Code: "FORBIDDEN", Message: err.Error(), Retryable: false}
+				return "", "", &toolExecutionError{Code: protocol.ErrorCodePermissionDenied, Message: err.Error(), Retryable: false}
 			}
 		}
 		client, toolErr := s.newMistralClient()
@@ -1457,7 +1586,7 @@ func (s *Server) sourceTextForAnnotation(ctx context.Context, doc model.Document
 		ing.SetOCR(client)
 		text, ocrErr := ing.ReadOrComputeOCR(ctx, doc, content)
 		if ocrErr != nil {
-			return "", "", mapToolErrorFromProvider("ANNOTATE_FAILED", ocrErr)
+			return "", "", s.mapToolErrorFromProvider("ANNOTATE_FAILED", ocrErr)
 		}
 		return text, ingest.RepTypeOCRMarkdown, nil
 	default:
@@ -1465,11 +1594,11 @@ func (s *Server) sourceTextForAnnotation(ctx context.Context, doc model.Document
 		if err != nil {
 			switch {
 			case errors.Is(err, os.ErrNotExist):
-				return "", "", &toolExecutionError{Code: "NOT_FOUND", Message: "file not found", Retryable: false}
+				return "", "", &toolExecutionError{Code: protocol.ErrorCodeFileNotFound, Message: "file not found", Retryable: false}
 			case errors.Is(err, model.ErrPathOutsideRoot):
 				return "", "", &toolExecutionError{Code: "PATH_OUTSIDE_ROOT", Message: err.Error(), Retryable: false}
 			default:
-				return "", "", &toolExecutionError{Code: "FORBIDDEN", Message: err.Error(), Retryable: false}
+				return "", "", &toolExecutionError{Code: protocol.ErrorCodePermissionDenied, Message: err.Error(), Retryable: false}
 			}
 		}
 		return string(ingest.NormalizeUTF8(content)), ingest.RepTypeRawText, nil
@@ -1530,14 +1659,11 @@ func parseJSONObjectFromModelOutput(raw string) (map[string]interface{}, error) 
 		return nil, errors.New("model returned empty output")
 	}
 
+	// We'll try a few candidate substrings in case the model output contains
+	// extra prose (e.g. "Here's your JSON: {...}" or triple-backtick code
+	// fences). The later generic search covers both ```json and non-markdown
+	// wrappers by locating the first '{' and last '}' in the trimmed text.
 	candidates := []string{trimmed}
-	if strings.HasPrefix(trimmed, "```") {
-		start := strings.Index(trimmed, "{")
-		end := strings.LastIndex(trimmed, "}")
-		if start >= 0 && end > start {
-			candidates = append(candidates, trimmed[start:end+1])
-		}
-	}
 	if start := strings.Index(trimmed, "{"); start >= 0 {
 		if end := strings.LastIndex(trimmed, "}"); end > start {
 			candidates = append(candidates, trimmed[start:end+1])
@@ -1553,7 +1679,12 @@ func parseJSONObjectFromModelOutput(raw string) (map[string]interface{}, error) 
 	return nil, errors.New("model output is not a valid JSON object")
 }
 
-func mapToolErrorFromProvider(defaultCode string, err error) *toolExecutionError {
+// mapToolErrorFromProvider maps errors returned by downstream
+// providers into sanitized toolExecutionError values.  Previously this
+// helper relied on the global log package for diagnostics; we now emit
+// structured events via the server's eventEmitter so callers can capture
+// them in the NDJSON stream.
+func (s *Server) mapToolErrorFromProvider(defaultCode string, err error) *toolExecutionError {
 	if err == nil {
 		return nil
 	}
@@ -1570,15 +1701,31 @@ func mapToolErrorFromProvider(defaultCode string, err error) *toolExecutionError
 		}
 	}
 	if errors.Is(err, ingest.ErrTranscriptProviderFailure) {
+		// provider failure is retriable but we avoid returning raw details
+		if s.eventEmitter != nil {
+			s.eventEmitter("error", "transcript_provider_failure", map[string]interface{}{
+				"error": err.Error(),
+				"code":  defaultCode,
+				"msg":   "transcript provider failure",
+			})
+		}
 		return &toolExecutionError{
 			Code:      defaultCode,
-			Message:   err.Error(),
+			Message:   "transcript provider failure",
 			Retryable: true,
 		}
 	}
+	// generic fallback: emit structured event and return sanitized message
+	if s.eventEmitter != nil {
+		s.eventEmitter("error", "tool_error", map[string]interface{}{
+			"error": err.Error(),
+			"code":  defaultCode,
+			"msg":   "internal server error",
+		})
+	}
 	return &toolExecutionError{
 		Code:      defaultCode,
-		Message:   err.Error(),
+		Message:   "internal server error",
 		Retryable: false,
 	}
 }
@@ -2036,17 +2183,46 @@ func transcribeAndAskInputSchema() map[string]interface{} {
 }
 
 func transcribeAndAskOutputSchema() map[string]interface{} {
-	schema := askOutputSchema()
-	properties, ok := schema["properties"].(map[string]interface{})
-	if !ok {
+	orig := askOutputSchema()
+	// make a shallow copy of the top‑level map
+	schema := make(map[string]interface{}, len(orig))
+	for k, v := range orig {
+		schema[k] = v
+	}
+
+	// copy properties map so we don't mutate orig
+	properties := make(map[string]interface{})
+	if origProps, ok := orig["properties"].(map[string]interface{}); ok {
+		for k, v := range origProps {
+			properties[k] = v
+		}
+	} else {
+		// unexpected shape; fallback to asking again which will create a
+		// new safe schema
 		return askOutputSchema()
 	}
+
 	properties["transcript_provider"] = map[string]interface{}{"type": "string", "enum": []string{"mistral", "elevenlabs"}}
 	properties["transcript_model"] = map[string]interface{}{"type": "string"}
 	properties["transcribed"] = map[string]interface{}{"type": "boolean"}
-	if required, ok := schema["required"].([]string); ok {
-		schema["required"] = append(required, "transcript_provider", "transcript_model", "transcribed")
+	schema["properties"] = properties
+
+	// handle required list; original is usually []string
+	var requiredSlice []string
+	if req, ok := orig["required"].([]string); ok {
+		requiredSlice = append([]string(nil), req...)
+	} else if reqIface, ok := orig["required"].([]interface{}); ok {
+		for _, v := range reqIface {
+			if s, ok := v.(string); ok {
+				requiredSlice = append(requiredSlice, s)
+			}
+		}
 	}
+	if len(requiredSlice) > 0 {
+		requiredSlice = append(requiredSlice, "transcript_provider", "transcript_model", "transcribed")
+		schema["required"] = requiredSlice
+	}
+
 	return schema
 }
 
@@ -2140,6 +2316,12 @@ func statsOutputSchema() map[string]interface{} {
 			"root":             map[string]interface{}{"type": "string"},
 			"state_dir":        map[string]interface{}{"type": "string"},
 			"protocol_version": map[string]interface{}{"type": "string"},
+			"doc_counts": map[string]interface{}{
+				"type":                 "object",
+				"additionalProperties": map[string]interface{}{"type": "integer"},
+			},
+			"total_docs":           map[string]interface{}{"type": "integer"},
+			"doc_counts_available": map[string]interface{}{"type": "boolean"},
 			"indexing": map[string]interface{}{
 				"type":                 "object",
 				"additionalProperties": false,
@@ -2172,6 +2354,6 @@ func statsOutputSchema() map[string]interface{} {
 				"required": []string{"embed_text", "embed_code", "ocr", "stt_provider", "stt_model", "chat"},
 			},
 		},
-		"required": []string{"root", "state_dir", "protocol_version", "indexing", "models"},
+		"required": []string{"root", "state_dir", "protocol_version", "doc_counts", "total_docs", "doc_counts_available", "indexing", "models"},
 	}
 }

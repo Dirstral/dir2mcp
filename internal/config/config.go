@@ -4,17 +4,42 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"math/big"
 	"net"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"dir2mcp/internal/mistral"
 )
 
 const DefaultProtocolVersion = "2025-11-25"
+
+type X402Config struct {
+	// Mode controls whether x402 payment gating is enabled.  Allowed values
+	// are "off", "on" and "required".  Validation will normalize the
+	// string by trimming whitespace, lower‑casing it, and defaulting the
+	// empty value to "off"; this normalization is applied in
+	// ValidateX402 and the resulting canonical value is written back into the
+	// struct so callers can rely on a cleaned value after validation.  Any
+	// invalid mode will cause validation to fail.
+	Mode           string
+	FacilitatorURL string
+	// FacilitatorToken is sensitive and must not be written to disk.
+	// Operators should provide it via DIR2MCP_X402_FACILITATOR_TOKEN env var
+	// or CLI flags/file options; the config loader ignores file values.
+	FacilitatorToken string
+	ResourceBaseURL  string
+	ToolsCallEnabled bool
+	PriceAtomic      string
+	Network          string
+	Scheme           string
+	Asset            string
+	PayTo            string
+}
 
 type Config struct {
 	RootDir         string
@@ -45,6 +70,12 @@ type Config struct {
 	// via env/CLI comma-separated origin lists.
 	AllowedOrigins []string
 
+	// Warnings captures non-fatal parsing messages that occurred while
+	// loading configuration from environment variables, dotenv files, or
+	// the config file.  Callers can inspect and log these as desired.  This
+	// field is intentionally not persisted to disk.
+	Warnings []error
+
 	// EmbedModelText and EmbedModelCode specify the names of the Mistral
 	// embedding models used for text and code chunks respectively.  They are
 	// exposed via configuration so operators can override the hardcoded
@@ -56,6 +87,20 @@ type Config struct {
 	// when upstream introduces a new alias or model.  Environment variable
 	// DIR2MCP_CHAT_MODEL also affects this value.
 	ChatModel string
+
+	// SessionInactivityTimeout defines how long a session may be idle before it
+	// is considered expired.  Zero means the default hardcoded value (24h).
+	SessionInactivityTimeout time.Duration
+	// SessionMaxLifetime sets an optional absolute upper bound on a session's
+	// lifespan regardless of activity.  Zero disables this limit.
+	SessionMaxLifetime time.Duration
+	// HealthCheckInterval controls how frequently the runtime polls connector
+	// health endpoints when checking for availability.  A zero value means the
+	// default (5s).  The interval is used as the base fixed delay; failures
+	// trigger bounded exponential backoff independent of this setting.
+	HealthCheckInterval time.Duration
+
+	X402 X402Config
 }
 
 type fileConfig struct {
@@ -78,6 +123,23 @@ type fileConfig struct {
 	AllowedOrigins       []string
 	EmbedModelText       *string
 	EmbedModelCode       *string
+	// session timings expressed as YAML duration strings.  populated by
+	// parseConfigYAML's custom parser via setFileScalarValue rather than the
+	// standard yaml.Unmarshal machinery.  struct tags are therefore omitted
+	// elsewhere and would be purely documentation if added here.
+	SessionInactivityTimeout *time.Duration
+	SessionMaxLifetime       *time.Duration
+	HealthCheckInterval      *time.Duration
+	X402Mode                 *string
+	X402FacilitatorURL       *string
+	X402FacilitatorToken     *string
+	X402ResourceBaseURL      *string
+	X402ToolsCallEnabled     *bool
+	X402PriceAtomic          *string
+	X402Network              *string
+	X402Scheme               *string
+	X402Asset                *string
+	X402PayTo                *string
 }
 
 type persistedConfig struct {
@@ -94,12 +156,35 @@ type persistedConfig struct {
 	PathExcludes    []string `yaml:"path_excludes"`
 	SecretPatterns  []string `yaml:"secret_patterns"`
 	MistralBaseURL  string   `yaml:"mistral_base_url"`
+	// optional session timeouts expressed as YAML duration strings
+	SessionInactivityTimeout time.Duration `yaml:"session_inactivity_timeout"`
+	SessionMaxLifetime       time.Duration `yaml:"session_max_lifetime"`
+	HealthCheckInterval      time.Duration `yaml:"health_check_interval"`
 
 	ElevenLabsBaseURL    string   `yaml:"elevenlabs_base_url"`
 	ElevenLabsTTSVoiceID string   `yaml:"elevenlabs_tts_voice_id"`
 	AllowedOrigins       []string `yaml:"allowed_origins"`
 	EmbedModelText       string   `yaml:"embed_model_text"`
 	EmbedModelCode       string   `yaml:"embed_model_code"`
+
+	// The following fields configure optional x402 payment gating.  The
+	// facilitator token itself is treated like any other sensitive API key:
+	// it **must not** be written to disk and is therefore *not* part of the
+	// persisted configuration struct.  Operators should provide the token via
+	// DIR2MCP_X402_FACILITATOR_TOKEN (environment/CLI) when running the
+	// application; the loader ignores file-supplied token values.
+	//
+	// Other x402 settings *are* persisted and must be declared in the
+	// configuration file when required.
+	X402Mode             string `yaml:"x402_mode"`
+	X402FacilitatorURL   string `yaml:"x402_facilitator_url"`
+	X402ResourceBaseURL  string `yaml:"x402_resource_base_url"`
+	X402ToolsCallEnabled bool   `yaml:"x402_tools_call_enabled"`
+	X402PriceAtomic      string `yaml:"x402_price_atomic"`
+	X402Network          string `yaml:"x402_network"`
+	X402Scheme           string `yaml:"x402_scheme"`
+	X402Asset            string `yaml:"x402_asset"`
+	X402PayTo            string `yaml:"x402_pay_to"`
 }
 
 func Default() Config {
@@ -113,6 +198,10 @@ func Default() Config {
 		AuthMode:        "auto",
 		RateLimitRPS:    60,
 		RateLimitBurst:  20,
+		// default session inactivity matches previous hardcoded sessionTTL (24h)
+		SessionInactivityTimeout: 24 * time.Hour,
+		SessionMaxLifetime:       0,
+		HealthCheckInterval:      5 * time.Second,
 		TrustedProxies: []string{
 			"127.0.0.1/32",
 			"::1/128",
@@ -148,6 +237,18 @@ func Default() Config {
 		EmbedModelText: "mistral-embed",
 		EmbedModelCode: "codestral-embed",
 		ChatModel:      mistral.DefaultChatModel,
+		X402: X402Config{
+			Mode:             "off",
+			FacilitatorURL:   "",
+			FacilitatorToken: "",
+			ResourceBaseURL:  "",
+			ToolsCallEnabled: true,
+			PriceAtomic:      "1000",
+			Network:          "",
+			Scheme:           "exact",
+			Asset:            "",
+			PayTo:            "",
+		},
 	}
 }
 
@@ -164,6 +265,13 @@ func LoadFile(path string) (Config, error) {
 func SaveFile(path string, cfg Config) error {
 	if strings.TrimSpace(path) == "" {
 		return errors.New("config path is required")
+	}
+
+	// validate before persisting so callers don't accidentally write
+	// nonsensical values (negative durations, mismatched session
+	// lifetimes, etc.).  the error is wrapped to make the origin clear.
+	if err := cfg.Validate(); err != nil {
+		return fmt.Errorf("validate config: %w", err)
 	}
 
 	serializable := persistedConfig{
@@ -185,6 +293,21 @@ func SaveFile(path string, cfg Config) error {
 		AllowedOrigins:       append([]string(nil), cfg.AllowedOrigins...),
 		EmbedModelText:       cfg.EmbedModelText,
 		EmbedModelCode:       cfg.EmbedModelCode,
+		X402Mode:             cfg.X402.Mode,
+		X402FacilitatorURL:   cfg.X402.FacilitatorURL,
+		// token intentionally omitted to avoid persisting secrets
+		// X402FacilitatorToken: cfg.X402.FacilitatorToken,
+		X402ResourceBaseURL:  cfg.X402.ResourceBaseURL,
+		X402ToolsCallEnabled: cfg.X402.ToolsCallEnabled,
+		X402PriceAtomic:      cfg.X402.PriceAtomic,
+		X402Network:          cfg.X402.Network,
+		X402Scheme:           cfg.X402.Scheme,
+		X402Asset:            cfg.X402.Asset,
+		X402PayTo:            cfg.X402.PayTo,
+		// session settings
+		SessionInactivityTimeout: cfg.SessionInactivityTimeout,
+		SessionMaxLifetime:       cfg.SessionMaxLifetime,
+		HealthCheckInterval:      cfg.HealthCheckInterval,
 	}
 
 	raw, err := marshalConfigYAML(serializable)
@@ -216,6 +339,9 @@ func load(path string, overrideEnv map[string]string, applyEnv bool) (Config, er
 		if applyEnv {
 			applyEnvOverrides(&cfg, overrideEnv)
 		}
+		if err := cfg.Validate(); err != nil {
+			return Config{}, err
+		}
 		return cfg, nil
 	}
 
@@ -223,6 +349,9 @@ func load(path string, overrideEnv map[string]string, applyEnv bool) (Config, er
 		if errors.Is(err, os.ErrNotExist) {
 			if applyEnv {
 				applyEnvOverrides(&cfg, overrideEnv)
+			}
+			if err := cfg.Validate(); err != nil {
+				return Config{}, err
 			}
 			return cfg, nil
 		}
@@ -234,6 +363,9 @@ func load(path string, overrideEnv map[string]string, applyEnv bool) (Config, er
 	}
 	if applyEnv {
 		applyEnvOverrides(&cfg, overrideEnv)
+	}
+	if err := cfg.Validate(); err != nil {
+		return Config{}, err
 	}
 	return cfg, nil
 }
@@ -295,6 +427,15 @@ func applyFileOverrides(cfg *Config, path string) error {
 	if fileCfg.MistralBaseURL != nil {
 		cfg.MistralBaseURL = *fileCfg.MistralBaseURL
 	}
+	if fileCfg.SessionInactivityTimeout != nil {
+		cfg.SessionInactivityTimeout = *fileCfg.SessionInactivityTimeout
+	}
+	if fileCfg.SessionMaxLifetime != nil {
+		cfg.SessionMaxLifetime = *fileCfg.SessionMaxLifetime
+	}
+	if fileCfg.HealthCheckInterval != nil {
+		cfg.HealthCheckInterval = *fileCfg.HealthCheckInterval
+	}
 	if fileCfg.ElevenLabsBaseURL != nil {
 		cfg.ElevenLabsBaseURL = *fileCfg.ElevenLabsBaseURL
 	}
@@ -309,6 +450,35 @@ func applyFileOverrides(cfg *Config, path string) error {
 	}
 	if fileCfg.EmbedModelCode != nil {
 		cfg.EmbedModelCode = *fileCfg.EmbedModelCode
+	}
+	if fileCfg.X402Mode != nil {
+		cfg.X402.Mode = *fileCfg.X402Mode
+	}
+	if fileCfg.X402FacilitatorURL != nil {
+		cfg.X402.FacilitatorURL = *fileCfg.X402FacilitatorURL
+	}
+	// ignore any x402_facilitator_token value from disk; tokens must come from
+	// the environment to avoid persistence.
+	if fileCfg.X402ResourceBaseURL != nil {
+		cfg.X402.ResourceBaseURL = *fileCfg.X402ResourceBaseURL
+	}
+	if fileCfg.X402ToolsCallEnabled != nil {
+		cfg.X402.ToolsCallEnabled = *fileCfg.X402ToolsCallEnabled
+	}
+	if fileCfg.X402PriceAtomic != nil {
+		cfg.X402.PriceAtomic = *fileCfg.X402PriceAtomic
+	}
+	if fileCfg.X402Network != nil {
+		cfg.X402.Network = *fileCfg.X402Network
+	}
+	if fileCfg.X402Scheme != nil {
+		cfg.X402.Scheme = *fileCfg.X402Scheme
+	}
+	if fileCfg.X402Asset != nil {
+		cfg.X402.Asset = *fileCfg.X402Asset
+	}
+	if fileCfg.X402PayTo != nil {
+		cfg.X402.PayTo = *fileCfg.X402PayTo
 	}
 
 	return nil
@@ -450,6 +620,57 @@ func setFileScalarValue(cfg *fileConfig, key, value string) error {
 		cfg.EmbedModelText = strPtr(value)
 	case "embed_model_code":
 		cfg.EmbedModelCode = strPtr(value)
+	case "session_inactivity_timeout":
+		if value == "" {
+			return nil
+		}
+		d, err := time.ParseDuration(value)
+		if err != nil {
+			return fmt.Errorf("invalid duration for %s", key)
+		}
+		cfg.SessionInactivityTimeout = &d
+	case "session_max_lifetime":
+		if value == "" {
+			return nil
+		}
+		d, err := time.ParseDuration(value)
+		if err != nil {
+			return fmt.Errorf("invalid duration for %s", key)
+		}
+		cfg.SessionMaxLifetime = &d
+	case "health_check_interval":
+		if value == "" {
+			return nil
+		}
+		d, err := time.ParseDuration(value)
+		if err != nil {
+			return fmt.Errorf("invalid duration for %s", key)
+		}
+		cfg.HealthCheckInterval = &d
+	case "x402_mode":
+		cfg.X402Mode = strPtr(value)
+	case "x402_facilitator_url":
+		cfg.X402FacilitatorURL = strPtr(value)
+	case "x402_facilitator_token":
+		// field deliberately ignored; tokens are env-only for security
+	case "x402_resource_base_url":
+		cfg.X402ResourceBaseURL = strPtr(value)
+	case "x402_tools_call_enabled":
+		parsed, err := strconv.ParseBool(value)
+		if err != nil {
+			return fmt.Errorf("invalid boolean for %s", key)
+		}
+		cfg.X402ToolsCallEnabled = boolPtr(parsed)
+	case "x402_price_atomic":
+		cfg.X402PriceAtomic = strPtr(value)
+	case "x402_network":
+		cfg.X402Network = strPtr(value)
+	case "x402_scheme":
+		cfg.X402Scheme = strPtr(value)
+	case "x402_asset":
+		cfg.X402Asset = strPtr(value)
+	case "x402_pay_to":
+		cfg.X402PayTo = strPtr(value)
 	default:
 		// unknown keys are intentionally ignored for forward compatibility
 	}
@@ -530,11 +751,25 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeList("path_excludes", cfg.PathExcludes)
 	writeList("secret_patterns", cfg.SecretPatterns)
 	writeScalar("mistral_base_url", cfg.MistralBaseURL)
+	writeScalar("session_inactivity_timeout", cfg.SessionInactivityTimeout.String())
+	writeScalar("session_max_lifetime", cfg.SessionMaxLifetime.String())
+	writeScalar("health_check_interval", cfg.HealthCheckInterval.String())
 	writeScalar("elevenlabs_base_url", cfg.ElevenLabsBaseURL)
 	writeScalar("elevenlabs_tts_voice_id", cfg.ElevenLabsTTSVoiceID)
 	writeList("allowed_origins", cfg.AllowedOrigins)
 	writeScalar("embed_model_text", cfg.EmbedModelText)
 	writeScalar("embed_model_code", cfg.EmbedModelCode)
+	writeScalar("x402_mode", cfg.X402Mode)
+	writeScalar("x402_facilitator_url", cfg.X402FacilitatorURL)
+	// token is never written to disk
+	// writeScalar("x402_facilitator_token", cfg.X402FacilitatorToken)
+	writeScalar("x402_resource_base_url", cfg.X402ResourceBaseURL)
+	writeBool("x402_tools_call_enabled", cfg.X402ToolsCallEnabled)
+	writeScalar("x402_price_atomic", cfg.X402PriceAtomic)
+	writeScalar("x402_network", cfg.X402Network)
+	writeScalar("x402_scheme", cfg.X402Scheme)
+	writeScalar("x402_asset", cfg.X402Asset)
+	writeScalar("x402_pay_to", cfg.X402PayTo)
 
 	return []byte(b.String()), nil
 }
@@ -602,6 +837,293 @@ func applyEnvOverrides(cfg *Config, overrideEnv map[string]string) {
 	if trustedProxies, ok := envLookup("DIR2MCP_TRUSTED_PROXIES", overrideEnv); ok {
 		cfg.TrustedProxies = MergeTrustedProxies(cfg.TrustedProxies, trustedProxies)
 	}
+	// session-related environment variables are durations parsed by time.ParseDuration.
+	// Syntactically invalid values (parse errors) are warned about but not fatal; values
+	// that parse successfully (including negative durations) are stored and may still
+	// cause Validate() to fail later.
+	// Historically the variable was named DIR2MCP_SESSION_TIMEOUT; we
+	// elect to prefer the more explicit DIR2MCP_SESSION_INACTIVITY_TIMEOUT
+	// while still accepting the old name for compatibility.
+	if raw, ok := envLookup("DIR2MCP_SESSION_INACTIVITY_TIMEOUT", overrideEnv); ok {
+		trimmed := strings.TrimSpace(raw)
+		if trimmed != "" {
+			d, err := time.ParseDuration(trimmed)
+			if err != nil {
+				cfg.Warnings = append(cfg.Warnings, fmt.Errorf("invalid duration for DIR2MCP_SESSION_INACTIVITY_TIMEOUT: %q (%v)", trimmed, err))
+			} else {
+				cfg.SessionInactivityTimeout = d
+			}
+		}
+	} else if raw, ok := envLookup("DIR2MCP_SESSION_TIMEOUT", overrideEnv); ok {
+		// fallback to old name
+		trimmed := strings.TrimSpace(raw)
+		if trimmed != "" {
+			cfg.Warnings = append(cfg.Warnings, fmt.Errorf("DIR2MCP_SESSION_TIMEOUT is deprecated; use DIR2MCP_SESSION_INACTIVITY_TIMEOUT instead (current value: %q)", trimmed))
+			d, err := time.ParseDuration(trimmed)
+			if err != nil {
+				cfg.Warnings = append(cfg.Warnings, fmt.Errorf("invalid duration for DIR2MCP_SESSION_TIMEOUT: %q (%v)", trimmed, err))
+			} else {
+				cfg.SessionInactivityTimeout = d
+			}
+		}
+	}
+	if raw, ok := envLookup("DIR2MCP_SESSION_MAX_LIFETIME", overrideEnv); ok {
+		if trimmed := strings.TrimSpace(raw); trimmed != "" {
+			d, err := time.ParseDuration(trimmed)
+			if err != nil {
+				cfg.Warnings = append(cfg.Warnings, fmt.Errorf("invalid duration for DIR2MCP_SESSION_MAX_LIFETIME: %q (%v)", trimmed, err))
+			} else {
+				cfg.SessionMaxLifetime = d
+			}
+		}
+	}
+	// health check interval env; zero duration interpreted as default later
+	if raw, ok := envLookup("DIR2MCP_HEALTH_CHECK_INTERVAL", overrideEnv); ok {
+		trimmed := strings.TrimSpace(raw)
+		if trimmed != "" {
+			d, err := time.ParseDuration(trimmed)
+			if err != nil {
+				cfg.Warnings = append(cfg.Warnings, fmt.Errorf("invalid duration for DIR2MCP_HEALTH_CHECK_INTERVAL: %q (%v)", trimmed, err))
+			} else {
+				cfg.HealthCheckInterval = d
+			}
+		}
+	}
+	if raw, ok := envLookup("DIR2MCP_X402_MODE", overrideEnv); ok && strings.TrimSpace(raw) != "" {
+		cfg.X402.Mode = strings.TrimSpace(raw)
+	}
+	if raw, ok := envLookup("DIR2MCP_X402_FACILITATOR_URL", overrideEnv); ok && strings.TrimSpace(raw) != "" {
+		cfg.X402.FacilitatorURL = strings.TrimSpace(raw)
+	}
+	if raw, ok := envLookup("DIR2MCP_X402_FACILITATOR_TOKEN", overrideEnv); ok && strings.TrimSpace(raw) != "" {
+		cfg.X402.FacilitatorToken = strings.TrimSpace(raw)
+	}
+	if raw, ok := envLookup("DIR2MCP_X402_RESOURCE_BASE_URL", overrideEnv); ok && strings.TrimSpace(raw) != "" {
+		cfg.X402.ResourceBaseURL = strings.TrimSpace(raw)
+	}
+	if raw, ok := envLookup("DIR2MCP_X402_TOOLS_CALL_ENABLED", overrideEnv); ok && strings.TrimSpace(raw) != "" {
+		trimmed := strings.TrimSpace(raw)
+		if enabled, err := strconv.ParseBool(trimmed); err == nil {
+			cfg.X402.ToolsCallEnabled = enabled
+		} else {
+			// record a non-fatal warning instead of printing directly to stderr so
+			// callers of the loader can decide how to surface it.  Do not override
+			// the existing value when parsing fails, keeping the prior setting
+			// (which may be the default).
+			cfg.Warnings = append(cfg.Warnings, fmt.Errorf("invalid boolean for DIR2MCP_X402_TOOLS_CALL_ENABLED: %q (%v)", trimmed, err))
+		}
+	}
+	// prefer the atomic env var name matching the YAML key; fall back for compatibility
+	if raw, ok := envLookup("DIR2MCP_X402_PRICE_ATOMIC", overrideEnv); ok && strings.TrimSpace(raw) != "" {
+		cfg.X402.PriceAtomic = strings.TrimSpace(raw)
+	} else if raw, ok := envLookup("DIR2MCP_X402_PRICE", overrideEnv); ok && strings.TrimSpace(raw) != "" {
+		cfg.X402.PriceAtomic = strings.TrimSpace(raw)
+	}
+	if raw, ok := envLookup("DIR2MCP_X402_NETWORK", overrideEnv); ok && strings.TrimSpace(raw) != "" {
+		cfg.X402.Network = strings.TrimSpace(raw)
+	}
+	if raw, ok := envLookup("DIR2MCP_X402_SCHEME", overrideEnv); ok && strings.TrimSpace(raw) != "" {
+		cfg.X402.Scheme = strings.TrimSpace(raw)
+	}
+	if raw, ok := envLookup("DIR2MCP_X402_ASSET", overrideEnv); ok && strings.TrimSpace(raw) != "" {
+		cfg.X402.Asset = strings.TrimSpace(raw)
+	}
+	if raw, ok := envLookup("DIR2MCP_X402_PAY_TO", overrideEnv); ok && strings.TrimSpace(raw) != "" {
+		cfg.X402.PayTo = strings.TrimSpace(raw)
+	}
+}
+
+// Validate checks configuration consistency and applies normalization
+// or defaults.  It currently enforces rules around session durations:
+//
+//   - both SessionInactivityTimeout and SessionMaxLifetime must be >= 0
+//   - a zero SessionInactivityTimeout is interpreted as the default value
+//     (24h) and is rewritten accordingly.  callers should invoke this
+//     method after the config is loaded so they needn't special-case a
+//     zero value elsewhere.
+//
+// Future validations unrelated to x402 should also live here.  Like
+// ValidateX402, this method operates on a pointer receiver so that it can
+// modify the receiver in-place.
+func (c *Config) Validate() error {
+	if c.SessionInactivityTimeout < 0 {
+		return fmt.Errorf("session_inactivity_timeout must be non-negative: %v", c.SessionInactivityTimeout)
+	}
+	if c.SessionMaxLifetime < 0 {
+		return fmt.Errorf("session_max_lifetime must be non-negative: %v", c.SessionMaxLifetime)
+	}
+	if c.HealthCheckInterval < 0 {
+		return fmt.Errorf("health_check_interval must be non-negative: %v", c.HealthCheckInterval)
+	}
+	if c.SessionInactivityTimeout == 0 {
+		// zero is shorthand for the default
+		c.SessionInactivityTimeout = Default().SessionInactivityTimeout
+	}
+	if c.HealthCheckInterval == 0 {
+		c.HealthCheckInterval = Default().HealthCheckInterval
+	}
+	// if both timeouts are set, the max lifetime must not be shorter than
+	// the inactivity timeout; otherwise the session would expire before
+	// inactivity checks could ever trigger.
+	if c.SessionMaxLifetime > 0 && c.SessionMaxLifetime < c.SessionInactivityTimeout {
+		return fmt.Errorf("session_max_lifetime (%v) must be >= session_inactivity_timeout (%v)",
+			c.SessionMaxLifetime, c.SessionInactivityTimeout)
+	}
+	return nil
+}
+
+// ValidateX402 performs consistency checks on the embedded X402Config
+// state.  When called it normalizes certain fields (most notably
+// `Mode`) and writes the canonical form back into the config struct,
+// therefore it must be invoked on a pointer receiver (the method is
+// defined on *Config).  The `strict` parameter enables additional
+// semantic checks that aren't required in non-strict modes.
+//
+// The validation is intentionally side‑effecting so that callers may rely
+// on `cfg.X402.Mode` being a lowercase, trimmed, non-empty string after a
+// successful call.  Errors are returned for invalid values regardless of
+// whether mutation has already occurred.
+func (c *Config) ValidateX402(strict bool) error {
+	// normalize and store back so callers looking at the struct afterwards
+	// see a canonical value.  this mirrors the behaviour used elsewhere
+	// (eg. x402.NormalizeMode) but keeps the logic self-contained.  we
+	// perform the assignment immediately because many of the subsequent
+	// branches rely on comparing `mode` and there are early return paths.
+	mode := strings.ToLower(strings.TrimSpace(c.X402.Mode))
+	if mode == "" {
+		mode = "off"
+	}
+	c.X402.Mode = mode
+
+	switch mode {
+	case "off", "on", "required":
+	default:
+		return fmt.Errorf("invalid x402 mode: %q (accepted: off, on, required)", mode)
+	}
+
+	// if tools calls are disabled we only accept mode "off"; any other
+	// value implies an inconsistent configuration and should fail. this
+	// prevents a situation where Mode="required" but the gating flag is
+	// turned off, which would otherwise quietly bypass validation.
+	if !c.X402.ToolsCallEnabled {
+		if mode != "off" {
+			return fmt.Errorf("x402 mode %q requires ToolsCallEnabled=true", mode)
+		}
+		return nil
+	}
+	// at this point tools-call is enabled; if the mode is "off" we can
+	// short-circuit and skip the remaining checks.
+	if mode == "off" {
+		return nil
+	}
+
+	if rawURL := strings.TrimSpace(c.X402.FacilitatorURL); rawURL != "" {
+		parsed, err := url.Parse(rawURL)
+		if err != nil {
+			return fmt.Errorf("invalid x402 facilitator URL %q: %w", rawURL, err)
+		}
+		if parsed.Scheme == "" || parsed.Host == "" {
+			return fmt.Errorf("invalid x402 facilitator URL: %q", rawURL)
+		}
+		// normalize: strip trailing slash from path so callers can safely
+		// append segments.  collapse a bare "/" path to empty.
+		if parsed.Path == "/" {
+			parsed.Path = ""
+		} else {
+			parsed.Path = strings.TrimRight(parsed.Path, "/")
+		}
+		c.X402.FacilitatorURL = parsed.String()
+	}
+	if rawURL := strings.TrimSpace(c.X402.ResourceBaseURL); rawURL != "" {
+		parsed, err := url.Parse(rawURL)
+		if err != nil {
+			return fmt.Errorf("invalid x402 resource base URL %q: %w", rawURL, err)
+		}
+		if parsed.Scheme == "" || parsed.Host == "" {
+			return fmt.Errorf("invalid x402 resource base URL: %q", rawURL)
+		}
+		// normalize as above
+		if parsed.Path == "/" {
+			parsed.Path = ""
+		} else {
+			parsed.Path = strings.TrimRight(parsed.Path, "/")
+		}
+		c.X402.ResourceBaseURL = parsed.String()
+	}
+
+	// network is validated later when strict mode is enabled; no need to duplicate
+
+	if !strict {
+		return nil
+	}
+	if strings.TrimSpace(c.X402.FacilitatorURL) == "" {
+		return fmt.Errorf("x402 facilitator URL is required")
+	}
+	if strings.TrimSpace(c.X402.ResourceBaseURL) == "" {
+		return fmt.Errorf("x402 resource base URL is required")
+	}
+	priceStr := strings.TrimSpace(c.X402.PriceAtomic)
+	if priceStr == "" {
+		return fmt.Errorf("x402 price is required")
+	}
+	// ensure price is a positive integer
+	price := new(big.Int)
+	if _, ok := price.SetString(priceStr, 10); !ok || price.Sign() <= 0 {
+		return fmt.Errorf("x402 price must be a positive integer")
+	}
+	// normalize scheme input by trimming spaces and converting to lower-case
+	// write the normalized value back to the struct so later code sees it too
+	scheme := strings.ToLower(strings.TrimSpace(c.X402.Scheme))
+	c.X402.Scheme = scheme
+	if scheme == "" {
+		return fmt.Errorf("x402 scheme is required")
+	}
+	switch scheme {
+	case "exact", "upto":
+	default:
+		return fmt.Errorf("x402 scheme must be one of: exact, upto")
+	}
+
+	// ensure network string is trimmed before we validate and store it
+	net := strings.TrimSpace(c.X402.Network)
+	c.X402.Network = net
+	if net == "" {
+		return fmt.Errorf("x402 network is required")
+	}
+	if !isCAIP2Network(net) {
+		return fmt.Errorf("x402 network must be CAIP-2")
+	}
+	if strings.TrimSpace(c.X402.Asset) == "" {
+		return fmt.Errorf("x402 asset is required")
+	}
+	if strings.TrimSpace(c.X402.PayTo) == "" {
+		return fmt.Errorf("x402 pay_to is required")
+	}
+	return nil
+}
+
+func isCAIP2Network(value string) bool {
+	parts := strings.Split(strings.TrimSpace(value), ":")
+	if len(parts) != 2 {
+		return false
+	}
+	ns := parts[0]
+	ref := parts[1]
+	if len(ns) == 0 || len(ns) > 32 || len(ref) == 0 || len(ref) > 128 {
+		return false
+	}
+	for _, r := range ns {
+		if (r < 'a' || r > 'z') && (r < '0' || r > '9') {
+			return false
+		}
+	}
+	for _, r := range ref {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 // MergeAllowedOrigins appends comma-separated origins to an existing allowlist,
