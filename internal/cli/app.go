@@ -28,6 +28,7 @@ import (
 	"dir2mcp/internal/mcp"
 	"dir2mcp/internal/mistral"
 	"dir2mcp/internal/model"
+	"dir2mcp/internal/protocol"
 	"dir2mcp/internal/retrieval"
 	"dir2mcp/internal/store"
 )
@@ -351,8 +352,14 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	if opts.listen != "" {
 		cfg.ListenAddr = opts.listen
 	}
+	if strings.TrimSpace(cfg.ListenAddr) == "" {
+		cfg.ListenAddr = protocol.DefaultListenAddr
+	}
 	if opts.mcpPath != "" {
 		cfg.MCPPath = opts.mcpPath
+	}
+	if strings.TrimSpace(cfg.MCPPath) == "" {
+		cfg.MCPPath = protocol.DefaultMCPPath
 	}
 	if opts.auth != "" {
 		cfg.AuthMode = opts.auth
@@ -1684,7 +1691,7 @@ func buildConnectionPayload(cfg config.Config, url string, auth authMaterial) co
 		Headers:   headers,
 		Session: connectionSession{
 			UsesMCPSessionID:     true,
-			HeaderName:           "MCP-Session-Id",
+			HeaderName:           protocol.MCPSessionHeader,
 			AssignedOnInitialize: true,
 		},
 		Public:      cfg.Public,

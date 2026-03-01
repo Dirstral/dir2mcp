@@ -20,6 +20,7 @@ import (
 	"dir2mcp/internal/cli"
 	"dir2mcp/internal/config"
 	"dir2mcp/internal/model"
+	"dir2mcp/internal/protocol"
 	"dir2mcp/internal/store"
 )
 
@@ -114,7 +115,7 @@ func TestUpCreatesSecretTokenAndConnectionFile(t *testing.T) {
 	if connection.Transport != "mcp_streamable_http" {
 		t.Fatalf("unexpected transport: %q", connection.Transport)
 	}
-	if !strings.HasSuffix(connection.URL, "/mcp") {
+	if !strings.HasSuffix(connection.URL, protocol.DefaultMCPPath) {
 		t.Fatalf("unexpected connection URL: %q", connection.URL)
 	}
 	if connection.Headers["MCP-Protocol-Version"] != config.DefaultProtocolVersion {
@@ -132,7 +133,7 @@ func TestUpCreatesSecretTokenAndConnectionFile(t *testing.T) {
 	if !connection.Session.UsesMCPSessionID {
 		t.Fatal("expected session.uses_mcp_session_id=true")
 	}
-	if connection.Session.HeaderName != "MCP-Session-Id" {
+	if connection.Session.HeaderName != protocol.MCPSessionHeader {
 		t.Fatalf("unexpected session.header_name: %q", connection.Session.HeaderName)
 	}
 	if !connection.Session.AssignedOnInitialize {

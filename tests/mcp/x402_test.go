@@ -15,6 +15,7 @@ import (
 	"dir2mcp/internal/config"
 	"dir2mcp/internal/mcp"
 	"dir2mcp/internal/model"
+	"dir2mcp/internal/protocol"
 )
 
 func TestX402ToolsCall_UnpaidReturns402WithPaymentRequiredHeader(t *testing.T) {
@@ -343,7 +344,7 @@ func postRPCWithHeaders(t *testing.T, url, sessionID, body string, headers map[s
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if sessionID != "" {
-		req.Header.Set("MCP-Session-Id", sessionID)
+		req.Header.Set(protocol.MCPSessionHeader, sessionID)
 	}
 	for k, v := range headers {
 		req.Header.Set(k, v)
