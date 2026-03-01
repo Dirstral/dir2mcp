@@ -2,6 +2,7 @@ package test
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -73,9 +74,8 @@ func TestParseInputMapsCommonCommands(t *testing.T) {
 				t.Fatalf("unexpected parsed flags: got %+v want %+v", got, tc.want)
 			}
 			if tc.want.Tool != "" && got.Tool == tc.want.Tool {
-				// quick check for args
-				if len(got.Args) != len(tc.want.Args) {
-					t.Fatalf("unexpected args length: got %+v want %+v", got.Args, tc.want.Args)
+				if !reflect.DeepEqual(got.Args, tc.want.Args) {
+					t.Fatalf("unexpected args: got %+v want %+v", got.Args, tc.want.Args)
 				}
 			}
 		})
