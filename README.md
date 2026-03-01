@@ -258,3 +258,10 @@ go test -v ./tests/mistral -run Generate_Integration
   - manual pruning can still be useful, but automatic pruning reclaims space when TTL or max-size limits are set
   - to check cache size: `du -sh .dir2mcp/cache/ocr/`
   - to clear the cache: `rm -rf .dir2mcp/cache/ocr/*` (cache will be rebuilt on next OCR operation)
+- Transcript cache:
+  - audio transcript outputs are cached in `.dir2mcp/cache/transcribe/<content-hash>.txt`
+  - cache misses call the transcription provider; cache hits reuse normalized transcript text
+  - transcript cache currently reuses the same TTL/max-size policy used by OCR cache
+  - with default limits (`ttl=0`, `maxBytes=0`) cache is unbounded
+  - to check cache size: `du -sh .dir2mcp/cache/transcribe/`
+  - to clear the cache: `rm -rf .dir2mcp/cache/transcribe/*` (cache will be rebuilt on next audio ingest)

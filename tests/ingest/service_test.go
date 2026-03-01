@@ -2,6 +2,7 @@ package tests
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path"
 	"path/filepath"
@@ -167,16 +168,97 @@ func TestProcessDocument_DocIDSetBeforeRepGeneration(t *testing.T) {
 	}
 }
 
+func TestServiceRun_AudioGeneratesTranscriptRepresentation(t *testing.T) {
+	root := t.TempDir()
+	audioPath := filepath.Join(root, "audio", "sample.mp3")
+	mustWriteFile(t, audioPath, []byte("fake-audio-bytes"))
+
+	cfg := config.Default()
+	cfg.RootDir = root
+	cfg.StateDir = filepath.Join(root, ".dir2mcp")
+
+	st := newMemoryStore()
+	svc := ingest.NewService(cfg, st)
+	svc.SetTranscriber(&fakeTranscriber{text: "[00:00] hello\n[00:02] world"})
+
+	if err := svc.Run(context.Background()); err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+
+	if len(st.reps) != 1 {
+		t.Fatalf("expected one representation, got %d", len(st.reps))
+	}
+	if st.reps[0].RepType != ingest.RepTypeTranscript {
+		t.Fatalf("expected transcript rep type, got %q", st.reps[0].RepType)
+	}
+	if len(st.chunks) != 2 {
+		t.Fatalf("expected two transcript chunks, got %d", len(st.chunks))
+	}
+	if len(st.spans) != 2 {
+		t.Fatalf("expected two transcript spans, got %d", len(st.spans))
+	}
+	if st.spans[0].Kind != "time" || st.spans[0].StartMS != 0 || st.spans[0].EndMS != 2000 {
+		t.Fatalf("unexpected first transcript span: %+v", st.spans[0])
+	}
+}
+
+type errTranscriber struct {
+	err error
+}
+
+func (e errTranscriber) Transcribe(context.Context, string, []byte) (string, error) {
+	return "", e.err
+}
+
+func TestServiceRun_AudioTranscriberFailure_DoesNotFailRun(t *testing.T) {
+	root := t.TempDir()
+	audioPath := filepath.Join(root, "audio", "broken.mp3")
+	mustWriteFile(t, audioPath, []byte("fake-audio-bytes"))
+
+	cfg := config.Default()
+	cfg.RootDir = root
+	cfg.StateDir = filepath.Join(root, ".dir2mcp")
+
+	st := newMemoryStore()
+	state := appstate.NewIndexingState(appstate.ModeIncremental)
+	svc := ingest.NewService(cfg, st)
+	svc.SetIndexingState(state)
+	svc.SetTranscriber(errTranscriber{err: errors.New("provider down")})
+
+	if err := svc.Run(context.Background()); err != nil {
+		t.Fatalf("Run should continue on transcription failure, got: %v", err)
+	}
+
+	snapshot := state.Snapshot()
+	if snapshot.Errors == 0 {
+		t.Fatalf("expected indexing error count increment on transcription failure, got %+v", snapshot)
+	}
+	if len(st.reps) != 0 {
+		t.Fatalf("expected no transcript representations when transcription fails, got %d", len(st.reps))
+	}
+	doc, ok := st.docs["audio/broken.mp3"]
+	if !ok {
+		t.Fatal("expected audio document to be upserted")
+	}
+	if doc.Status != "ok" {
+		t.Fatalf("expected audio document status to remain ok, got %q", doc.Status)
+	}
+}
+
 type memoryStore struct {
 	docs map[string]model.Document
 	// hold persisted representations for verification
-	reps []model.Representation
+	reps   []model.Representation
+	chunks []model.Chunk
+	spans  []model.Span
 }
 
 func newMemoryStore() *memoryStore {
 	return &memoryStore{
-		docs: make(map[string]model.Document),
-		reps: make([]model.Representation, 0),
+		docs:   make(map[string]model.Document),
+		reps:   make([]model.Representation, 0),
+		chunks: make([]model.Chunk, 0),
+		spans:  make([]model.Span, 0),
 	}
 }
 
@@ -200,9 +282,10 @@ func (s *memoryStore) UpsertRepresentation(_ context.Context, rep model.Represen
 	return rep.RepID, nil
 }
 
-func (s *memoryStore) InsertChunkWithSpans(_ context.Context, _ model.Chunk, _ []model.Span) (int64, error) {
-	// no-op for tests
-	return 0, nil
+func (s *memoryStore) InsertChunkWithSpans(_ context.Context, chunk model.Chunk, spans []model.Span) (int64, error) {
+	s.chunks = append(s.chunks, chunk)
+	s.spans = append(s.spans, spans...)
+	return int64(len(s.chunks)), nil
 }
 
 func (s *memoryStore) SoftDeleteChunksFromOrdinal(_ context.Context, _ int64, _ int) error {

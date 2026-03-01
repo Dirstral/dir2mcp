@@ -174,7 +174,9 @@ func NewAppWithIO(stdout, stderr io.Writer) *App {
 		newIngestor: func(cfg config.Config, st model.Store) model.Ingestor {
 			svc := ingest.NewService(cfg, st)
 			if strings.TrimSpace(cfg.MistralAPIKey) != "" {
-				svc.SetOCR(mistral.NewClient(cfg.MistralBaseURL, cfg.MistralAPIKey))
+				client := mistral.NewClient(cfg.MistralBaseURL, cfg.MistralAPIKey)
+				svc.SetOCR(client)
+				svc.SetTranscriber(client)
 			}
 			return svc
 		},

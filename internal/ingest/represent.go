@@ -5,13 +5,17 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	"dir2mcp/internal/model"
 )
+
+var transcriptTimestampRe = regexp.MustCompile(`^\s*\[?(\d{1,2}):(\d{2})(?::(\d{2}))?\]?\s*(.*)$`)
 
 const (
 	// RepTypeRawText is the representation type for raw text content
@@ -235,6 +239,121 @@ func chunkOCRByPages(content string) []chunkSegment {
 		})
 	}
 	return out
+}
+
+func chunkTranscriptByTime(content string) []chunkSegment {
+	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
+	type transcriptSegment struct {
+		startMS int
+		text    string
+	}
+	segments := make([]transcriptSegment, 0, len(lines))
+	var current *transcriptSegment
+
+	pushCurrent := func() {
+		if current == nil {
+			return
+		}
+		text := strings.TrimSpace(current.text)
+		if text == "" {
+			current = nil
+			return
+		}
+		segments = append(segments, transcriptSegment{startMS: current.startMS, text: text})
+		current = nil
+	}
+
+	for _, line := range lines {
+		startMS, text, ok := parseTranscriptTimestamp(line)
+		if ok {
+			pushCurrent()
+			current = &transcriptSegment{startMS: startMS, text: strings.TrimSpace(text)}
+			continue
+		}
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if current == nil {
+			current = &transcriptSegment{startMS: 0, text: trimmed}
+		} else if current.text == "" {
+			current.text = trimmed
+		} else {
+			current.text += "\n" + trimmed
+		}
+	}
+	pushCurrent()
+
+	if len(segments) == 0 {
+		trimmed := strings.TrimSpace(content)
+		if trimmed == "" {
+			return nil
+		}
+		return []chunkSegment{{
+			Text: trimmed,
+			Span: model.Span{Kind: "time", StartMS: 0, EndMS: 0},
+		}}
+	}
+
+	out := make([]chunkSegment, 0, len(segments))
+	for i := range segments {
+		endMS := segments[i].startMS
+		if i+1 < len(segments) && segments[i+1].startMS >= segments[i].startMS {
+			endMS = segments[i+1].startMS
+		}
+		out = append(out, chunkSegment{
+			Text: segments[i].text,
+			Span: model.Span{
+				Kind:    "time",
+				StartMS: segments[i].startMS,
+				EndMS:   endMS,
+			},
+		})
+	}
+	return out
+}
+
+func parseTranscriptTimestamp(line string) (int, string, bool) {
+	m := transcriptTimestampRe.FindStringSubmatch(line)
+	if len(m) != 5 {
+		return 0, "", false
+	}
+	hours := 0
+	minutes := 0
+	seconds := 0
+	var err error
+	if m[3] == "" {
+		minutes, err = strconv.Atoi(m[1])
+		if err != nil {
+			return 0, "", false
+		}
+		seconds, err = strconv.Atoi(m[2])
+		if err != nil {
+			return 0, "", false
+		}
+		if minutes < 0 || seconds < 0 || seconds > 59 {
+			return 0, "", false
+		}
+	} else {
+		hours, err = strconv.Atoi(m[1])
+		if err != nil {
+			return 0, "", false
+		}
+		minutes, err = strconv.Atoi(m[2])
+		if err != nil {
+			return 0, "", false
+		}
+		seconds, err = strconv.Atoi(m[3])
+		if err != nil {
+			return 0, "", false
+		}
+		if hours < 0 || minutes < 0 || minutes > 59 || seconds < 0 || seconds > 59 {
+			return 0, "", false
+		}
+	}
+
+	totalMS := ((hours * 3600) + (minutes * 60) + seconds) * 1000
+	return totalMS, strings.TrimSpace(m[4]), true
 }
 
 func chunkCodeByLines(content string, maxLines, overlapLines int) []chunkSegment {

@@ -823,13 +823,19 @@ func (s *SQLiteStore) NextPending(ctx context.Context, limit int, indexKind stri
 	}
 
 	args := []any{"pending"}
-	query := `SELECT chunk_id, rel_path, doc_type, rep_type, text, index_kind FROM chunks WHERE embedding_status = ? AND deleted = 0 AND chunk_id > 0`
+	query := `SELECT c.chunk_id, c.rel_path, c.doc_type, c.rep_type, c.text, c.index_kind,
+	          COALESCE(sp.span_kind, ''), COALESCE(sp.start, 0), COALESCE(sp.end, 0)
+	          FROM chunks c
+	          LEFT JOIN spans sp ON sp.span_id = (
+	            SELECT span_id FROM spans WHERE chunk_id = c.chunk_id ORDER BY span_id LIMIT 1
+	          )
+	          WHERE c.embedding_status = ? AND c.deleted = 0 AND c.chunk_id > 0`
 	if strings.TrimSpace(indexKind) != "" {
-		query += " AND index_kind = ?"
+		query += " AND c.index_kind = ?"
 		args = append(args, indexKind)
 	}
 	args = append(args, limit)
-	query += " ORDER BY chunk_id LIMIT ?"
+	query += " ORDER BY c.chunk_id LIMIT ?"
 
 	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -846,21 +852,25 @@ func (s *SQLiteStore) NextPending(ctx context.Context, limit int, indexKind stri
 			repType string
 			text    string
 			idxKind string
+			spanK   string
+			spanS   int
+			spanE   int
 		)
-		if err := rows.Scan(&chunkID, &relPath, &docType, &repType, &text, &idxKind); err != nil {
+		if err := rows.Scan(&chunkID, &relPath, &docType, &repType, &text, &idxKind, &spanK, &spanS, &spanE); err != nil {
 			return nil, err
 		}
 		if chunkID <= 0 {
 			return nil, fmt.Errorf("invalid non-positive chunk_id from database: %d", chunkID)
 		}
 		uid := uint64(chunkID)
+		span := spanFromRow(spanK, spanS, spanE)
 		tasks = append(tasks, model.NewChunkTask(uid, text, idxKind, model.ChunkMetadata{
 			ChunkID: uid,
 			RelPath: relPath,
 			DocType: docType,
 			RepType: repType,
 			Snippet: snippet(text, 240),
-			Span:    model.Span{Kind: "lines"},
+			Span:    span,
 		}))
 	}
 	return tasks, rows.Err()
@@ -880,15 +890,19 @@ func (s *SQLiteStore) ListEmbeddedChunkMetadata(ctx context.Context, indexKind s
 	}
 
 	args := []any{"ok"}
-	query := `SELECT chunk_id, rel_path, doc_type, rep_type, text, index_kind
-	          FROM chunks
-	          WHERE embedding_status = ? AND deleted = 0 AND chunk_id > 0`
+	query := `SELECT c.chunk_id, c.rel_path, c.doc_type, c.rep_type, c.text, c.index_kind,
+	          COALESCE(sp.span_kind, ''), COALESCE(sp.start, 0), COALESCE(sp.end, 0)
+	          FROM chunks c
+	          LEFT JOIN spans sp ON sp.span_id = (
+	            SELECT span_id FROM spans WHERE chunk_id = c.chunk_id ORDER BY span_id LIMIT 1
+	          )
+	          WHERE c.embedding_status = ? AND c.deleted = 0 AND c.chunk_id > 0`
 	if strings.TrimSpace(indexKind) != "" {
-		query += ` AND index_kind = ?`
+		query += ` AND c.index_kind = ?`
 		args = append(args, indexKind)
 	}
 	args = append(args, limit, offset)
-	query += ` ORDER BY chunk_id LIMIT ? OFFSET ?`
+	query += ` ORDER BY c.chunk_id LIMIT ? OFFSET ?`
 
 	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -905,14 +919,18 @@ func (s *SQLiteStore) ListEmbeddedChunkMetadata(ctx context.Context, indexKind s
 			repType string
 			text    string
 			kind    string
+			spanK   string
+			spanS   int
+			spanE   int
 		)
-		if err := rows.Scan(&chunkID, &relPath, &docType, &repType, &text, &kind); err != nil {
+		if err := rows.Scan(&chunkID, &relPath, &docType, &repType, &text, &kind, &spanK, &spanS, &spanE); err != nil {
 			return nil, err
 		}
 		if chunkID <= 0 {
 			return nil, fmt.Errorf("invalid non-positive chunk_id from database: %d", chunkID)
 		}
 		uid := uint64(chunkID)
+		span := spanFromRow(spanK, spanS, spanE)
 		out = append(out, model.ChunkTask{
 			Label:     uid,
 			Text:      text,
@@ -923,11 +941,31 @@ func (s *SQLiteStore) ListEmbeddedChunkMetadata(ctx context.Context, indexKind s
 				DocType: docType,
 				RepType: repType,
 				Snippet: snippet(text, 240),
-				Span:    model.Span{Kind: "lines"},
+				Span:    span,
 			},
 		})
 	}
 	return out, rows.Err()
+}
+
+func spanFromRow(kind string, start, end int) model.Span {
+	switch strings.ToLower(strings.TrimSpace(kind)) {
+	case "page":
+		if start <= 0 {
+			return model.Span{Kind: "lines"}
+		}
+		return model.Span{Kind: "page", Page: start}
+	case "time":
+		if start < 0 || end < 0 || end < start {
+			return model.Span{Kind: "lines"}
+		}
+		return model.Span{Kind: "time", StartMS: start, EndMS: end}
+	case "lines":
+		if start > 0 && end >= start {
+			return model.Span{Kind: "lines", StartLine: start, EndLine: end}
+		}
+	}
+	return model.Span{Kind: "lines"}
 }
 
 func (s *SQLiteStore) MarkEmbedded(ctx context.Context, labels []uint64) error {

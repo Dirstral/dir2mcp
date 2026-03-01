@@ -25,6 +25,7 @@ type Service struct {
 	indexingState *appstate.IndexingState
 	repGen        *RepresentationGenerator
 	ocr           model.OCR
+	transcriber   model.Transcriber
 
 	// optional logger for diagnostics; defaults to log.Default() when nil.
 	// Tests can provide their own logger to avoid mutating global state.
@@ -113,6 +114,10 @@ func (s *Service) SetIndexingState(state *appstate.IndexingState) {
 
 func (s *Service) SetOCR(ocr model.OCR) {
 	s.ocr = ocr
+}
+
+func (s *Service) SetTranscriber(transcriber model.Transcriber) {
+	s.transcriber = transcriber
 }
 
 // ProcessDocument exposes single-document processing for external tests.
@@ -592,6 +597,16 @@ func (s *Service) generateRepresentations(ctx context.Context, doc model.Documen
 		}
 		s.addRepresentations(1)
 	}
+	if doc.DocType == "audio" && s.transcriber != nil {
+		if err := s.generateTranscriptRepresentation(ctx, doc, content); err != nil {
+			// Transcription failures should not fail the entire ingest run for a
+			// document. Keep ingesting other files and record an indexing error.
+			s.getLogger().Printf("transcription skipped for %s: %v", doc.RelPath, err)
+			s.addErrors(1)
+			return nil
+		}
+		s.addRepresentations(1)
+	}
 	return nil
 }
 
@@ -656,6 +671,48 @@ func (s *Service) generateOCRMarkdownRepresentation(ctx context.Context, doc mod
 // GenerateOCRMarkdownRepresentation exposes OCR representation generation for tests.
 func (s *Service) GenerateOCRMarkdownRepresentation(ctx context.Context, doc model.Document, content []byte) error {
 	return s.generateOCRMarkdownRepresentation(ctx, doc, content)
+}
+
+func (s *Service) generateTranscriptRepresentation(ctx context.Context, doc model.Document, content []byte) error {
+	if s.repGen == nil || s.transcriber == nil {
+		return nil
+	}
+
+	transcriptText, err := s.readOrComputeTranscript(ctx, doc, content)
+	if err != nil {
+		return err
+	}
+
+	transcriptText = strings.TrimSpace(transcriptText)
+	if transcriptText == "" {
+		return nil
+	}
+
+	rep := model.Representation{
+		DocID:       doc.DocID,
+		RepType:     RepTypeTranscript,
+		RepHash:     computeRepHash([]byte(transcriptText)),
+		CreatedUnix: time.Now().Unix(),
+		Deleted:     false,
+	}
+	repID, err := s.repGen.store.UpsertRepresentation(ctx, rep)
+	if err != nil {
+		return fmt.Errorf("upsert transcript representation: %w", err)
+	}
+
+	segments := chunkTranscriptByTime(transcriptText)
+	if len(segments) == 0 {
+		return nil
+	}
+	if err := s.repGen.upsertChunksForRepresentation(ctx, repID, "text", segments); err != nil {
+		return fmt.Errorf("persist transcript chunks: %w", err)
+	}
+	return nil
+}
+
+// GenerateTranscriptRepresentation exposes transcript generation for tests.
+func (s *Service) GenerateTranscriptRepresentation(ctx context.Context, doc model.Document, content []byte) error {
+	return s.generateTranscriptRepresentation(ctx, doc, content)
 }
 
 // enforceOCRCachePolicy scans cacheDir and removes entries that violate
@@ -814,4 +871,49 @@ func (s *Service) readOrComputeOCR(ctx context.Context, doc model.Document, cont
 // ReadOrComputeOCR exposes OCR cache lookup/computation for tests.
 func (s *Service) ReadOrComputeOCR(ctx context.Context, doc model.Document, content []byte) (string, error) {
 	return s.readOrComputeOCR(ctx, doc, content)
+}
+
+func (s *Service) readOrComputeTranscript(ctx context.Context, doc model.Document, content []byte) (string, error) {
+	cacheDir := filepath.Join(s.cfg.StateDir, "cache", "transcribe")
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		return "", fmt.Errorf("create transcript cache dir: %w", err)
+	}
+
+	cachePath := filepath.Join(cacheDir, computeContentHash(content)+".txt")
+	if cached, err := os.ReadFile(cachePath); err == nil {
+		return string(cached), nil
+	}
+
+	transcript, err := s.transcriber.Transcribe(ctx, doc.RelPath, content)
+	if err != nil {
+		return "", fmt.Errorf("transcribe %s: %w", doc.RelPath, err)
+	}
+
+	transcriptBytes := []byte(strings.ReplaceAll(strings.ReplaceAll(transcript, "\r\n", "\n"), "\r", "\n"))
+	if err := os.WriteFile(cachePath, transcriptBytes, 0o644); err != nil {
+		return "", fmt.Errorf("write transcript cache: %w", err)
+	}
+	shouldEnforceAfterWrite := s.markOCRCacheWrite()
+	if shouldEnforceAfterWrite {
+		// Reuse the same cache-policy limits/hooks as OCR for now so transcript
+		// cache growth is bounded under the same operational policy.
+		s.ocrCacheMu.RLock()
+		enforceHook := s.ocrCacheEnforce
+		s.ocrCacheMu.RUnlock()
+		var err error
+		if enforceHook != nil {
+			err = enforceHook(cacheDir)
+		} else {
+			err = s.enforceOCRCachePolicy(cacheDir)
+		}
+		if err != nil {
+			s.getLogger().Printf("enforceOCRCachePolicy(%s) failed: %v", cacheDir, err)
+		}
+	}
+	return string(transcriptBytes), nil
+}
+
+// ReadOrComputeTranscript exposes transcript cache lookup/computation for tests.
+func (s *Service) ReadOrComputeTranscript(ctx context.Context, doc model.Document, content []byte) (string, error) {
+	return s.readOrComputeTranscript(ctx, doc, content)
 }
