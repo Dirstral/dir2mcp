@@ -459,17 +459,52 @@ func stopStartedCommand(cmd *exec.Cmd, pipes ...io.Closer) error {
 }
 
 func terminateProcess(pid int) error {
+	if pid <= 0 {
+		return nil
+	}
 	proc, err := os.FindProcess(pid)
 	if err != nil {
 		return err
 	}
 	if runtime.GOOS == "windows" {
-		return proc.Kill()
+		if err := proc.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			return err
+		}
+		if waitForProcessExit(pid, 3*time.Second) {
+			return nil
+		}
+		return fmt.Errorf("process %d did not exit after kill", pid)
 	}
 	if err := proc.Signal(syscall.SIGINT); err != nil {
+		if errors.Is(err, os.ErrProcessDone) {
+			return nil
+		}
 		return err
 	}
-	return nil
+	if waitForProcessExit(pid, 4*time.Second) {
+		return nil
+	}
+	if err := proc.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		return err
+	}
+	if waitForProcessExit(pid, 2*time.Second) {
+		return nil
+	}
+	return fmt.Errorf("process %d did not terminate within timeout", pid)
+}
+
+func waitForProcessExit(pid int, timeout time.Duration) bool {
+	if timeout <= 0 {
+		timeout = time.Second
+	}
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if !processAlive(pid) {
+			return true
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return !processAlive(pid)
 }
 
 // HealthInfo describes the current state of a managed dir2mcp process.
@@ -541,6 +576,9 @@ func OrUnknown(value string) string {
 func processAlive(pid int) bool {
 	if pid <= 0 {
 		return false
+	}
+	if runtime.GOOS == "windows" {
+		return processAliveWindows(pid)
 	}
 	proc, err := os.FindProcess(pid)
 	if err != nil {
@@ -719,7 +757,7 @@ func readConnectionContractDetails(state State) (protocolHeader, sessionHeaderNa
 		return "", "", ""
 	}
 	if payload.Headers != nil {
-		protocolHeader = strings.TrimSpace(payload.Headers["MCP-Protocol-Version"])
+		protocolHeader = strings.TrimSpace(payload.Headers[protocol.MCPProtocolVersionHeader])
 	}
 	if payload.Session.UsesMCPSessionID {
 		sessionHeaderName = strings.TrimSpace(payload.Session.HeaderName)
@@ -853,7 +891,7 @@ func rpcCall(ctx context.Context, client *http.Client, endpoint, token, sessionI
 		return nil, 0, nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("MCP-Protocol-Version", coreconfig.DefaultProtocolVersion)
+	req.Header.Set(protocol.MCPProtocolVersionHeader, coreconfig.DefaultProtocolVersion)
 	req.Header.Set("Accept", "application/json, text/event-stream")
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
