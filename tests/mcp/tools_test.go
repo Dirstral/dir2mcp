@@ -708,6 +708,82 @@ func TestMCPToolsCallStats_ReturnsStructuredContent(t *testing.T) {
 	}
 }
 
+func TestMCPToolsCallStats_UsesRetrieverStats(t *testing.T) {
+	cfg := config.Default()
+	cfg.AuthMode = "none"
+
+	retriever := &askAudioRetrieverStub{
+		statsConfigured: true,
+		stats: model.Stats{
+			Root:            "/repo",
+			StateDir:        "/repo/.dir2mcp",
+			ProtocolVersion: cfg.ProtocolVersion,
+			DocCounts:       map[string]int64{"code": 2, "md": 1},
+			TotalDocs:       3,
+			Scanned:         4,
+			Indexed:         2,
+			Skipped:         1,
+			Deleted:         1,
+			Representations: 6,
+			ChunksTotal:     8,
+			EmbeddedOK:      7,
+			Errors:          1,
+		},
+	}
+
+	server := httptest.NewServer(mcp.NewServer(cfg, retriever).Handler())
+	defer server.Close()
+
+	sessionID := initializeSession(t, server.URL+cfg.MCPPath)
+	resp := postRPC(t, server.URL+cfg.MCPPath, sessionID, `{"jsonrpc":"2.0","id":33,"method":"tools/call","params":{"name":"dir2mcp.stats","arguments":{}}}`)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		payload, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status=%d want=%d body=%s", resp.StatusCode, http.StatusOK, string(payload))
+	}
+
+	var envelope struct {
+		Result struct {
+			IsError           bool                   `json:"isError"`
+			StructuredContent map[string]interface{} `json:"structuredContent"`
+		} `json:"result"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if envelope.Result.IsError {
+		t.Fatal("expected stats tool call to succeed")
+	}
+	if got := envelope.Result.StructuredContent["root"]; got != "/repo" {
+		t.Fatalf("unexpected root: %#v", got)
+	}
+	if got := envelope.Result.StructuredContent["state_dir"]; got != "/repo/.dir2mcp" {
+		t.Fatalf("unexpected state_dir: %#v", got)
+	}
+	if got := envelope.Result.StructuredContent["total_docs"]; got != float64(3) {
+		t.Fatalf("unexpected total_docs: %#v", got)
+	}
+
+	docCounts, ok := envelope.Result.StructuredContent["doc_counts"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected doc_counts object, got %#v", envelope.Result.StructuredContent["doc_counts"])
+	}
+	if docCounts["code"] != float64(2) || docCounts["md"] != float64(1) {
+		t.Fatalf("unexpected doc_counts payload: %#v", docCounts)
+	}
+
+	indexingRaw, ok := envelope.Result.StructuredContent["indexing"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected indexing object, got %#v", envelope.Result.StructuredContent["indexing"])
+	}
+	if indexingRaw["scanned"] != float64(4) || indexingRaw["representations"] != float64(6) || indexingRaw["chunks_total"] != float64(8) {
+		t.Fatalf("unexpected indexing payload: %#v", indexingRaw)
+	}
+	if !retriever.statsCalled.Load() {
+		t.Fatal("expected retriever.Stats to be called")
+	}
+}
+
 // TestMCPToolsCallListFiles_GracefulWithoutSQLiteStore verifies that
 // list_files returns an empty, valid response when no store is configured.
 func TestMCPToolsCallListFiles_GracefulWithoutSQLiteStore(t *testing.T) {
@@ -1145,6 +1221,10 @@ func postRPC(t *testing.T, url, sessionID, body string) *http.Response {
 type askAudioRetrieverStub struct {
 	askResult model.AskResult
 	askErr    error
+	stats     model.Stats
+	statsErr  error
+
+	statsConfigured bool
 	// values produced by Search mode
 	searchHits []model.SearchHit
 	searchErr  error
@@ -1160,6 +1240,7 @@ type askAudioRetrieverStub struct {
 	// tracking for assertions (read from HTTP handler goroutines)
 	searchCalled atomic.Bool
 	askCalled    atomic.Bool
+	statsCalled  atomic.Bool
 
 	// indexing state for the new accessor
 	// this field is only written during initialization and then read by
@@ -1202,7 +1283,14 @@ func (s *askAudioRetrieverStub) OpenFile(_ context.Context, _ string, _ model.Sp
 }
 
 func (s *askAudioRetrieverStub) Stats(_ context.Context) (model.Stats, error) {
-	return model.Stats{}, model.ErrNotImplemented
+	s.statsCalled.Store(true)
+	if s.statsErr != nil {
+		return model.Stats{}, s.statsErr
+	}
+	if !s.statsConfigured {
+		return model.Stats{}, model.ErrNotImplemented
+	}
+	return s.stats, nil
 }
 
 func (s *askAudioRetrieverStub) IndexingComplete(_ context.Context) (bool, error) {
