@@ -15,6 +15,7 @@ type envState struct {
 	ok    bool
 }
 
+// chdirTemp mutates process-wide CWD and must not be used in parallel tests.
 func chdirTemp(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
