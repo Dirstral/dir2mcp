@@ -92,8 +92,8 @@ func TestUpCreatesSecretTokenAndConnectionFile(t *testing.T) {
 	if !strings.HasSuffix(connection.URL, protocol.DefaultMCPPath) {
 		t.Fatalf("unexpected connection URL: %q", connection.URL)
 	}
-	if connection.Headers["MCP-Protocol-Version"] != config.DefaultProtocolVersion {
-		t.Fatalf("unexpected protocol version header: %q", connection.Headers["MCP-Protocol-Version"])
+	if connection.Headers[protocol.MCPProtocolVersionHeader] != config.DefaultProtocolVersion {
+		t.Fatalf("unexpected protocol version header: %q", connection.Headers[protocol.MCPProtocolVersionHeader])
 	}
 	if connection.TokenSource != "secret.token" {
 		t.Fatalf("unexpected token_source: %q", connection.TokenSource)
