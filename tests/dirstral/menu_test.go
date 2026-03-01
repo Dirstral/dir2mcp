@@ -12,7 +12,7 @@ import (
 )
 
 func TestStartMenuItemsOrder(t *testing.T) {
-	want := []string{"Breeze", "Tempest", "Lighthouse", "Settings", "Exit"}
+	want := []string{"Chat", "Voice", "Start/Stop MCP Server", "Settings", "Exit"}
 	if got := app.StartMenuItems(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("unexpected startup menu options: got %v want %v", got, want)
 	}
@@ -215,9 +215,9 @@ func TestSelectedRowBadgeDoesNotBreakHighlight(t *testing.T) {
 		Title: "Menu",
 		Items: []app.MenuItem{
 			{
-				Label:       "Lighthouse",
-				Description: "Manage local host and probe remote MCP",
-				Value:       "lighthouse",
+				Label:       "Server",
+				Description: "Manage local MCP server and probe remote MCP",
+				Value:       "server",
 				Badge:       "stopped",
 				BadgeStyle:  &badgeStyle,
 			},
@@ -234,13 +234,13 @@ func TestSelectedRowBadgeDoesNotBreakHighlight(t *testing.T) {
 	view := m.View()
 	selectedLine := ""
 	for _, line := range strings.Split(view, "\n") {
-		if strings.Contains(line, "Lighthouse") {
+		if strings.Contains(line, "Server") {
 			selectedLine = line
 			break
 		}
 	}
 	if selectedLine == "" {
-		t.Fatalf("expected selected Lighthouse line in view: %q", view)
+		t.Fatalf("expected selected Server line in view: %q", view)
 	}
 	if !strings.Contains(selectedLine, "[stopped]") {
 		t.Fatalf("expected plain badge token in selected row, got: %q", selectedLine)
