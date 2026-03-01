@@ -80,12 +80,13 @@ type jsonRPCResponse struct {
 }
 
 type jsonRPCError struct {
-	Code                  int
-	Message               string
-	HTTPStatus            int
-	Headers               map[string]string
-	PaymentRequiredHeader string
-	PaymentResponseHeader string
+	Code                   int
+	Message                string
+	HTTPStatus             int
+	Headers                map[string]string
+	PaymentRequiredHeader  *x402.X402Payload
+	PaymentResponseHeader  string
+	PaymentRequiredPresent bool
 }
 
 func (e *jsonRPCError) Error() string {
@@ -102,10 +103,10 @@ func (e *jsonRPCError) isPaymentRequired() bool {
 	if e == nil {
 		return false
 	}
-	if e.HTTPStatus != http.StatusPaymentRequired {
-		return false
+	if e.HTTPStatus == http.StatusPaymentRequired {
+		return true
 	}
-	return strings.TrimSpace(e.PaymentRequiredHeader) != "" || strings.TrimSpace(e.PaymentResponseHeader) != ""
+	return e.PaymentRequiredPresent || e.PaymentRequiredHeader != nil || strings.TrimSpace(e.PaymentResponseHeader) != ""
 }
 
 func New(endpoint string, verbose bool) *Client {
@@ -362,6 +363,39 @@ func (c *Client) call(ctx context.Context, method string, params map[string]any,
 	if err != nil {
 		return nil, resp.StatusCode, resp.Header, err
 	}
+
+	prVal := headerValueIgnoreCase(resp.Header, x402.HeaderPaymentRequired)
+	prRespVal := headerValueIgnoreCase(resp.Header, x402.HeaderPaymentResponse)
+	var prHeader *x402.X402Payload
+	if prVal != "" {
+		var parsed x402.X402Payload
+		if err := json.Unmarshal([]byte(prVal), &parsed); err == nil {
+			prHeader = &parsed
+		}
+	}
+
+	if resp.StatusCode == http.StatusPaymentRequired {
+		code := -32000 // generic error
+		message := "payment required"
+		var envelope jsonRPCResponse
+		if len(bodyBytes) > 0 {
+			if err := json.Unmarshal(bodyBytes, &envelope); err == nil && envelope.Error != nil {
+				code = envelope.Error.Code
+				message = envelope.Error.Message
+			}
+		}
+
+		return nil, resp.StatusCode, resp.Header, &jsonRPCError{
+			Code:                   code,
+			Message:                message,
+			HTTPStatus:             resp.StatusCode,
+			Headers:                flattenHeaders(resp.Header),
+			PaymentRequiredHeader:  prHeader,
+			PaymentResponseHeader:  prRespVal,
+			PaymentRequiredPresent: prVal != "",
+		}
+	}
+
 	if len(bodyBytes) == 0 {
 		return map[string]any{}, resp.StatusCode, resp.Header, nil
 	}
@@ -379,12 +413,13 @@ func (c *Client) call(ctx context.Context, method string, params map[string]any,
 	}
 	if envelope.Error != nil {
 		return nil, resp.StatusCode, resp.Header, &jsonRPCError{
-			Code:                  envelope.Error.Code,
-			Message:               envelope.Error.Message,
-			HTTPStatus:            resp.StatusCode,
-			Headers:               flattenHeaders(resp.Header),
-			PaymentRequiredHeader: headerValueIgnoreCase(resp.Header, x402.HeaderPaymentRequired),
-			PaymentResponseHeader: headerValueIgnoreCase(resp.Header, x402.HeaderPaymentResponse),
+			Code:                   envelope.Error.Code,
+			Message:                envelope.Error.Message,
+			HTTPStatus:             resp.StatusCode,
+			Headers:                flattenHeaders(resp.Header),
+			PaymentRequiredHeader:  prHeader,
+			PaymentResponseHeader:  prRespVal,
+			PaymentRequiredPresent: prVal != "",
 		}
 	}
 	var raw map[string]any

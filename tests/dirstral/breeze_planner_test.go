@@ -2,6 +2,7 @@ package test
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -61,13 +62,21 @@ func TestParseInputMapsCommonCommands(t *testing.T) {
 		{name: "quit", input: "/quit", want: breeze.ParsedInput{Quit: true}},
 		{name: "help", input: "/help", want: breeze.ParsedInput{Help: true}},
 		{name: "clear", input: "/clear", want: breeze.ParsedInput{Clear: true}},
+		{name: "transcribe", input: "/transcribe file.mp3", want: breeze.ParsedInput{Tool: protocol.ToolNameTranscribe, Args: map[string]any{"rel_path": "file.mp3"}}},
+		{name: "transcribe_and_ask", input: "/transcribe_and_ask file.mp3 what?", want: breeze.ParsedInput{Tool: protocol.ToolNameTranscribeAndAsk, Args: map[string]any{"rel_path": "file.mp3", "question": "what?", "k": 6}}}, // Assuming mistral-small-latest is used with k=6
+		{name: "annotate", input: "/annotate file.txt {\"type\":\"object\"}", want: breeze.ParsedInput{Tool: protocol.ToolNameAnnotate, Args: map[string]any{"rel_path": "file.txt", "schema_json": map[string]any{"type": "object"}}}},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			got := breeze.ParseInput(tc.input, "mistral-small-latest")
-			if got.Quit != tc.want.Quit || got.Help != tc.want.Help || got.Clear != tc.want.Clear {
+			if got.Quit != tc.want.Quit || got.Help != tc.want.Help || got.Clear != tc.want.Clear || got.Tool != tc.want.Tool {
 				t.Fatalf("unexpected parsed flags: got %+v want %+v", got, tc.want)
+			}
+			if tc.want.Tool != "" && got.Tool == tc.want.Tool {
+				if !reflect.DeepEqual(got.Args, tc.want.Args) {
+					t.Fatalf("unexpected args: got %+v want %+v", got.Args, tc.want.Args)
+				}
 			}
 		})
 	}

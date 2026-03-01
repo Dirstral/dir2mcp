@@ -23,14 +23,15 @@ import (
 )
 
 type Options struct {
-	MCPURL    string
-	Transport string
-	Model     string
-	Voice     string
-	Device    string
-	Mute      bool
-	Verbose   bool
-	BaseURL   string
+	MCPURL         string
+	Transport      string
+	Model          string
+	Voice          string
+	Device         string
+	Mute           bool
+	Verbose        bool
+	BaseURL        string
+	TranscriptOnly bool
 }
 
 func Run(ctx context.Context, opts Options) error {
@@ -181,7 +182,7 @@ func preflight(opts Options) error {
 	if strings.TrimSpace(os.Getenv("ELEVENLABS_API_KEY")) == "" {
 		return fmt.Errorf("ELEVENLABS_API_KEY is required")
 	}
-	if opts.Mute {
+	if opts.Mute || opts.TranscriptOnly {
 		return nil
 	}
 	if _, err := exec.LookPath("afplay"); err == nil {

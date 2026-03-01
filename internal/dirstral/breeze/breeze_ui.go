@@ -2,7 +2,9 @@ package breeze
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"dir2mcp/internal/dirstral/mcp"
@@ -255,7 +257,7 @@ func (m *breezeModel) applyWindowSize(width, height int) {
 func (m breezeModel) renderHelpBlock(width, height int) string {
 	helpText := formatHelp()
 	if width < 56 || height < 14 {
-		helpText = "Help: /help, /quit, /clear, /list [prefix], /search <query>, /open <rel_path>. Press ? to close."
+		helpText = formatHelpCompact()
 	}
 
 	return lipgloss.NewStyle().
@@ -264,6 +266,35 @@ func (m breezeModel) renderHelpBlock(width, height int) string {
 		Padding(0, 1).
 		MaxWidth(max(width-2, 1)).
 		Render(helpText)
+}
+
+type helpCommand struct {
+	name        string
+	description string
+}
+
+var helpCommands = []helpCommand{
+	{name: "/help", description: "Show help"},
+	{name: "/quit", description: "Exit Breeze"},
+	{name: "/clear", description: "Clear chat history"},
+	{name: "/list [prefix]", description: "List indexed files"},
+	{name: "/search <query>", description: "Search corpus"},
+	{name: "/open <rel_path>", description: "Open file from index"},
+	{name: "/transcribe <rel_path>", description: "Force transcribe audio"},
+	{name: "/annotate <rel_path> <schema_json>", description: "Extract structured JSON"},
+	{name: "/transcribe_and_ask <rel_path> <question>", description: "Transcribe & Ask"},
+}
+
+func formatHelpCompact() string {
+	var b strings.Builder
+	b.WriteString(ui.Brand.Render("Help:\n"))
+	for _, command := range helpCommands {
+		fmt.Fprintf(&b, "  %s  %s\n", ui.Keyword.Render(command.name), ui.Muted.Render(command.description))
+	}
+	b.WriteString(ui.Dim("  Any other text is sent to " + protocol.ToolNameAsk))
+	b.WriteString("\n")
+	b.WriteString(ui.Dim("  Press ? to close."))
+	return b.String()
 }
 
 func (m *breezeModel) processInputCmd(input string) tea.Cmd {
@@ -330,26 +361,20 @@ func firstApprovalTool(plan TurnPlan) string {
 func formatHelp() string {
 	var b strings.Builder
 	b.WriteString(ui.Brand.Render("Commands:\n"))
-	fmt.Fprintf(&b, "  %s  %s\n", ui.Keyword.Render("/help"), ui.Muted.Render("Show help"))
-	fmt.Fprintf(&b, "  %s  %s\n", ui.Keyword.Render("/quit"), ui.Muted.Render("Exit Breeze"))
-	fmt.Fprintf(&b, "  %s  %s\n", ui.Keyword.Render("/clear"), ui.Muted.Render("Clear chat history"))
-	fmt.Fprintf(&b, "  %s  %s\n", ui.Keyword.Render("/list [prefix]"), ui.Muted.Render("List indexed files"))
-	fmt.Fprintf(&b, "  %s  %s\n", ui.Keyword.Render("/search <query>"), ui.Muted.Render("Search corpus"))
-	fmt.Fprintf(&b, "  %s  %s\n", ui.Keyword.Render("/open <rel_path>"), ui.Muted.Render("Open file from index"))
+	for _, command := range helpCommands {
+		fmt.Fprintf(&b, "  %s  %s\n", ui.Keyword.Render(command.name), ui.Muted.Render(command.description))
+	}
 	b.WriteString(ui.Dim("  Any other text is sent to " + protocol.ToolNameAsk))
 	return b.String()
 }
 
 func formatHelpPlain() string {
-	return strings.Join([]string{
-		"/help - Show help",
-		"/quit - Exit Breeze",
-		"/clear - Clear chat history",
-		"/list [prefix] - List indexed files",
-		"/search <query> - Search corpus",
-		"/open <rel_path> - Open file from index",
-		"Any other text is sent to " + protocol.ToolNameAsk,
-	}, "\n")
+	lines := make([]string, 0, len(helpCommands)+1)
+	for _, command := range helpCommands {
+		lines = append(lines, command.name+" - "+command.description)
+	}
+	lines = append(lines, "Any other text is sent to "+protocol.ToolNameAsk)
+	return strings.Join(lines, "\n")
 }
 
 func renderResultString(tool string, res *mcp.ToolCallResult) string {
@@ -360,8 +385,12 @@ func renderResultString(tool string, res *mcp.ToolCallResult) string {
 		return renderSearchString(res.StructuredContent)
 	case protocol.ToolNameOpenFile:
 		return renderOpenFileString(res.StructuredContent)
-	case protocol.ToolNameAsk:
-		return renderAskString(res.StructuredContent)
+	case protocol.ToolNameAsk, protocol.ToolNameTranscribeAndAsk:
+		return renderAskString(tool, res.StructuredContent)
+	case protocol.ToolNameAnnotate:
+		return renderAnnotateString(res.StructuredContent)
+	case protocol.ToolNameTranscribe:
+		return renderTranscribeString(res.StructuredContent)
 	default:
 		var b strings.Builder
 		for _, c := range res.Content {
@@ -433,13 +462,13 @@ func renderOpenFileString(sc map[string]any) string {
 	return b.String()
 }
 
-func renderAskString(sc map[string]any) string {
+func renderAskString(toolName string, sc map[string]any) string {
 	var b strings.Builder
 	answer := strings.TrimSpace(asString(sc["answer"]))
 	if answer != "" {
 		b.WriteString(answer + "\n")
 	}
-	if ordered := citationsFor(protocol.ToolNameAsk, sc); len(ordered) > 0 {
+	if ordered := citationsFor(toolName, sc); len(ordered) > 0 {
 		styled := make([]string, len(ordered))
 		for i, c := range ordered {
 			styled[i] = ui.Citation(c)
@@ -447,4 +476,122 @@ func renderAskString(sc map[string]any) string {
 		fmt.Fprintf(&b, "%s %s\n", ui.Dim("Sources:"), strings.Join(styled, ui.Dim(", ")))
 	}
 	return strings.TrimSpace(b.String())
+}
+
+func renderAnnotateString(sc map[string]any) string {
+	var b strings.Builder
+	path := asString(sc["rel_path"])
+	b.WriteString(ui.Cyan.Render("Annotated: "+path) + "\n")
+	if text, ok := sc["annotation_text_preview"].(string); ok && text != "" {
+		b.WriteString(ui.Dim("Preview: "+text) + "\n")
+	}
+	if jsonObj, ok := sc["annotation_json"]; ok && jsonObj != nil {
+		bytes, err := json.MarshalIndent(jsonObj, "", "  ")
+		if err == nil {
+			b.WriteString(string(bytes))
+		} else {
+			compact, compactErr := json.Marshal(jsonObj)
+			if compactErr == nil {
+				fmt.Fprintf(&b, "annotation_json (marshal error: %v): %s", err, string(compact))
+			} else {
+				fmt.Fprintf(&b, "annotation_json (marshal error: %v; fallback error: %v): %v", err, compactErr, jsonObj)
+			}
+		}
+	}
+	if ordered := citationsFor(protocol.ToolNameAnnotate, sc); len(ordered) > 0 {
+		styled := make([]string, len(ordered))
+		for i, c := range ordered {
+			styled[i] = ui.Citation(c)
+		}
+		fmt.Fprintf(&b, "\n%s %s\n", ui.Dim("Sources:"), strings.Join(styled, ui.Dim(", ")))
+	}
+	return strings.TrimSpace(b.String())
+}
+
+func renderTranscribeString(sc map[string]any) string {
+	var b strings.Builder
+	path := asString(sc["rel_path"])
+	b.WriteString(ui.Cyan.Render("Transcribed: "+path) + "\n")
+	if provider := asString(sc["provider"]); provider != "" {
+		b.WriteString(ui.Dim("Provider: "+provider) + "\n")
+	}
+	if segments, ok := sc["segments"].([]any); ok && len(segments) > 0 {
+		for _, s := range segments {
+			seg, ok := s.(map[string]any)
+			if !ok {
+				continue
+			}
+			text := asString(seg["text"])
+			if text == "" {
+				text = asString(seg["transcript"])
+			}
+			timeRange := ""
+			if start, ok := seg["start"]; ok {
+				timeRange = formatTime(start)
+				if end, ok := seg["end"]; ok {
+					timeRange += "-" + formatTime(end)
+				}
+			} else if t, ok := seg["time"]; ok {
+				timeRange = formatTime(t)
+			}
+
+			citation := ""
+			if span, ok := seg["span"].(map[string]any); ok {
+				citation = mcp.CitationForSpan(path, span)
+			}
+
+			if timeRange != "" {
+				fmt.Fprintf(&b, "%s ", ui.Dim(timeRange))
+			}
+			b.WriteString(text)
+			if citation != "" {
+				fmt.Fprintf(&b, " %s", ui.Citation(citation))
+			}
+			b.WriteString("\n")
+		}
+	} else {
+		text := asString(sc["text"])
+		if text == "" {
+			text = asString(sc["transcript"])
+		}
+		timeRange := ""
+		if start, ok := sc["start"]; ok {
+			timeRange = formatTime(start)
+			if end, ok := sc["end"]; ok {
+				timeRange += "-" + formatTime(end)
+			}
+		} else if t, ok := sc["time"]; ok {
+			timeRange = formatTime(t)
+		}
+
+		citation := ""
+		if span, ok := sc["span"].(map[string]any); ok {
+			citation = mcp.CitationForSpan(path, span)
+		}
+
+		if text != "" || citation != "" || timeRange != "" {
+			if timeRange != "" {
+				fmt.Fprintf(&b, "%s ", ui.Dim(timeRange))
+			}
+			b.WriteString(text)
+			if citation != "" {
+				fmt.Fprintf(&b, " %s", ui.Citation(citation))
+			}
+		} else {
+			b.WriteString("Transcription complete.")
+		}
+	}
+	return strings.TrimSpace(b.String())
+}
+
+func formatTime(v any) string {
+	s := asString(v)
+	f, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return s
+	}
+	totalSeconds := int(f)
+	minutes := totalSeconds / 60
+	seconds := totalSeconds % 60
+	return fmt.Sprintf("%02d:%02d", minutes, seconds)
 }

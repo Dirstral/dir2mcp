@@ -2,6 +2,7 @@ package breeze
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -106,6 +107,34 @@ func (p heuristicPlanner) Plan(input string) (TurnPlan, error) {
 			return TurnPlan{}, fmt.Errorf("usage: /open <rel_path>")
 		}
 		return TurnPlan{Steps: []PlanStep{{Tool: protocol.ToolNameOpenFile, Args: map[string]any{"rel_path": args[0]}}}}, nil
+	case trimmed == "/transcribe_and_ask" || strings.HasPrefix(trimmed, "/transcribe_and_ask "):
+		args := strings.TrimSpace(strings.TrimPrefix(trimmed, "/transcribe_and_ask"))
+		parts := strings.Fields(args)
+		if len(parts) < 2 {
+			return TurnPlan{}, fmt.Errorf("usage: /transcribe_and_ask <rel_path> <question>")
+		}
+		path := parts[0]
+		question := strings.TrimSpace(strings.TrimPrefix(args, path))
+		return TurnPlan{Steps: []PlanStep{{Tool: protocol.ToolNameTranscribeAndAsk, Args: map[string]any{"rel_path": path, "question": question, "k": p.profile.AskTopK}}}}, nil
+	case trimmed == "/transcribe" || strings.HasPrefix(trimmed, "/transcribe "):
+		path := strings.TrimSpace(strings.TrimPrefix(trimmed, "/transcribe"))
+		if path == "" {
+			return TurnPlan{}, fmt.Errorf("usage: /transcribe <rel_path>")
+		}
+		return TurnPlan{Steps: []PlanStep{{Tool: protocol.ToolNameTranscribe, Args: map[string]any{"rel_path": path}}}}, nil
+	case trimmed == "/annotate" || strings.HasPrefix(trimmed, "/annotate "):
+		args := strings.TrimSpace(strings.TrimPrefix(trimmed, "/annotate"))
+		parts := strings.Fields(args)
+		if len(parts) < 2 {
+			return TurnPlan{}, fmt.Errorf("usage: /annotate <rel_path> <schema_json>")
+		}
+		path := parts[0]
+		schemaStr := strings.TrimSpace(strings.TrimPrefix(args, path))
+		var schema map[string]any
+		if err := json.Unmarshal([]byte(schemaStr), &schema); err != nil {
+			return TurnPlan{}, fmt.Errorf("invalid schema json: %w", err)
+		}
+		return TurnPlan{Steps: []PlanStep{{Tool: protocol.ToolNameAnnotate, Args: map[string]any{"rel_path": path, "schema_json": schema}}}}, nil
 	default:
 		steps := make([]PlanStep, 0, 2)
 		if p.profile.UseSearchFirst {
@@ -249,11 +278,20 @@ func citationsFor(tool string, sc map[string]any) []string {
 			span, _ := m["span"].(map[string]any)
 			add(mcp.CitationForSpan(path, span))
 		}
-	case protocol.ToolNameOpenFile:
+	case protocol.ToolNameOpenFile, protocol.ToolNameTranscribe, protocol.ToolNameAnnotate:
 		path := asString(sc["rel_path"])
 		span, _ := sc["span"].(map[string]any)
 		add(mcp.CitationForSpan(path, span))
-	case protocol.ToolNameAsk:
+		if segments, ok := sc["segments"].([]any); ok {
+			for _, s := range segments {
+				if seg, ok := s.(map[string]any); ok {
+					if segmentSpan, ok := seg["span"].(map[string]any); ok {
+						add(mcp.CitationForSpan(path, segmentSpan))
+					}
+				}
+			}
+		}
+	case protocol.ToolNameAsk, protocol.ToolNameTranscribeAndAsk:
 		citations, _ := sc["citations"].([]any)
 		for _, it := range citations {
 			m, ok := it.(map[string]any)

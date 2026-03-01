@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"time"
 
 	"dir2mcp/internal/dirstral/config"
+	"dir2mcp/internal/dirstral/host"
 	"dir2mcp/internal/dirstral/ui"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -38,6 +40,7 @@ type model struct {
 	width                int
 	height               int
 	showHelp             bool
+	cachedHealth         *host.HealthInfo
 }
 
 func initialModel(cfg config.Config) model {
@@ -72,12 +75,30 @@ func Run(cfg config.Config) error {
 	return err
 }
 
+type healthMsg *host.HealthInfo
+
+func tickHealth() tea.Cmd {
+	return tea.Tick(5*time.Second, func(t time.Time) tea.Msg {
+		h := host.CheckHealth()
+		return healthMsg(&h)
+	})
+}
+
 func (m model) Init() tea.Cmd {
-	return nil
+	return tea.Batch(
+		func() tea.Msg {
+			h := host.CheckHealth()
+			return healthMsg(&h)
+		},
+		tickHealth(),
+	)
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case healthMsg:
+		m.cachedHealth = (*host.HealthInfo)(msg)
+		return m, tickHealth()
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
@@ -612,6 +633,11 @@ func (m model) stateLines() []string {
 		lines = append(lines, pending...)
 		if len(pending) > 0 {
 			lines = append(lines, settingsSubtleStyle.Render("Source labels update after save."))
+		}
+
+		// Issue 78: Show auth contract details
+		if m.cachedHealth != nil && m.cachedHealth.AuthSourceType != "" && m.cachedHealth.AuthSourceType != "unknown" {
+			lines = append(lines, settingsSubtleStyle.Render(fmt.Sprintf("Active auth contract: %s", m.cachedHealth.AuthSourceType)))
 		}
 	}
 
