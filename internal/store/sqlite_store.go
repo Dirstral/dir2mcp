@@ -258,7 +258,7 @@ CREATE INDEX IF NOT EXISTS idx_chunks_rep_id ON chunks(rep_id);
 CREATE INDEX IF NOT EXISTS idx_chunks_embedding_status ON chunks(embedding_status);
 CREATE INDEX IF NOT EXISTS idx_chunks_index_kind ON chunks(index_kind);
 CREATE INDEX IF NOT EXISTS idx_chunks_rel_path_deleted ON chunks(rel_path, deleted);
-CREATE INDEX IF NOT EXISTS idx_spans_chunk_id ON spans(chunk_id);
+CREATE INDEX IF NOT EXISTS idx_spans_chunk_id_span_id ON spans(chunk_id, span_id);
 `
 	if _, err := db.ExecContext(ctx, schema); err != nil {
 		_ = db.Close()

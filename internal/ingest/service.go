@@ -912,7 +912,7 @@ func (s *Service) readOrComputeTranscript(ctx context.Context, doc model.Documen
 			err = s.enforceCachePolicy(cacheDir)
 		}
 		if err != nil {
-			s.getLogger().Printf("enforceCachePolicy(%s) failed: %v", cacheDir, err)
+			s.getLogger().Printf("enforceOCRCachePolicy(%s) failed: %v", cacheDir, err)
 		}
 	}
 	return string(transcriptBytes), nil
