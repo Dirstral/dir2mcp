@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"dir2mcp/internal/dirstral/mcp"
@@ -338,8 +339,8 @@ func formatHelp() string {
 	fmt.Fprintf(&b, "  %s  %s\n", ui.Keyword.Render("/search <query>"), ui.Muted.Render("Search corpus"))
 	fmt.Fprintf(&b, "  %s  %s\n", ui.Keyword.Render("/open <rel_path>"), ui.Muted.Render("Open file from index"))
 	fmt.Fprintf(&b, "  %s  %s\n", ui.Keyword.Render("/transcribe <rel_path>"), ui.Muted.Render("Force transcribe audio"))
-	fmt.Fprintf(&b, "  %s  %s\n", ui.Keyword.Render("/annotate <path> <schema>"), ui.Muted.Render("Extract structured JSON"))
-	fmt.Fprintf(&b, "  %s  %s\n", ui.Keyword.Render("/transcribe_and_ask <path> <q>"), ui.Muted.Render("Transcribe & Ask"))
+	fmt.Fprintf(&b, "  %s  %s\n", ui.Keyword.Render("/annotate <rel_path> <schema_json>"), ui.Muted.Render("Extract structured JSON"))
+	fmt.Fprintf(&b, "  %s  %s\n", ui.Keyword.Render("/transcribe_and_ask <rel_path> <question>"), ui.Muted.Render("Transcribe & Ask"))
 	b.WriteString(ui.Dim("  Any other text is sent to " + protocol.ToolNameAsk))
 	return b.String()
 }
@@ -491,9 +492,49 @@ func renderTranscribeString(sc map[string]any) string {
 		b.WriteString(ui.Dim("Provider: "+provider) + "\n")
 	}
 	if segments, ok := sc["segments"].([]any); ok && len(segments) > 0 {
-		b.WriteString(fmt.Sprintf("Extracted %d segments.", len(segments)))
+		for _, s := range segments {
+			seg, ok := s.(map[string]any)
+			if !ok {
+				continue
+			}
+			text := asString(seg["text"])
+			if text == "" {
+				text = asString(seg["transcript"])
+			}
+			timeRange := ""
+			if start, ok := seg["start"]; ok {
+				timeRange = formatTime(start)
+				if end, ok := seg["end"]; ok {
+					timeRange += "-" + formatTime(end)
+				}
+			} else if t, ok := seg["time"]; ok {
+				timeRange = formatTime(t)
+			}
+
+			citation := ""
+			if span, ok := seg["span"].(map[string]any); ok {
+				citation = mcp.CitationForSpan(path, span)
+			}
+
+			if timeRange != "" {
+				fmt.Fprintf(&b, "%s ", ui.Dim(timeRange))
+			}
+			b.WriteString(text)
+			if citation != "" {
+				fmt.Fprintf(&b, " %s", ui.Cyan.Render(citation))
+			}
+			b.WriteString("\n")
+		}
 	} else {
 		b.WriteString("Transcription complete.")
 	}
 	return strings.TrimSpace(b.String())
+}
+
+func formatTime(v any) string {
+	f, _ := strconv.ParseFloat(asString(v), 64)
+	totalSeconds := int(f)
+	minutes := totalSeconds / 60
+	seconds := totalSeconds % 60
+	return fmt.Sprintf("%02d:%02d", minutes, seconds)
 }
