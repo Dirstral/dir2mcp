@@ -13,6 +13,7 @@ import (
 	"dir2mcp/internal/dirstral/app"
 	"dir2mcp/internal/dirstral/config"
 	"dir2mcp/internal/dirstral/host"
+	"dir2mcp/internal/protocol"
 )
 
 func TestBuildTempestOptionsPrefersFlags(t *testing.T) {
@@ -184,12 +185,12 @@ func newProbeReadyServer(t *testing.T) *httptest.Server {
 		method, _ := req["method"].(string)
 		switch method {
 		case "initialize":
-			w.Header().Set("MCP-Session-Id", "test-session")
+			w.Header().Set(protocol.MCPSessionHeader, "test-session")
 			_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": req["id"], "result": map[string]any{"ok": true}})
 		case "notifications/initialized":
 			w.WriteHeader(http.StatusAccepted)
 		case "tools/list":
-			_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": req["id"], "result": map[string]any{"tools": []map[string]any{{"name": "dir2mcp.list_files"}}}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": req["id"], "result": map[string]any{"tools": []map[string]any{{"name": protocol.ToolNameListFiles}}}})
 		default:
 			w.WriteHeader(http.StatusBadRequest)
 		}
