@@ -9,10 +9,11 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
+var expectedLighthouseMenu = []string{"Start Server", "Server Status", "Remote MCP Status", "View Logs", "Stop Server", "Back"}
+
 func TestLighthouseMenuItemsOrder(t *testing.T) {
-	want := []string{"Start Server", "Server Status", "Remote MCP Status", "View Logs", "Stop Server", "Back"}
-	if got := app.LighthouseMenuItems(); !reflect.DeepEqual(got, want) {
-		t.Fatalf("unexpected lighthouse options: got %v want %v", got, want)
+	if got := app.LighthouseMenuItems(); !reflect.DeepEqual(got, expectedLighthouseMenu) {
+		t.Fatalf("unexpected lighthouse options: got %v want %v", got, expectedLighthouseMenu)
 	}
 }
 
@@ -22,9 +23,8 @@ func TestLighthouseMenuConfigIncludesLogsByDefault(t *testing.T) {
 	for _, item := range cfg.Items {
 		got = append(got, item.Value)
 	}
-	want := []string{"Start Server", "Server Status", "Remote MCP Status", "View Logs", "Stop Server", "Back"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("unexpected lighthouse menu config items: got %v want %v", got, want)
+	if !reflect.DeepEqual(got, expectedLighthouseMenu) {
+		t.Fatalf("unexpected lighthouse menu config items: got %v want %v", got, expectedLighthouseMenu)
 	}
 }
 

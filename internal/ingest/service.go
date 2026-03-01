@@ -100,25 +100,27 @@ type documentDeleteMarker interface {
 	MarkDocumentDeleted(ctx context.Context, relPath string) error
 }
 
-func NewService(cfg config.Config, store model.Store) *Service {
+func NewService(cfg config.Config, store model.Store) (*Service, error) {
 	svc := &Service{
 		cfg:    cfg,
 		store:  store,
 		logger: log.Default(),
 	}
-	if transcriber, err := TranscriberFromConfig(cfg); err == nil {
-		svc.transcriber = transcriber
-	} else {
-		svc.getLogger().Printf("transcriber config skipped: %v", err)
+	transcriber, err := TranscriberFromConfig(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("configure transcriber: %w", err)
 	}
+	svc.transcriber = transcriber
 	if rs, ok := store.(model.RepresentationStore); ok {
 		svc.repGen = NewRepresentationGenerator(rs)
 	}
-	return svc
+	return svc, nil
 }
 
 // DiscoverOptionsFromConfig resolves ingest discovery behavior from config.
-// Defaults remain strict: no .gitignore support and no symlink following.
+// Defaults mirror config.Config defaults: .gitignore support is enabled by
+// default (IngestGitignore=true), and symlink following is disabled by default
+// (IngestFollowSymlinks=false).
 func DiscoverOptionsFromConfig(cfg config.Config) DiscoverOptions {
 	options := DefaultDiscoverOptions()
 	options.UseGitIgnore = cfg.IngestGitignore

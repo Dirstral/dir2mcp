@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -253,7 +254,26 @@ func (s *Server) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	return s.RunOnListener(ctx, ln)
+
+	certFile := strings.TrimSpace(s.cfg.ServerTLSCertFile)
+	keyFile := strings.TrimSpace(s.cfg.ServerTLSKeyFile)
+	if certFile == "" && keyFile == "" {
+		return s.RunOnListener(ctx, ln)
+	}
+	if certFile == "" || keyFile == "" {
+		_ = ln.Close()
+		return errors.New("tls requires both server_tls_cert_file and server_tls_key_file")
+	}
+
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		_ = ln.Close()
+		return fmt.Errorf("load tls certificate/key: %w", err)
+	}
+	tlsCfg := &tls.Config{
+		Certificates: []tls.Certificate{cert},
+	}
+	return s.RunOnListener(ctx, tls.NewListener(ln, tlsCfg))
 }
 
 func (s *Server) RunOnListener(ctx context.Context, ln net.Listener) error {

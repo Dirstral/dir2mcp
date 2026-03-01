@@ -66,7 +66,7 @@ type App struct {
 	stdout io.Writer
 	stderr io.Writer
 
-	newIngestor  func(config.Config, model.Store) model.Ingestor
+	newIngestor  func(config.Config, model.Store) (model.Ingestor, error)
 	newStore     func(config.Config) model.Store
 	newRetriever func(config.Config, model.Store) model.Retriever
 }
@@ -92,7 +92,7 @@ type corpusStatsStore interface {
 }
 
 type RuntimeHooks struct {
-	NewIngestor  func(config.Config, model.Store) model.Ingestor
+	NewIngestor  func(config.Config, model.Store) (model.Ingestor, error)
 	NewStore     func(config.Config) model.Store
 	NewRetriever func(config.Config, model.Store) model.Retriever
 }
@@ -250,13 +250,16 @@ func NewAppWithIO(stdout, stderr io.Writer) *App {
 	return &App{
 		stdout: stdout,
 		stderr: stderr,
-		newIngestor: func(cfg config.Config, st model.Store) model.Ingestor {
-			svc := ingest.NewService(cfg, st)
+		newIngestor: func(cfg config.Config, st model.Store) (model.Ingestor, error) {
+			svc, err := ingest.NewService(cfg, st)
+			if err != nil {
+				return nil, err
+			}
 			if strings.TrimSpace(cfg.MistralAPIKey) != "" {
 				client := mistral.NewClient(cfg.MistralBaseURL, cfg.MistralAPIKey)
 				svc.SetOCR(client)
 			}
-			return svc
+			return svc, nil
 		},
 		// default store constructor uses sqlite in the configured state
 		// directory.  tests can override via RuntimeHooks.NewStore.
@@ -614,7 +617,11 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	}
 
 	mcpServer := mcp.NewServer(cfg, ret, serverOptions...)
-	ing := a.newIngestor(cfg, st)
+	ing, err := a.newIngestor(cfg, st)
+	if err != nil {
+		writef(a.stderr, "initialize ingestor: %v\n", err)
+		return exitConfigInvalid
+	}
 	if stateAware, ok := ing.(indexingStateAware); ok {
 		stateAware.SetIndexingState(indexingState)
 	}
@@ -1154,7 +1161,11 @@ func (a *App) runReindex(ctx context.Context, global globalOptions, args []strin
 	}
 
 	// use the factory hook (same as runUp) to allow tests to intercept
-	ing := a.newIngestor(cfg, st)
+	ing, err := a.newIngestor(cfg, st)
+	if err != nil {
+		writef(a.stderr, "initialize ingestor: %v\n", err)
+		return exitConfigInvalid
+	}
 
 	err = ing.Reindex(ctx)
 	if errors.Is(err, model.ErrNotImplemented) {

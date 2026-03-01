@@ -345,104 +345,12 @@ func LoadFile(path string) (Config, error) {
 	return load(path, nil, false)
 }
 
-func SaveFile(path string, cfg Config) error {
-	if strings.TrimSpace(path) == "" {
-		return errors.New("config path is required")
+func buildPersistedConfig(cfg *Config) persistedConfig {
+	if cfg == nil {
+		return persistedConfig{}
 	}
 
-	// validate before persisting so callers don't accidentally write
-	// nonsensical values (negative durations, mismatched session
-	// lifetimes, etc.).  the error is wrapped to make the origin clear.
-	if err := cfg.Validate(); err != nil {
-		return fmt.Errorf("validate config: %w", err)
-	}
-
-	serializable := persistedConfig{
-		RootDir:                   cfg.RootDir,
-		StateDir:                  cfg.StateDir,
-		ListenAddr:                cfg.ListenAddr,
-		MCPPath:                   cfg.MCPPath,
-		ProtocolVersion:           cfg.ProtocolVersion,
-		Public:                    cfg.Public,
-		AuthMode:                  cfg.AuthMode,
-		RateLimitRPS:              cfg.RateLimitRPS,
-		RateLimitBurst:            cfg.RateLimitBurst,
-		TrustedProxies:            append([]string(nil), cfg.TrustedProxies...),
-		PathExcludes:              append([]string(nil), cfg.PathExcludes...),
-		SecretPatterns:            append([]string(nil), cfg.SecretPatterns...),
-		MistralBaseURL:            cfg.MistralBaseURL,
-		ElevenLabsBaseURL:         cfg.ElevenLabsBaseURL,
-		ElevenLabsTTSVoiceID:      cfg.ElevenLabsTTSVoiceID,
-		AllowedOrigins:            append([]string(nil), cfg.AllowedOrigins...),
-		EmbedModelText:            cfg.EmbedModelText,
-		EmbedModelCode:            cfg.EmbedModelCode,
-		ChatModel:                 cfg.ChatModel,
-		RAGSystemPrompt:           cfg.RAGSystemPrompt,
-		RAGGenerateAnswer:         cfg.RAGGenerateAnswer,
-		RAGKDefault:               cfg.RAGKDefault,
-		RAGMaxContextChars:        cfg.RAGMaxContextChars,
-		RAGOversampleFactor:       cfg.RAGOversampleFactor,
-		ChunkingStrategy:          cfg.ChunkingStrategy,
-		ChunkingMaxTokens:         cfg.ChunkingMaxTokens,
-		ChunkingOverlapTokens:     cfg.ChunkingOverlapTokens,
-		IngestGitignore:           cfg.IngestGitignore,
-		IngestFollowSymlinks:      cfg.IngestFollowSymlinks,
-		IngestMaxFileMB:           cfg.IngestMaxFileMB,
-		STTProvider:               cfg.STTProvider,
-		STTMistralModel:           cfg.STTMistralModel,
-		STTElevenLabsModel:        cfg.STTElevenLabsModel,
-		STTElevenLabsLanguageCode: cfg.STTElevenLabsLanguageCode,
-		ServerTLSCertFile:         cfg.ServerTLSCertFile,
-		ServerTLSKeyFile:          cfg.ServerTLSKeyFile,
-		X402Mode:                  cfg.X402.Mode,
-		X402FacilitatorURL:        cfg.X402.FacilitatorURL,
-		// token intentionally omitted to avoid persisting secrets
-		// X402FacilitatorToken: cfg.X402.FacilitatorToken,
-		X402ResourceBaseURL:  cfg.X402.ResourceBaseURL,
-		X402ToolsCallEnabled: cfg.X402.ToolsCallEnabled,
-		X402PriceAtomic:      cfg.X402.PriceAtomic,
-		X402Network:          cfg.X402.Network,
-		X402Scheme:           cfg.X402.Scheme,
-		X402Asset:            cfg.X402.Asset,
-		X402PayTo:            cfg.X402.PayTo,
-		// session settings
-		SessionInactivityTimeout: cfg.SessionInactivityTimeout,
-		SessionMaxLifetime:       cfg.SessionMaxLifetime,
-		HealthCheckInterval:      cfg.HealthCheckInterval,
-	}
-
-	raw, err := marshalConfigYAML(serializable)
-	if err != nil {
-		return fmt.Errorf("marshal config yaml: %w", err)
-	}
-	if len(raw) == 0 || raw[len(raw)-1] != '\n' {
-		raw = append(raw, '\n')
-	}
-
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("create config directory: %w", err)
-	}
-	if err := os.WriteFile(path, raw, 0o644); err != nil {
-		return fmt.Errorf("write config file %s: %w", path, err)
-	}
-	return nil
-}
-
-func EffectiveSnapshotPath(stateDir string) string {
-	trimmed := strings.TrimSpace(stateDir)
-	if trimmed == "" {
-		trimmed = Default().StateDir
-	}
-	return filepath.Join(trimmed, EffectiveConfigSnapshotFile)
-}
-
-func SaveEffectiveSnapshot(cfg Config, sources SecretSourceMetadata) (string, error) {
-	if err := cfg.Validate(); err != nil {
-		return "", fmt.Errorf("validate config: %w", err)
-	}
-
-	path := EffectiveSnapshotPath(cfg.StateDir)
-	serializable := persistedConfig{
+	return persistedConfig{
 		RootDir:                   cfg.RootDir,
 		StateDir:                  cfg.StateDir,
 		ListenAddr:                cfg.ListenAddr,
@@ -484,14 +392,64 @@ func SaveEffectiveSnapshot(cfg Config, sources SecretSourceMetadata) (string, er
 		ServerTLSKeyFile:          cfg.ServerTLSKeyFile,
 		X402Mode:                  cfg.X402.Mode,
 		X402FacilitatorURL:        cfg.X402.FacilitatorURL,
-		X402ResourceBaseURL:       cfg.X402.ResourceBaseURL,
-		X402ToolsCallEnabled:      cfg.X402.ToolsCallEnabled,
-		X402PriceAtomic:           cfg.X402.PriceAtomic,
-		X402Network:               cfg.X402.Network,
-		X402Scheme:                cfg.X402.Scheme,
-		X402Asset:                 cfg.X402.Asset,
-		X402PayTo:                 cfg.X402.PayTo,
+		// token intentionally omitted to avoid persisting secrets
+		// X402FacilitatorToken: cfg.X402.FacilitatorToken,
+		X402ResourceBaseURL:  cfg.X402.ResourceBaseURL,
+		X402ToolsCallEnabled: cfg.X402.ToolsCallEnabled,
+		X402PriceAtomic:      cfg.X402.PriceAtomic,
+		X402Network:          cfg.X402.Network,
+		X402Scheme:           cfg.X402.Scheme,
+		X402Asset:            cfg.X402.Asset,
+		X402PayTo:            cfg.X402.PayTo,
 	}
+}
+
+func SaveFile(path string, cfg Config) error {
+	if strings.TrimSpace(path) == "" {
+		return errors.New("config path is required")
+	}
+
+	// validate before persisting so callers don't accidentally write
+	// nonsensical values (negative durations, mismatched session
+	// lifetimes, etc.).  the error is wrapped to make the origin clear.
+	if err := cfg.Validate(); err != nil {
+		return fmt.Errorf("validate config: %w", err)
+	}
+
+	serializable := buildPersistedConfig(&cfg)
+
+	raw, err := marshalConfigYAML(serializable)
+	if err != nil {
+		return fmt.Errorf("marshal config yaml: %w", err)
+	}
+	if len(raw) == 0 || raw[len(raw)-1] != '\n' {
+		raw = append(raw, '\n')
+	}
+
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("create config directory: %w", err)
+	}
+	if err := os.WriteFile(path, raw, 0o644); err != nil {
+		return fmt.Errorf("write config file %s: %w", path, err)
+	}
+	return nil
+}
+
+func EffectiveSnapshotPath(stateDir string) string {
+	trimmed := strings.TrimSpace(stateDir)
+	if trimmed == "" {
+		trimmed = Default().StateDir
+	}
+	return filepath.Join(trimmed, EffectiveConfigSnapshotFile)
+}
+
+func SaveEffectiveSnapshot(cfg Config, sources SecretSourceMetadata) (string, error) {
+	if err := cfg.Validate(); err != nil {
+		return "", fmt.Errorf("validate config: %w", err)
+	}
+
+	path := EffectiveSnapshotPath(cfg.StateDir)
+	serializable := buildPersistedConfig(&cfg)
 
 	raw, err := marshalConfigYAML(serializable)
 	if err != nil {
@@ -524,7 +482,10 @@ func LoadEffectiveSnapshot(path string) (Config, SecretSourceMetadata, error) {
 	if err != nil {
 		return Config{}, SecretSourceMetadata{}, fmt.Errorf("parse snapshot file %s: %w", path, err)
 	}
-	sources := parseSecretSourceMetadata(raw)
+	sources, err := parseSecretSourceMetadata(raw)
+	if err != nil {
+		return Config{}, SecretSourceMetadata{}, fmt.Errorf("parse snapshot secret source metadata %s: %w", path, err)
+	}
 
 	cfg := Default()
 	applyParsedFileOverrides(&cfg, fileCfg)
@@ -568,7 +529,7 @@ func appendSnapshotSecretSourceMetadata(raw []byte, sources SecretSourceMetadata
 	return append(raw, []byte(buf.String())...)
 }
 
-func parseSecretSourceMetadata(raw []byte) SecretSourceMetadata {
+func parseSecretSourceMetadata(raw []byte) (SecretSourceMetadata, error) {
 	meta := SecretSourceMetadata{}
 	reader := strings.NewReader(string(raw))
 	scanner := bufio.NewScanner(reader)
@@ -613,7 +574,10 @@ func parseSecretSourceMetadata(raw []byte) SecretSourceMetadata {
 			meta.AuthToken = value
 		}
 	}
-	return meta
+	if err := scanner.Err(); err != nil {
+		return SecretSourceMetadata{}, err
+	}
+	return meta, nil
 }
 
 func load(path string, overrideEnv map[string]string, applyEnv bool) (Config, error) {

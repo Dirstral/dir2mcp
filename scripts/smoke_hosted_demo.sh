@@ -61,7 +61,7 @@ if [[ "${init_code}" != "200" ]]; then
   exit 1
 fi
 
-session_id="$(grep -i '^MCP-Session-Id:' "${init_headers}" | head -n1 | cut -d':' -f2- | tr -d '[:space:]')"
+session_id="$(sed -nE '/^[[:space:]]*[Mm][Cc][Pp]-[Ss]ession-[Ii]d:/ { s/^[[:space:]]*[Mm][Cc][Pp]-[Ss]ession-[Ii]d:[[:space:]]*(.*)[[:space:]]*$/\1/; p; q; }' "${init_headers}")"
 if [[ -z "${session_id}" ]]; then
   echo "error: initialize succeeded but MCP-Session-Id header is missing" >&2
   exit 1

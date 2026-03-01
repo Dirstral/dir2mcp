@@ -252,7 +252,11 @@ Or run: dir2mcp config init
 
 ### 3.4 Hosted demo smoke probe (operational runbook)
 
-For a hosted endpoint readiness check, use the repo script:
+For a hosted endpoint readiness check, use `./scripts/smoke_hosted_demo.sh`.
+Set `DIR2MCP_DEMO_TOKEN` whenever the hosted MCP endpoint enforces auth
+(bearer token required). It is optional only for deployments with no auth; if
+you omit it against an auth-enabled endpoint the script can fail early (for
+example with HTTP `401`) before the MCP pass conditions below are evaluated.
 
 ```bash
 DIR2MCP_DEMO_URL="https://your-host.example/mcp" \

@@ -47,7 +47,7 @@ func TestServiceRun_ProcessesFilesAndMarksMissingDeleted(t *testing.T) {
 	cfg.PathExcludes = []string{"**/exclude/**"}
 
 	indexState := appstate.NewIndexingState(appstate.ModeIncremental)
-	svc := ingest.NewService(cfg, st)
+	svc := mustNewIngestService(t, cfg, st)
 	svc.SetIndexingState(indexState)
 
 	if err := svc.Run(context.Background()); err != nil {
@@ -116,7 +116,7 @@ func TestServiceRun_ReturnsErrorOnInvalidSecretPattern(t *testing.T) {
 	cfg.RootDir = root
 	cfg.SecretPatterns = []string{"["}
 
-	svc := ingest.NewService(cfg, newMemoryStore())
+	svc := mustNewIngestService(t, cfg, newMemoryStore())
 	if err := svc.Run(context.Background()); err == nil {
 		t.Fatal("expected error for invalid secret pattern")
 	}
@@ -132,7 +132,7 @@ func TestServiceRun_ContextCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	svc := ingest.NewService(cfg, newMemoryStore())
+	svc := mustNewIngestService(t, cfg, newMemoryStore())
 	if err := svc.Run(ctx); err == nil {
 		t.Fatal("expected context cancellation error")
 	}
@@ -153,7 +153,7 @@ func TestProcessDocument_DocIDSetBeforeRepGeneration(t *testing.T) {
 	cfg.RootDir = root
 
 	st := newMemoryStore()
-	svc := ingest.NewService(cfg, st)
+	svc := mustNewIngestService(t, cfg, st)
 
 	// run a single scan by invoking Run; service will create raw text
 	// representation since memoryStore implements model.RepresentationStore.
@@ -179,7 +179,7 @@ func TestServiceRun_AudioGeneratesTranscriptRepresentation(t *testing.T) {
 	cfg.StateDir = filepath.Join(root, ".dir2mcp")
 
 	st := newMemoryStore()
-	svc := ingest.NewService(cfg, st)
+	svc := mustNewIngestService(t, cfg, st)
 	svc.SetTranscriber(&fakeTranscriber{text: "[00:00] hello\n[00:02] world"})
 
 	if err := svc.Run(context.Background()); err != nil {
@@ -222,7 +222,7 @@ func TestServiceRun_AudioTranscriberFailure_DoesNotFailRun(t *testing.T) {
 
 	st := newMemoryStore()
 	state := appstate.NewIndexingState(appstate.ModeIncremental)
-	svc := ingest.NewService(cfg, st)
+	svc := mustNewIngestService(t, cfg, st)
 	svc.SetIndexingState(state)
 	svc.SetTranscriber(errTranscriber{err: errors.New("provider down")})
 

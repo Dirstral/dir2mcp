@@ -21,6 +21,7 @@ import (
 	"syscall"
 	"time"
 
+	"dir2mcp/internal/buildinfo"
 	coreconfig "dir2mcp/internal/config"
 	"dir2mcp/internal/dirstral/config"
 	"dir2mcp/internal/dirstral/ui"
@@ -254,7 +255,8 @@ func Status() error {
 	}
 	fmt.Printf("%s pid=%d alive=%s\n", ui.Brand.Render("lighthouse:"), health.PID, aliveStr)
 
-	if health.MCPURL == "" {
+	safeEndpoint := sanitizeEndpointForLog(health.MCPURL)
+	if safeEndpoint == "" {
 		fmt.Printf("%s endpoint=%s reachable=%s mcp_ready=%s\n", ui.Brand.Render("lighthouse:"), ui.Dim("unknown"), ui.Red.Render("false"), ui.Red.Render("false"))
 		return fmt.Errorf("%w: endpoint unknown", errUnhealthy)
 	}
@@ -267,7 +269,7 @@ func Status() error {
 	if health.MCPReady {
 		readyStr = ui.Green.Render("true")
 	}
-	fmt.Printf("%s endpoint=%s reachable=%s mcp_ready=%s\n", ui.Brand.Render("lighthouse:"), ui.Cyan.Render(health.MCPURL), reachStr, readyStr)
+	fmt.Printf("%s endpoint=%s reachable=%s mcp_ready=%s\n", ui.Brand.Render("lighthouse:"), ui.Cyan.Render(safeEndpoint), reachStr, readyStr)
 	fmt.Printf("%s protocol=%s session_header=%s\n", ui.Brand.Render("lighthouse:"), ui.Cyan.Render(OrUnknown(health.ProtocolHeader)), ui.Cyan.Render(OrUnknown(health.SessionHeaderName)))
 	fmt.Printf("%s auth_source=%s\n", ui.Brand.Render("lighthouse:"), ui.Cyan.Render(OrUnknown(health.AuthSourceType)))
 	if health.AuthDiagnostic != "" {
@@ -294,6 +296,7 @@ func StatusRemote(ctx context.Context, endpoint string) error {
 	if endpoint == "" {
 		return fmt.Errorf("%w: remote endpoint is empty", errUnhealthy)
 	}
+	safeEndpoint := sanitizeEndpointForLog(endpoint)
 
 	reachable := endpointReachable(endpoint)
 	mcpReady := false
@@ -313,7 +316,7 @@ func StatusRemote(ctx context.Context, endpoint string) error {
 	if mcpReady {
 		readyStr = ui.Green.Render("true")
 	}
-	fmt.Printf("%s endpoint=%s reachable=%s mcp_ready=%s\n", ui.Brand.Render("lighthouse(remote):"), ui.Cyan.Render(endpoint), reachStr, readyStr)
+	fmt.Printf("%s endpoint=%s reachable=%s mcp_ready=%s\n", ui.Brand.Render("lighthouse(remote):"), ui.Cyan.Render(safeEndpoint), reachStr, readyStr)
 	if lastErr != "" {
 		fmt.Printf("%s detail=%s\n", ui.Brand.Render("lighthouse(remote):"), ui.Dim(lastErr))
 	}
@@ -347,6 +350,21 @@ func Down() error {
 	_ = ClearState()
 	fmt.Println(ui.Info("lighthouse:", fmt.Sprintf("stopped pid=%d", state.PID)))
 	return nil
+}
+
+func sanitizeEndpointForLog(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ""
+	}
+	u, err := url.Parse(trimmed)
+	if err != nil {
+		return trimmed
+	}
+	u.User = nil
+	u.RawQuery = ""
+	u.Fragment = ""
+	return u.String()
 }
 
 func SaveState(state State) error {
@@ -865,7 +883,7 @@ func initializeMCP(ctx context.Context, client *http.Client, endpoint, token str
 	body, status, headers, err := rpcCall(ctx, client, endpoint, token, "", true, protocol.RPCMethodInitialize, map[string]any{
 		"protocolVersion": coreconfig.DefaultProtocolVersion,
 		"capabilities":    map[string]any{"tools": map[string]any{}},
-		"clientInfo":      map[string]any{"name": "dirstral-lighthouse", "version": "0.1.0"},
+		"clientInfo":      map[string]any{"name": "dirstral-lighthouse", "version": buildinfo.Version},
 	})
 	if err != nil {
 		return "", fmt.Errorf("initialize failed: %w", err)
