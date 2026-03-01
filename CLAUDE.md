@@ -71,5 +71,3 @@ claude mcp add --transport stdio context7 -- npx -y @upstash/context7-mcp
   - `off`: disabled
   - `on`: fail-open on incomplete config
   - `required`: strict config validation/gating
-- `internal/retrieval/engine.go` `Ask()` is a stub returning an error — tracked in #70. Do not depend on it for retrieval; use `retrieval.Service` instead.
-- `retrieval.Service.Stats()` returns `ErrNotImplemented` — tracked in #71.
