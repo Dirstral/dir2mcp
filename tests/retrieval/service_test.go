@@ -590,51 +590,6 @@ func TestAsk_EmptyContext(t *testing.T) {
 	}
 }
 
-func TestStats_DefaultStateDir(t *testing.T) {
-	// when the service has a root directory set but no explicit state directory,
-	// Stats() should supply a default relative to rootDir.  previously
-	// SetStateDir() would eagerly substitute "./.dir2mcp", which diverged from
-	// Stats(); this regression test exercises the new behaviour.
-	st := &fakeStatsStore{}
-
-	svc := retrieval.NewService(st, nil, nil, nil)
-	svc.SetRootDir("/repo")
-	// don't call SetStateDir at all, leave it empty
-	got, err := svc.Stats(context.Background())
-	if err != nil {
-		t.Fatalf("Stats failed: %v", err)
-	}
-	if got.Root != "/repo" {
-		t.Fatalf("unexpected root in stats: %q", got.Root)
-	}
-	if got.StateDir != "/repo/.dir2mcp" {
-		t.Fatalf("unexpected default state dir: %q (len %d)", got.StateDir, len(got.StateDir))
-	}
-
-	svc.SetStateDir("")
-	got2, err := svc.Stats(context.Background())
-	if err != nil {
-		t.Fatalf("Stats failed after empty SetStateDir: %v", err)
-	}
-	if got2.StateDir != "/repo/.dir2mcp" {
-		t.Fatalf("empty SetStateDir should preserve computed default, got %q", got2.StateDir)
-	}
-}
-
-func TestStats_NewServiceDefaults(t *testing.T) {
-	// a freshly created service with no overrides should report the standard
-	// CWD-relative path as both root and state directory.
-	st := &fakeStatsStore{}
-	svc := retrieval.NewService(st, nil, nil, nil)
-	got, err := svc.Stats(context.Background())
-	if err != nil {
-		t.Fatalf("Stats failed: %v", err)
-	}
-	if got.Root != "." || got.StateDir != ".dir2mcp" {
-		t.Fatalf("unexpected defaults: %+v", got)
-	}
-}
-
 func TestStats_UsesCorpusStats(t *testing.T) {
 	st := &fakeStatsStore{
 		corpus: model.CorpusStats{

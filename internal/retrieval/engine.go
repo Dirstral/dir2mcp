@@ -21,15 +21,11 @@ type engineRetriever interface {
 	Ask(ctx context.Context, question string, query model.SearchQuery) (model.AskResult, error)
 }
 
-// ChunkMetadataSource lists embedded chunk metadata in paged form.
-type ChunkMetadataSource interface {
+type embeddedChunkMetadataSource interface {
 	ListEmbeddedChunkMetadata(ctx context.Context, indexKind string, limit, offset int) ([]model.ChunkTask, error)
 }
 
-const (
-	defaultEngineAskTimeout     = 120 * time.Second
-	defaultEnginePreloadTimeout = 30 * time.Second
-)
+const defaultEngineAskTimeout = 120 * time.Second
 
 // Engine provides a convenience wrapper around retrieval.Service for callers
 // that still rely on the legacy Engine API.
@@ -41,11 +37,7 @@ type Engine struct {
 }
 
 // NewEngine creates a retrieval engine backed by the on-disk state.
-func NewEngine(ctx context.Context, stateDir, rootDir string, cfg *config.Config) (*Engine, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-
+func NewEngine(stateDir, rootDir string, cfg *config.Config) (*Engine, error) {
 	effective := mergeEngineConfig(config.Default(), cfg)
 	if trimmed := strings.TrimSpace(stateDir); trimmed != "" {
 		effective.StateDir = trimmed
@@ -61,17 +53,14 @@ func NewEngine(ctx context.Context, stateDir, rootDir string, cfg *config.Config
 	}
 
 	metadataStore := store.NewSQLiteStore(filepath.Join(effective.StateDir, "meta.sqlite"))
-	if err := metadataStore.Init(ctx); err != nil && !errors.Is(err, model.ErrNotImplemented) {
+	if err := metadataStore.Init(context.Background()); err != nil && !errors.Is(err, model.ErrNotImplemented) {
 		_ = metadataStore.Close()
 		return nil, fmt.Errorf("initialize metadata store: %w", err)
 	}
 
 	textIndexPath := filepath.Join(effective.StateDir, "vectors_text.hnsw")
 	textIndex := index.NewHNSWIndex(textIndexPath)
-	// Load will default to the path supplied when the index was created,
-	// so we no longer need to pass the path explicitly.  Keeping the
-	// parameter here was redundant and confusing.
-	if err := textIndex.Load(""); err != nil && !errors.Is(err, model.ErrNotImplemented) && !errors.Is(err, os.ErrNotExist) {
+	if err := textIndex.Load(textIndexPath); err != nil && !errors.Is(err, model.ErrNotImplemented) && !errors.Is(err, os.ErrNotExist) {
 		_ = metadataStore.Close()
 		_ = textIndex.Close()
 		return nil, fmt.Errorf("load text index: %w", err)
@@ -79,8 +68,7 @@ func NewEngine(ctx context.Context, stateDir, rootDir string, cfg *config.Config
 
 	codeIndexPath := filepath.Join(effective.StateDir, "vectors_code.hnsw")
 	codeIndex := index.NewHNSWIndex(codeIndexPath)
-	// likewise for the code index.
-	if err := codeIndex.Load(""); err != nil && !errors.Is(err, model.ErrNotImplemented) && !errors.Is(err, os.ErrNotExist) {
+	if err := codeIndex.Load(codeIndexPath); err != nil && !errors.Is(err, model.ErrNotImplemented) && !errors.Is(err, os.ErrNotExist) {
 		_ = metadataStore.Close()
 		_ = textIndex.Close()
 		_ = codeIndex.Close()
@@ -98,10 +86,8 @@ func NewEngine(ctx context.Context, stateDir, rootDir string, cfg *config.Config
 	svc.SetStateDir(effective.StateDir)
 	svc.SetProtocolVersion(effective.ProtocolVersion)
 
-	if source, ok := interface{}(metadataStore).(ChunkMetadataSource); ok {
-		preloadCtx, cancel := context.WithTimeout(context.Background(), defaultEnginePreloadTimeout)
-		defer cancel()
-		total, err := preloadEngineChunkMetadata(preloadCtx, source, svc)
+	if source, ok := interface{}(metadataStore).(embeddedChunkMetadataSource); ok {
+		total, err := preloadEngineChunkMetadata(context.Background(), source, svc)
 		if err != nil {
 			_ = metadataStore.Close()
 			_ = textIndex.Close()
@@ -143,8 +129,6 @@ func mergeEngineConfig(base config.Config, override *config.Config) config.Confi
 	if v := strings.TrimSpace(override.ProtocolVersion); v != "" {
 		merged.ProtocolVersion = v
 	}
-	// Public is additive here because config.Config cannot distinguish an
-	// omitted bool from an explicit false override.
 	if override.Public {
 		merged.Public = true
 	}
@@ -277,13 +261,7 @@ func (e *Engine) Ask(question string, opts AskOptions) (*AskResult, error) {
 	}, nil
 }
 
-func preloadEngineChunkMetadata(ctx context.Context, source ChunkMetadataSource, ret *Service) (int, error) {
-	return PreloadChunkMetadata(ctx, source, ret)
-}
-
-// PreloadChunkMetadata hydrates retrieval metadata for already-embedded chunks.
-// It is shared by engine bootstrap and CLI bootstrap to keep behavior identical.
-func PreloadChunkMetadata(ctx context.Context, source ChunkMetadataSource, ret *Service) (int, error) {
+func preloadEngineChunkMetadata(ctx context.Context, source embeddedChunkMetadataSource, ret *Service) (int, error) {
 	if source == nil || ret == nil {
 		return 0, nil
 	}

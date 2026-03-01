@@ -297,9 +297,7 @@ func (s *Server) handleStatsTool(ctx context.Context, args map[string]interface{
 		Root:            s.cfg.RootDir,
 		StateDir:        s.cfg.StateDir,
 		ProtocolVersion: s.cfg.ProtocolVersion,
-		CorpusStats: model.CorpusStats{
-			DocCounts: map[string]int64{},
-		},
+		CorpusStats:     model.CorpusStats{DocCounts: map[string]int64{}},
 	}
 	statsFromRetriever := false
 	if s.retriever != nil {

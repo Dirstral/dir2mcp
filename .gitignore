@@ -31,7 +31,7 @@ coverage.out
 *.log
 
 # Local agent instructions
-AGENTS.md
+# the AGENTS.md file is intentionally tracked for repository documentation; remove it from ignore
 
 # IDE/editor local settings
 .vscode/

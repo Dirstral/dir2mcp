@@ -1,7 +1,6 @@
 package tests
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -23,7 +22,7 @@ func TestEngineAsk_WithEmptyIndexReturnsFallback(t *testing.T) {
 	cfg.MistralAPIKey = "test-api-key"
 	cfg.MistralBaseURL = server.URL
 
-	engine, err := retrieval.NewEngine(context.Background(), stateDir, rootDir, &cfg)
+	engine, err := retrieval.NewEngine(stateDir, rootDir, &cfg)
 	if err != nil {
 		t.Fatalf("NewEngine failed: %v", err)
 	}
@@ -55,7 +54,7 @@ func TestEngineAsk_RejectsEmptyQuestion(t *testing.T) {
 	cfg.MistralAPIKey = "test-api-key"
 	cfg.MistralBaseURL = server.URL
 
-	engine, err := retrieval.NewEngine(context.Background(), stateDir, rootDir, &cfg)
+	engine, err := retrieval.NewEngine(stateDir, rootDir, &cfg)
 	if err != nil {
 		t.Fatalf("NewEngine failed: %v", err)
 	}
@@ -112,9 +111,6 @@ func newFakeMistralEmbeddingServer() *httptest.Server {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(map[string]interface{}{"data": data}); err != nil {
-			// panic so the test fails fast if encoding unexpectedly fails
-			panic(err)
-		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": data})
 	}))
 }
