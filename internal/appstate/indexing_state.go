@@ -24,6 +24,7 @@ type IndexingSnapshot struct {
 	ChunksTotal     int64
 	EmbeddedOK      int64
 	Errors          int64
+	Unknown         int64
 }
 
 type IndexingState struct {

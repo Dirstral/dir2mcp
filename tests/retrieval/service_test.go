@@ -38,6 +38,16 @@ func (g *fakeGenerator) Generate(_ context.Context, _ string) (string, error) {
 // so callers can mutate safely.  Logic is intentionally identical to the real store
 // implementations exercised elsewhere in tests.
 func paginateDocs(docs []model.Document, limit, offset int) ([]model.Document, int64) {
+	// mirror store pagination logic; callers in tests rely on this behavior.  We
+	// defensively normalise inputs to avoid panics when a test accidentally
+	// passes a negative value.  Negative offsets clamp to 0 and negative limits
+	// behave like 0, resulting in empty slices.
+	if offset < 0 {
+		offset = 0
+	}
+	if limit < 0 {
+		limit = 0
+	}
 	total := int64(len(docs))
 	if offset >= len(docs) {
 		return []model.Document{}, total
@@ -47,6 +57,33 @@ func paginateDocs(docs []model.Document, limit, offset int) ([]model.Document, i
 		end = len(docs)
 	}
 	return append([]model.Document(nil), docs[offset:end]...), total
+}
+
+// simple regression checks against the defensive behaviour added above.
+func TestPaginateDocs_NegativeInputs(t *testing.T) {
+	docs := []model.Document{{RelPath: "a"}, {RelPath: "b"}}
+	out, total := paginateDocs(docs, -5, -3)
+	if total != 2 {
+		t.Errorf("expected total 2, got %d", total)
+	}
+	if len(out) != 0 {
+		t.Errorf("expected empty result for negative limit/offset, got %v", out)
+	}
+
+	out, _ = paginateDocs(docs, 1, -1)
+	if len(out) != 1 || out[0].RelPath != "a" {
+		t.Errorf("unexpected result for offset -1: %v", out)
+	}
+
+	out, _ = paginateDocs(docs, -1, 1)
+	if len(out) != 0 {
+		t.Errorf("expected empty slice for negative limit, got %v", out)
+	}
+
+	out, _ = paginateDocs(docs, 1, 5)
+	if len(out) != 0 {
+		t.Errorf("offset beyond len should return empty slice, got %v", out)
+	}
 }
 
 type fakeStatsStore struct {

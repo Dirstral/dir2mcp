@@ -195,6 +195,8 @@ For concreteness, the Bazaar/CDP discovery metadata specification (https://docs.
 }
 ```
 
+> **Note:** This snippet is a **simplified illustrative example** only and should not be treated as authoritative. Implementers must consult the full JSON Schema at https://docs.cdp.coinbase.com/x402/bazaar for all required fields and validation rules.
+
 ### Suggested endpoint descriptor fields
 - Service identity:
   - name, description, version

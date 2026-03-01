@@ -621,18 +621,27 @@ func setFileScalarValue(cfg *fileConfig, key, value string) error {
 	case "embed_model_code":
 		cfg.EmbedModelCode = strPtr(value)
 	case "session_inactivity_timeout":
+		if value == "" {
+			return nil
+		}
 		d, err := time.ParseDuration(value)
 		if err != nil {
 			return fmt.Errorf("invalid duration for %s", key)
 		}
 		cfg.SessionInactivityTimeout = &d
 	case "session_max_lifetime":
+		if value == "" {
+			return nil
+		}
 		d, err := time.ParseDuration(value)
 		if err != nil {
 			return fmt.Errorf("invalid duration for %s", key)
 		}
 		cfg.SessionMaxLifetime = &d
 	case "health_check_interval":
+		if value == "" {
+			return nil
+		}
 		d, err := time.ParseDuration(value)
 		if err != nil {
 			return fmt.Errorf("invalid duration for %s", key)

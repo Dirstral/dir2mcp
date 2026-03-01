@@ -24,6 +24,9 @@ func TestSessionSweepInterval(t *testing.T) {
 		{
 			name: "defaults",
 			// leave both values at whatever config.Default() gives us
+			// config.Default() sets SessionInactivityTimeout=1h and
+			// SessionMaxLifetime=24h, so the sweep interval is
+			// min(24h,1h)/2 == 30m.
 			want: 30 * time.Minute, // min(24h, 1h)/2
 		},
 		{
@@ -43,7 +46,7 @@ func TestSessionSweepInterval(t *testing.T) {
 			want:           5 * time.Minute, // maxLifetime/2
 		},
 		{
-			name:           "floorApplied",
+			name:           "floor applied",
 			setInactivity:  true,
 			inactivity:     1500 * time.Millisecond,
 			setMaxLifetime: true,
@@ -64,7 +67,10 @@ func TestSessionSweepInterval(t *testing.T) {
 			inactivity:     0,
 			setMaxLifetime: true,
 			maxLifetime:    1 * time.Second,
-			want:           time.Second, // half of 1s floored
+			// inactivity is 0 so we fall back to maxLifetime (1s). half of
+			// that is 500ms, which gets floored/upgraded to the minimum floor
+			// (1s) in sessionSweepInterval, hence want=1s.
+			want: time.Second,
 		},
 	}
 

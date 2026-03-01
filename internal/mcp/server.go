@@ -631,7 +631,7 @@ func (s *Server) runSessionCleanup(ctx context.Context) {
 func (s *Server) sessionSweepInterval() time.Duration {
 	inactivity, maxLife := s.resolveSessionTimeouts()
 	sweep := sessionCleanupInterval
-	if inactivity > 0 && inactivity < sweep {
+	if inactivity < sweep {
 		sweep = inactivity
 	}
 	if maxLife > 0 && maxLife < sweep {

@@ -107,6 +107,17 @@ func TestBuildCorpusSnapshot_StatusCountsFallback(t *testing.T) {
 	if snap.DocCounts["code"] != 1 {
 		t.Errorf("expected code count=1, got %d", snap.DocCounts["code"])
 	}
+	// verify counts for all types present in our fake store; deleted docs
+	// should not be included (see earlier expectation of TotalDocs=5).
+	if snap.DocCounts["md"] != 2 {
+		t.Errorf("expected md count=2, got %d", snap.DocCounts["md"])
+	}
+	if snap.DocCounts["txt"] != 1 {
+		t.Errorf("expected txt count=1, got %d", snap.DocCounts["txt"])
+	}
+	if snap.DocCounts["other"] != 1 {
+		t.Errorf("expected other count=1, got %d", snap.DocCounts["other"])
+	}
 
 	// status-derived indexing snapshot should reflect our test documents
 	// we added six documents above, including one deleted one. scanned

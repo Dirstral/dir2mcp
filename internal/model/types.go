@@ -168,6 +168,7 @@ type CorpusStats struct {
 	ChunksTotal     int64            `json:"chunks_total"`
 	EmbeddedOK      int64            `json:"embedded_ok"`
 	Errors          int64            `json:"errors"`
+	Unknown         int64            `json:"unknown"`
 }
 
 // MarshalJSON ensures that a nil DocCounts map is encoded as an empty object

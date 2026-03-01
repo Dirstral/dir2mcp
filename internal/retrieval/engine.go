@@ -41,14 +41,12 @@ type Engine struct {
 
 // NewEngine creates a retrieval engine backed by the on-disk state.
 //
-// If the provided ctx is nil, it will be replaced with
-// context.Background(). Callers may pass a non-nil context
-// (for example, context.Background() or context.TODO()) to
-// control cancellation or deadlines. The function is lenient
-// but documents this behavior explicitly so callers are aware.
+// ctx must be non-nil; pass context.Background() or context.TODO() if no
+// cancellation or deadline is needed. NewEngine returns an error immediately
+// if ctx is nil.
 func NewEngine(ctx context.Context, stateDir, rootDir string, cfg *config.Config) (*Engine, error) {
 	if ctx == nil {
-		ctx = context.Background()
+		return nil, fmt.Errorf("nil context passed to NewEngine")
 	}
 
 	effective := mergeEngineConfig(config.Default(), cfg)

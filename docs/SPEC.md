@@ -1001,19 +1001,16 @@ All schemas are JSON Schema (draft-agnostic, compatible with common validators).
   "type": "object",
   "oneOf": [
     {
-      "type": "object",
       "additionalProperties": false,
       "properties": { "kind": { "const": "lines" }, "start_line": { "type": "integer" }, "end_line": { "type": "integer" } },
       "required": ["kind", "start_line", "end_line"]
     },
     {
-      "type": "object",
       "additionalProperties": false,
       "properties": { "kind": { "const": "page" }, "page": { "type": "integer" } },
       "required": ["kind", "page"]
     },
     {
-      "type": "object",
       "additionalProperties": false,
       "properties": { "kind": { "const": "time" }, "start_ms": { "type": "integer" }, "end_ms": { "type": "integer" } },
       "required": ["kind", "start_ms", "end_ms"]

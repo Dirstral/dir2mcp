@@ -59,6 +59,7 @@ func TestStatsJSONFlattening(t *testing.T) {
 		"chunks_total",
 		"embedded_ok",
 		"errors",
+		"unknown",
 	}
 	for _, key := range expected {
 		if _, ok := out[key]; !ok {

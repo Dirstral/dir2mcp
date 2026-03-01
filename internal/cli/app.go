@@ -232,6 +232,7 @@ type corpusIndexing struct {
 	ChunksTotal     int64  `json:"chunks_total"`
 	EmbeddedOK      int64  `json:"embedded_ok"`
 	Errors          int64  `json:"errors"`
+	Unknown         int64  `json:"unknown"`
 }
 
 func NewApp() *App {
@@ -897,7 +898,7 @@ func (a *App) runStatus(ctx context.Context, global globalOptions, args []string
 	writef(a.stdout, "Timestamp: %s\n", snapshot.Timestamp)
 	writeln(a.stdout)
 	writeln(a.stdout, "Indexing:")
-	writef(a.stdout, "  mode=%s running=%t scanned=%d indexed=%d skipped=%d deleted=%d reps=%d chunks=%d embedded=%d errors=%d\n",
+	writef(a.stdout, "  mode=%s running=%t scanned=%d indexed=%d skipped=%d deleted=%d reps=%d chunks=%d embedded=%d errors=%d unknown=%d\n",
 		snapshot.Indexing.Mode,
 		snapshot.Indexing.Running,
 		snapshot.Indexing.Scanned,
@@ -908,6 +909,7 @@ func (a *App) runStatus(ctx context.Context, global globalOptions, args []string
 		snapshot.Indexing.ChunksTotal,
 		snapshot.Indexing.EmbeddedOK,
 		snapshot.Indexing.Errors,
+		snapshot.Indexing.Unknown,
 	)
 	writef(a.stdout, "Documents: total=%d code_ratio=%.4f\n", snapshot.TotalDocs, snapshot.CodeRatio)
 	if len(snapshot.DocCounts) > 0 {
@@ -1825,6 +1827,7 @@ func buildCorpusSnapshot(ctx context.Context, st model.Store, indexingState *app
 		idx.ChunksTotal = corpusStats.ChunksTotal
 		idx.EmbeddedOK = corpusStats.EmbeddedOK
 		idx.Errors = corpusStats.Errors
+		idx.Unknown = corpusStats.Unknown
 	}
 
 	return corpusSnapshot{
@@ -1840,6 +1843,7 @@ func buildCorpusSnapshot(ctx context.Context, st model.Store, indexingState *app
 			ChunksTotal:     idx.ChunksTotal,
 			EmbeddedOK:      idx.EmbeddedOK,
 			Errors:          idx.Errors,
+			Unknown:         idx.Unknown,
 		},
 		DocCounts: docCounts,
 		TotalDocs: totalDocs,
@@ -1887,6 +1891,7 @@ func collectCorpusStats(ctx context.Context, st model.Store, stderr io.Writer, e
 		ChunksTotal:     -1,
 		EmbeddedOK:      -1,
 		Errors:          statusCounts.Errors,
+		Unknown:         statusCounts.Unknown,
 	}, nil
 }
 
@@ -1940,6 +1945,7 @@ type documentStatusCounts struct {
 	Skipped int64
 	Deleted int64
 	Errors  int64
+	Unknown int64
 }
 
 func collectDocumentStatusCounts(ctx context.Context, st model.Store, stderr io.Writer, emitter *ndjsonEmitter) (documentStatusCounts, error) {
@@ -1977,6 +1983,7 @@ func collectDocumentStatusCounts(ctx context.Context, st model.Store, stderr io.
 				if rawStatus == "" {
 					rawStatus = "<empty>"
 				}
+				counts.Unknown++
 				unexpectedStatusCounts[rawStatus]++
 				if _, exists := unexpectedStatusExample[rawStatus]; !exists {
 					unexpectedStatusExample[rawStatus] = strings.TrimSpace(doc.RelPath)

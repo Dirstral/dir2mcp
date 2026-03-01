@@ -107,25 +107,40 @@ func TestSaveFile_WritesNonSecretYAML(t *testing.T) {
 }
 
 func TestSaveFile_RejectsInvalidConfig(t *testing.T) {
-	tmp := t.TempDir()
-	path := filepath.Join(tmp, ".dir2mcp.yaml")
-
-	cfg := config.Default()
-	cfg.SessionInactivityTimeout = -1 * time.Second
-	if err := config.SaveFile(path, cfg); err == nil {
-		t.Fatal("expected error saving invalid config, got nil")
-	} else if !strings.Contains(err.Error(), "validate config") {
-		t.Fatalf("unexpected error: %v", err)
+	tests := []struct {
+		name string
+		cfg  config.Config
+	}{
+		{
+			name: "negative-inactivity",
+			cfg: func() config.Config {
+				c := config.Default()
+				c.SessionInactivityTimeout = -1 * time.Second
+				return c
+			}(),
+		},
+		{
+			name: "max-lifetime-shorter-than-inactivity",
+			cfg: func() config.Config {
+				c := config.Default()
+				c.SessionInactivityTimeout = 10 * time.Minute
+				c.SessionMaxLifetime = 5 * time.Minute
+				return c
+			}(),
+		},
 	}
 
-	// also test that max lifetime shorter than inactivity triggers validation
-	cfg = config.Default()
-	cfg.SessionInactivityTimeout = 10 * time.Minute
-	cfg.SessionMaxLifetime = 5 * time.Minute
-	if err := config.SaveFile(path, cfg); err == nil {
-		t.Fatal("expected error when max lifetime < inactivity timeout")
-	} else if !strings.Contains(err.Error(), "validate config") {
-		t.Fatalf("unexpected error: %v", err)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			path := filepath.Join(tmp, ".dir2mcp.yaml")
+			cfg := tc.cfg
+			if err := config.SaveFile(path, cfg); err == nil {
+				t.Fatal("expected error saving invalid config, got nil")
+			} else if !strings.Contains(err.Error(), "validate config") {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
 	}
 }
 

@@ -63,10 +63,8 @@ func newTestEngine(t *testing.T) *retrieval.Engine {
 	if err != nil {
 		t.Fatalf("NewEngine failed: %v", err)
 	}
-	// call Close inside a closure; the method currently returns no error
-	t.Cleanup(func() {
-		engine.Close()
-	})
+	// Close currently returns no error, so we can pass it directly to Cleanup
+	t.Cleanup(engine.Close)
 
 	return engine
 }

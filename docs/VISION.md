@@ -129,7 +129,7 @@ Minimum contract:
 - must support connector authentication in this preference order: mTLS, bearer token/API key, then HTTP Basic Auth (legacy only)
 - must support secure credential storage (environment variables preferred; encrypted config files allowed); plaintext credentials in committed config are not allowed
 - must support credential rotation without process restart
-- must enforce TLS 1.2+ with certificate validation; self-signed certificates are disallowed in production
+- must enforce TLS 1.2+ with certificate validation; self-signed certificates are disallowed in production by default — **exception**: air-gapped or regulated environments may use self-signed or internally-issued certificates provided they are validated against a configured trusted internal root CA (via certificate pinning or a configurable trusted CA bundle); this exception requires strict certificate validation (no hostname suppression, no skip-verify), documented key-rotation procedures, and explicit opt-in configuration; any use of internally-issued certificates must be documented in the deployment configuration
 - must expose configurable model selection and resource limits (timeouts, concurrency, memory/throughput caps)
 	- recommended defaults (baseline):
 		- timeout: `embed=10s`, `ocr=60s`, `transcribe=120s`
@@ -210,11 +210,21 @@ Canonical example:
 }
 ```
 
+### Envelope-specific error codes
+
+Codes specifically used by metadata envelope parsers; refer to parser
+requirements earlier in this section for usage context.
+
+- `ENVELOPE_MALFORMED_JSON (2003)` – JSON syntax error in metadata envelope.
+- `ENVELOPE_REQUIRED_FIELD_MISSING (2004)` – required field absent.
+- `ENVELOPE_REQUIRED_FIELD_TYPE_INVALID (2005)` – field present but wrong type.
+- `ENVELOPE_CONSTRAINT_VIOLATION (2006)` – numeric constraint violation.
+
 Parser requirements:
-- connectors must return valid JSON for metadata envelopes; malformed JSON must produce structured connector errors (recommended: `ENVELOPE_MALFORMED_JSON (2003)`; see §"Envelope-specific error codes" below)
-- missing required fields (`provider`, `model`, `version`, `latency_ms`, `trace_or_request_id`) must produce `ENVELOPE_REQUIRED_FIELD_MISSING (2004)` (see §"Envelope-specific error codes" below); `CONFIG_MISSING (2002)` is reserved for global connector configuration errors, not per-envelope missing fields
-- required-field type mismatches (for example `latency_ms` not numeric, `provider` not string) must produce a structured connector error (recommended: `ENVELOPE_REQUIRED_FIELD_TYPE_INVALID (2005)`; see §"Envelope-specific error codes" below)
-- numeric constraint violations (for example negative `latency_ms`, negative values in `token_or_compute_usage`) must produce validation errors (recommended: `ENVELOPE_CONSTRAINT_VIOLATION (2006)`; see §"Envelope-specific error codes" below)
+- connectors must return valid JSON for metadata envelopes; malformed JSON must produce structured connector errors (recommended: `ENVELOPE_MALFORMED_JSON (2003)`; see §"Envelope-specific error codes" above)
+- missing required fields (`provider`, `model`, `version`, `latency_ms`, `trace_or_request_id`) must produce `ENVELOPE_REQUIRED_FIELD_MISSING (2004)` (see §"Envelope-specific error codes" above); `CONFIG_MISSING (2002)` is reserved for global connector configuration errors, not per-envelope missing fields
+- required-field type mismatches (for example `latency_ms` not numeric, `provider` not string) must produce a structured connector error (recommended: `ENVELOPE_REQUIRED_FIELD_TYPE_INVALID (2005)`; see §"Envelope-specific error codes" above)
+- numeric constraint violations (for example negative `latency_ms`, negative values in `token_or_compute_usage`) must produce validation errors (recommended: `ENVELOPE_CONSTRAINT_VIOLATION (2006)`; see §"Envelope-specific error codes" above)
 - unexpected additional fields must be ignored for forward compatibility and must not fail parsing
 
 ### Connector error taxonomy (deterministic, machine-parseable)
@@ -241,16 +251,6 @@ Reserved code ranges:
 - `2000-2999`: auth/config failures
 	- `AUTH_INVALID_CREDENTIALS (2001)`
 	- `CONFIG_MISSING (2002)`
-
-### Envelope-specific error codes
-
-Codes specifically used by metadata envelope parsers; refer to parser
-requirements earlier in this section for usage context.
-
-- `ENVELOPE_MALFORMED_JSON (2003)` – JSON syntax error in metadata envelope.
-- `ENVELOPE_REQUIRED_FIELD_MISSING (2004)` – required field absent.
-- `ENVELOPE_REQUIRED_FIELD_TYPE_INVALID (2005)` – field present but wrong type.
-- `ENVELOPE_CONSTRAINT_VIOLATION (2006)` – numeric constraint violation.
 
 - `3000-3999`: capability unavailable failures
 	- `CAPABILITY_NOT_SUPPORTED (3001)`
