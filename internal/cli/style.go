@@ -114,7 +114,8 @@ func (s styles) kv(key, value string) string {
 	)
 }
 
-// sectionHeader formats a section header with a separator line.
+// sectionHeader returns the rendered title when styles are enabled,
+// otherwise it returns the plain title.
 func (s styles) sectionHeader(title string) string {
 	if !s.enabled {
 		return title

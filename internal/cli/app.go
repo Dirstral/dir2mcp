@@ -64,7 +64,7 @@ type App struct {
 	newStore     func(config.Config) model.Store
 	newRetriever func(config.Config, model.Store) model.Retriever
 
-	cachedStyles *styles
+	cachedStyles map[bool]*styles
 }
 
 type indexingStateAware interface {
@@ -229,10 +229,15 @@ func writeln(out io.Writer, args ...interface{}) {
 // Pass jsonMode=true to disable colors even when stdout is a TTY.
 func (a *App) sty(jsonMode bool) styles {
 	if a.cachedStyles != nil {
-		return *a.cachedStyles
+		if cached, ok := a.cachedStyles[jsonMode]; ok && cached != nil {
+			return *cached
+		}
+	}
+	if a.cachedStyles == nil {
+		a.cachedStyles = make(map[bool]*styles, 2)
 	}
 	s := newStyles(a.stdout, jsonMode)
-	a.cachedStyles = &s
+	a.cachedStyles[jsonMode] = &s
 	return s
 }
 
