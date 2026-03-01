@@ -105,12 +105,17 @@ func (s *Server) handleToolsCallRequest(ctx context.Context, w http.ResponseWrit
 func (s *Server) handlePaymentFailure(w http.ResponseWriter, id interface{}, operation string, err error) {
 	facErr, ok := err.(*x402.FacilitatorError)
 	if !ok {
+		code := x402.CodePaymentFacilitatorUnavailable
+		if operation == "settle" {
+			code = x402.CodePaymentSettlementUnavailable
+		}
 		facErr = &x402.FacilitatorError{
-			Operation: operation,
-			Code:      x402.CodePaymentFacilitatorUnavailable,
-			Message:   "payment processing failed",
-			Retryable: true,
-			Cause:     err,
+			Operation:  operation,
+			StatusCode: http.StatusServiceUnavailable,
+			Code:       code,
+			Message:    "payment processing failed",
+			Retryable:  true,
+			Cause:      err,
 		}
 	}
 
@@ -176,6 +181,7 @@ func (s *Server) appendPaymentLog(event string, data map[string]interface{}) {
 		return
 	}
 	if err := os.MkdirAll(filepath.Dir(s.paymentLogPath), 0o755); err != nil {
+		s.emitPaymentLogWarning(err)
 		return
 	}
 	entry := map[string]interface{}{
@@ -185,14 +191,31 @@ func (s *Server) appendPaymentLog(event string, data map[string]interface{}) {
 	}
 	raw, err := json.Marshal(entry)
 	if err != nil {
+		s.emitPaymentLogWarning(err)
 		return
 	}
 	f, err := os.OpenFile(s.paymentLogPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
+		s.emitPaymentLogWarning(err)
 		return
 	}
-	defer func() {
-		_ = f.Close()
-	}()
-	_, _ = fmt.Fprintf(f, "%s\n", raw)
+
+	if _, err := fmt.Fprintf(f, "%s\n", raw); err != nil {
+		s.emitPaymentLogWarning(err)
+	}
+	if err := f.Close(); err != nil {
+		s.emitPaymentLogWarning(err)
+	}
+}
+
+func (s *Server) emitPaymentLogWarning(err error) {
+	if err == nil {
+		return
+	}
+	s.emitPaymentEvent("warning", "payment_log_write_failed", map[string]interface{}{
+		"level": "warning",
+		"msg":   "payment log write failed",
+		"path":  s.paymentLogPath,
+		"err":   err.Error(),
+	})
 }
