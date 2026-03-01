@@ -526,7 +526,36 @@ func renderTranscribeString(sc map[string]any) string {
 			b.WriteString("\n")
 		}
 	} else {
-		b.WriteString("Transcription complete.")
+		text := asString(sc["text"])
+		if text == "" {
+			text = asString(sc["transcript"])
+		}
+		timeRange := ""
+		if start, ok := sc["start"]; ok {
+			timeRange = formatTime(start)
+			if end, ok := sc["end"]; ok {
+				timeRange += "-" + formatTime(end)
+			}
+		} else if t, ok := sc["time"]; ok {
+			timeRange = formatTime(t)
+		}
+
+		citation := ""
+		if span, ok := sc["span"].(map[string]any); ok {
+			citation = mcp.CitationForSpan(path, span)
+		}
+
+		if text != "" || citation != "" || timeRange != "" {
+			if timeRange != "" {
+				fmt.Fprintf(&b, "%s ", ui.Dim(timeRange))
+			}
+			b.WriteString(text)
+			if citation != "" {
+				fmt.Fprintf(&b, " %s", ui.Cyan.Render(citation))
+			}
+		} else {
+			b.WriteString("Transcription complete.")
+		}
 	}
 	return strings.TrimSpace(b.String())
 }
