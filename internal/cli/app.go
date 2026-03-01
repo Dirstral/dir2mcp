@@ -85,6 +85,10 @@ type activeDocCountStore interface {
 	ActiveDocCounts(ctx context.Context) (map[string]int64, int64, error)
 }
 
+type corpusStatsStore interface {
+	CorpusStats(ctx context.Context) (model.CorpusStats, error)
+}
+
 type RuntimeHooks struct {
 	NewIngestor  func(config.Config, model.Store) model.Ingestor
 	NewStore     func(config.Config) model.Store
@@ -519,6 +523,8 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	ret := retrieval.NewService(st, textIx, client, client)
 	ret.SetCodeIndex(codeIx)
 	ret.SetRootDir(cfg.RootDir)
+	ret.SetStateDir(cfg.StateDir)
+	ret.SetProtocolVersion(cfg.ProtocolVersion)
 
 	// events are emitted to stdout only after we create the emitter; moving
 	// creation before the preload call lets us report failures from that
@@ -1215,6 +1221,8 @@ func (a *App) buildRetrieverForAsk(ctx context.Context, cfg config.Config, st mo
 	ret := retrieval.NewService(st, textIx, client, client)
 	ret.SetCodeIndex(codeIx)
 	ret.SetRootDir(cfg.RootDir)
+	ret.SetStateDir(cfg.StateDir)
+	ret.SetProtocolVersion(cfg.ProtocolVersion)
 
 	if metadataStore, ok := st.(embeddedChunkLister); ok {
 		if _, err := preloadEmbeddedChunkMetadata(ctx, metadataStore, ret); err != nil && !errors.Is(err, model.ErrNotImplemented) {
@@ -1777,11 +1785,13 @@ func writeCorpusSnapshot(ctx context.Context, stateDir string, st model.Store, i
 }
 
 func buildCorpusSnapshot(ctx context.Context, st model.Store, indexingState *appstate.IndexingState) (corpusSnapshot, error) {
-	docCounts, totalDocs, err := collectActiveDocCounts(ctx, st)
+	corpusStats, err := collectCorpusStats(ctx, st)
 	if err != nil {
 		return corpusSnapshot{}, err
 	}
 
+	docCounts := corpusStats.DocCounts
+	totalDocs := corpusStats.TotalDocs
 	codeDocs := docCounts["code"]
 	codeRatio := 0.0
 	if totalDocs > 0 {
@@ -1791,6 +1801,15 @@ func buildCorpusSnapshot(ctx context.Context, st model.Store, indexingState *app
 	idx := appstate.IndexingSnapshot{Mode: appstate.ModeIncremental}
 	if indexingState != nil {
 		idx = indexingState.Snapshot()
+	} else {
+		idx.Scanned = corpusStats.Scanned
+		idx.Indexed = corpusStats.Indexed
+		idx.Skipped = corpusStats.Skipped
+		idx.Deleted = corpusStats.Deleted
+		idx.Representations = corpusStats.Representations
+		idx.ChunksTotal = corpusStats.ChunksTotal
+		idx.EmbeddedOK = corpusStats.EmbeddedOK
+		idx.Errors = corpusStats.Errors
 	}
 
 	return corpusSnapshot{
@@ -1810,6 +1829,45 @@ func buildCorpusSnapshot(ctx context.Context, st model.Store, indexingState *app
 		DocCounts: docCounts,
 		TotalDocs: totalDocs,
 		CodeRatio: codeRatio,
+	}, nil
+}
+
+func collectCorpusStats(ctx context.Context, st model.Store) (model.CorpusStats, error) {
+	if st == nil {
+		return model.CorpusStats{DocCounts: map[string]int64{}}, nil
+	}
+
+	if agg, ok := st.(corpusStatsStore); ok {
+		stats, err := agg.CorpusStats(ctx)
+		if err == nil {
+			if stats.DocCounts == nil {
+				stats.DocCounts = map[string]int64{}
+			}
+			return stats, nil
+		}
+		if !errors.Is(err, model.ErrNotImplemented) {
+			return model.CorpusStats{}, fmt.Errorf("corpus stats: %w", err)
+		}
+	}
+
+	docCounts, totalDocs, err := collectActiveDocCounts(ctx, st)
+	if err != nil {
+		return model.CorpusStats{}, err
+	}
+
+	statusCounts, err := collectDocumentStatusCounts(ctx, st)
+	if err != nil {
+		return model.CorpusStats{}, err
+	}
+
+	return model.CorpusStats{
+		DocCounts: docCounts,
+		TotalDocs: totalDocs,
+		Scanned:   statusCounts.Scanned,
+		Indexed:   statusCounts.Indexed,
+		Skipped:   statusCounts.Skipped,
+		Deleted:   statusCounts.Deleted,
+		Errors:    statusCounts.Errors,
 	}, nil
 }
 
@@ -1855,6 +1913,54 @@ func collectActiveDocCounts(ctx context.Context, st model.Store) (map[string]int
 	}
 
 	return counts, totalActive, nil
+}
+
+type documentStatusCounts struct {
+	Scanned int64
+	Indexed int64
+	Skipped int64
+	Deleted int64
+	Errors  int64
+}
+
+func collectDocumentStatusCounts(ctx context.Context, st model.Store) (documentStatusCounts, error) {
+	if st == nil {
+		return documentStatusCounts{}, nil
+	}
+
+	const pageSize = 500
+	offset := 0
+	counts := documentStatusCounts{}
+
+	for {
+		docs, total, err := st.ListFiles(ctx, "", "", pageSize, offset)
+		if err != nil {
+			return documentStatusCounts{}, fmt.Errorf("list files: %w", err)
+		}
+		for _, doc := range docs {
+			counts.Scanned++
+			if doc.Deleted {
+				counts.Deleted++
+				continue
+			}
+
+			switch strings.ToLower(strings.TrimSpace(doc.Status)) {
+			case "skipped":
+				counts.Skipped++
+			case "error":
+				counts.Errors++
+			default:
+				counts.Indexed++
+			}
+		}
+
+		offset += len(docs)
+		if len(docs) == 0 || int64(offset) >= total {
+			break
+		}
+	}
+
+	return counts, nil
 }
 
 func (e *ndjsonEmitter) Emit(level, event string, data interface{}) {
