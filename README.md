@@ -156,6 +156,125 @@ ElevenLabs integrations should read `ELEVENLABS_API_KEY` and `ELEVENLABS_BASE_UR
 
 `DIR2MCP_ALLOWED_ORIGINS` appends extra allowed origins for browser requests while keeping localhost defaults (`http://localhost`, `http://127.0.0.1`) enabled.
 
+## Public deployment hardening (Issue #59)
+
+### `--public` behavior and auth requirements
+
+- `./dir2mcp up --public` sets `public=true` and (when `--listen` is not provided) binds to `0.0.0.0:<port>`.
+- `--public` with `--auth none` is blocked by default:
+  - `ERROR: CONFIG_INVALID: --public requires auth. Use --auth auto or --force-insecure to override (unsafe).`
+- `--auth auto` is the secure default for public exposure:
+  - if `DIR2MCP_AUTH_TOKEN` is set, that token is used
+  - otherwise a token is generated/stored at `.dir2mcp/secret.token`
+- Allowed origins are deny-by-default except local development origins (`http://localhost`, `http://127.0.0.1`).
+  Add hosted browser origins explicitly with `DIR2MCP_ALLOWED_ORIGINS` or `--allowed-origins`.
+
+### Deployment pattern (Cloudflare Tunnel)
+
+#### Cloudflare Tunnel
+
+You can publish an HTTPS hostname through Cloudflare Tunnel while keeping MCP on a private local listener.
+
+```yaml
+tunnel: dir2mcp-prod
+credentials-file: /etc/cloudflared/dir2mcp-prod.json
+ingress:
+  - hostname: mcp.example.com
+    service: http://127.0.0.1:8080
+  - service: http_status:404
+```
+
+Recommended hardening with tunnel deployments:
+
+- keep MCP auth enabled (`--auth auto` or `--auth file:<path>`)
+- keep origin allowlist minimal (`https://elevenlabs.io` plus your own hosted app domains)
+- avoid `--force-insecure` for any internet-reachable endpoint
+
+### Remote MCP verification checklist (local/reproducible)
+
+Start server:
+
+```bash
+export MISTRAL_API_KEY=your_key_here
+export DIR2MCP_ALLOWED_ORIGINS=https://elevenlabs.io
+./dir2mcp up --public --auth auto --listen 0.0.0.0:8080
+```
+
+Prepare endpoint + token:
+
+```bash
+BASE_URL="https://mcp.example.com/mcp"
+TOKEN="${DIR2MCP_AUTH_TOKEN:-$(cat .dir2mcp/secret.token)}"
+```
+
+1. Initialize and capture `MCP-Session-Id`:
+
+```bash
+INIT_HEADERS="$(mktemp)"
+INIT_BODY="$(mktemp)"
+curl -sS -D "$INIT_HEADERS" -o "$INIT_BODY" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "MCP-Protocol-Version: 2025-11-25" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+  "$BASE_URL"
+
+SESSION_ID="$(awk -F': ' 'BEGIN{IGNORECASE=1} /^MCP-Session-Id:/{gsub("\r","",$2); print $2; exit}' "$INIT_HEADERS")"
+test -n "$SESSION_ID"
+```
+
+2. Verify tool discovery (`tools/list`):
+
+```bash
+curl -sS \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "MCP-Protocol-Version: 2025-11-25" \
+  -H "MCP-Session-Id: $SESSION_ID" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
+  "$BASE_URL"
+```
+
+Expected: JSON-RPC success response containing `dir2mcp.*` tool names.
+
+3. Verify tool call success (`dir2mcp.stats`):
+
+```bash
+curl -sS \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "MCP-Protocol-Version: 2025-11-25" \
+  -H "MCP-Session-Id: $SESSION_ID" \
+  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"dir2mcp.stats","arguments":{}}}' \
+  "$BASE_URL"
+```
+
+Expected: JSON-RPC success response with `result` payload from `dir2mcp.stats`.
+
+### Remote MCP verification checklist (ElevenLabs hosted)
+
+1. Configure MCP server URL to your public HTTPS endpoint (including the exact MCP path, typically `/mcp`).
+2. Configure `Authorization: Bearer <token>` in ElevenLabs MCP connector settings.
+3. Ensure hosted origin(s) are allowlisted:
+   - minimum: `DIR2MCP_ALLOWED_ORIGINS=https://elevenlabs.io`
+4. From the ElevenLabs side, verify:
+   - tool discovery succeeds
+   - one tool call (for example `dir2mcp.stats`) succeeds
+5. Check server output/logs for:
+   - no `UNAUTHORIZED` errors
+   - no `FORBIDDEN_ORIGIN` errors
+   - successful MCP calls on the expected route path
+
+### Troubleshooting
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| `401` with `UNAUTHORIZED` | Missing/invalid Bearer token | Send `Authorization: Bearer <token>`. If using `--auth auto`, verify `DIR2MCP_AUTH_TOKEN` or `.dir2mcp/secret.token`. |
+| `403` with `FORBIDDEN_ORIGIN` | Hosted origin not allowlisted | Add origin via `DIR2MCP_ALLOWED_ORIGINS` or `--allowed-origins`, then restart server. |
+| `404` / `405` / method mismatch | Wrong MCP path or HTTP method | Use `POST` against exact MCP route (`/mcp` unless overridden by `--mcp-path`). |
+| Session-related request errors | Missing or stale `MCP-Session-Id` | Run `initialize` first, then pass returned `MCP-Session-Id` for subsequent calls. |
+| Browser preflight appears successful but call still blocked | Disallowed origin receives no CORS allow-origin header | Check response headers; add exact origin to allowlist and retry. |
+
 ## Local `.env` support
 
 For local development, `dir2mcp` automatically reads `.env` and `.env.local` from the working directory.
