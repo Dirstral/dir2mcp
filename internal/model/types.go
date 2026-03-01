@@ -154,10 +154,25 @@ type AskResult struct {
 	IndexingComplete bool
 }
 
+type CorpusStats struct {
+	DocCounts       map[string]int64
+	TotalDocs       int64
+	Scanned         int64
+	Indexed         int64
+	Skipped         int64
+	Deleted         int64
+	Representations int64
+	ChunksTotal     int64
+	EmbeddedOK      int64
+	Errors          int64
+}
+
 type Stats struct {
 	Root            string
 	StateDir        string
 	ProtocolVersion string
+	DocCounts       map[string]int64
+	TotalDocs       int64
 	Scanned         int64
 	Indexed         int64
 	Skipped         int64
