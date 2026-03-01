@@ -9,6 +9,7 @@ import (
 
 	"dir2mcp/internal/config"
 	"dir2mcp/internal/mcp"
+	"dir2mcp/internal/protocol"
 )
 
 func TestRateLimit_NotActiveWhenServerIsNotPublic(t *testing.T) {
@@ -48,7 +49,7 @@ func TestRateLimit_ExceedingLimitReturns429AndRetryAfter(t *testing.T) {
 	if second.Header().Get("Retry-After") != "1" {
 		t.Fatalf("Retry-After=%q want=%q", second.Header().Get("Retry-After"), "1")
 	}
-	assertCanonicalErrorCode(t, second.Body.Bytes(), "RATE_LIMIT_EXCEEDED")
+	assertCanonicalErrorCode(t, second.Body.Bytes(), protocol.ErrorCodeRateLimited)
 }
 
 func TestRateLimit_TrafficBelowLimitPasses(t *testing.T) {

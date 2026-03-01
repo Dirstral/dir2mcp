@@ -4,7 +4,10 @@
 
 ## Current status
 
-This repository is currently spec-first. The core implementation is a Go single binary.
+This repository is currently spec-first with a monorepo two-binary model:
+
+- `dir2mcp`: MCP server and indexing/runtime host
+- `dirstral`: terminal client (Breeze/Tempest/Lighthouse/Settings)
 
 ## Build and run
 
@@ -23,9 +26,24 @@ cd /path/to/dir2mcp
 make build
 ```
 
-Or: `go build -o dir2mcp ./cmd/dir2mcp/`
+Or build each binary directly:
 
-**3. Run:**
+- `go build -o dir2mcp ./cmd/dir2mcp/`
+- `go build -o dirstral ./cmd/dirstral/`
+
+**3. Quick start flow:**
+
+```bash
+make build
+./dir2mcp up
+./dirstral breeze
+```
+
+`DIRSTRAL_MCP_URL` controls where Breeze/Tempest connect (local or remote).
+Lighthouse process management (`lighthouse up|status|down`) is local-only. Use
+`dirstral lighthouse remote` to probe a remote MCP endpoint without process control.
+
+**4. Run server only:**
 
 ```bash
 export MISTRAL_API_KEY=your_key_here

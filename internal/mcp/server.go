@@ -24,11 +24,11 @@ import (
 	"dir2mcp/internal/appstate"
 	"dir2mcp/internal/config"
 	"dir2mcp/internal/model"
+	"dir2mcp/internal/protocol"
 	"dir2mcp/internal/x402"
 )
 
 const (
-	sessionHeaderName      = "MCP-Session-Id"
 	authTokenEnvVar        = "DIR2MCP_AUTH_TOKEN"
 	maxRequestBody         = 1 << 20
 	sessionTTL             = 24 * time.Hour
@@ -213,8 +213,8 @@ func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 		if origin != "" && isOriginAllowed(origin, s.cfg.AllowedOrigins) {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, MCP-Protocol-Version, MCP-Session-Id, PAYMENT-SIGNATURE")
-			w.Header().Set("Access-Control-Expose-Headers", "MCP-Session-Id, PAYMENT-REQUIRED, PAYMENT-RESPONSE")
+			w.Header().Set("Access-Control-Allow-Headers", fmt.Sprintf("Content-Type, Authorization, %s, %s, PAYMENT-SIGNATURE", protocol.MCPProtocolVersionHeader, protocol.MCPSessionHeader))
+			w.Header().Set("Access-Control-Expose-Headers", protocol.MCPSessionHeader+", PAYMENT-REQUIRED, PAYMENT-RESPONSE")
 			w.Header().Set("Access-Control-Max-Age", "86400")
 			w.Header().Set("Vary", "Origin")
 		}
@@ -297,7 +297,7 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 	if s.rateLimiter != nil {
 		if !s.rateLimiter.allow(realIP(r, s.rateLimiter)) {
 			w.Header().Set("Retry-After", "1")
-			writeError(w, http.StatusTooManyRequests, nil, -32000, "rate limit exceeded", "RATE_LIMIT_EXCEEDED", true)
+			writeError(w, http.StatusTooManyRequests, nil, -32000, "rate limit exceeded", protocol.ErrorCodeRateLimitExceeded, true)
 			return
 		}
 	}
@@ -350,9 +350,9 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.Method != "initialize" {
-		sessionID := strings.TrimSpace(r.Header.Get(sessionHeaderName))
+		sessionID := strings.TrimSpace(r.Header.Get(protocol.MCPSessionHeader))
 		if sessionID == "" || !s.hasActiveSession(sessionID, time.Now()) {
-			writeError(w, http.StatusNotFound, id, -32001, "session not found", "SESSION_NOT_FOUND", false)
+			writeError(w, http.StatusNotFound, id, -32001, "session not found", protocol.ErrorCodeSessionNotFound, false)
 			return
 		}
 	}
@@ -400,7 +400,7 @@ func (s *Server) handleInitialize(w http.ResponseWriter, id interface{}, hasID b
 	}
 	s.storeSession(sessionID)
 
-	w.Header().Set(sessionHeaderName, sessionID)
+	w.Header().Set(protocol.MCPSessionHeader, sessionID)
 	writeResult(w, http.StatusOK, id, map[string]interface{}{
 		"protocolVersion": s.cfg.ProtocolVersion,
 		"capabilities": map[string]interface{}{
@@ -427,18 +427,18 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
 	const bearerPrefix = "bearer "
 
 	if len(authHeader) < len(bearerPrefix) || strings.ToLower(authHeader[:len(bearerPrefix)]) != bearerPrefix {
-		writeError(w, http.StatusUnauthorized, nil, -32000, "missing or invalid bearer token", "UNAUTHORIZED", false)
+		writeError(w, http.StatusUnauthorized, nil, -32000, "missing or invalid bearer token", protocol.ErrorCodeUnauthorized, false)
 		return false
 	}
 
 	providedToken := strings.TrimSpace(authHeader[len(bearerPrefix):])
 	if expectedToken == "" || providedToken == "" {
-		writeError(w, http.StatusUnauthorized, nil, -32000, "missing or invalid bearer token", "UNAUTHORIZED", false)
+		writeError(w, http.StatusUnauthorized, nil, -32000, "missing or invalid bearer token", protocol.ErrorCodeUnauthorized, false)
 		return false
 	}
 
 	if subtle.ConstantTimeCompare([]byte(providedToken), []byte(expectedToken)) != 1 {
-		writeError(w, http.StatusUnauthorized, nil, -32000, "missing or invalid bearer token", "UNAUTHORIZED", false)
+		writeError(w, http.StatusUnauthorized, nil, -32000, "missing or invalid bearer token", protocol.ErrorCodeUnauthorized, false)
 		return false
 	}
 

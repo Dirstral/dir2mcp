@@ -17,19 +17,10 @@ import (
 	"dir2mcp/internal/ingest"
 	"dir2mcp/internal/mistral"
 	"dir2mcp/internal/model"
+	"dir2mcp/internal/protocol"
 )
 
 const (
-	toolNameSearch           = "dir2mcp.search"
-	toolNameAsk              = "dir2mcp.ask"
-	toolNameAskAudio         = "dir2mcp.ask_audio"
-	toolNameTranscribe       = "dir2mcp.transcribe"
-	toolNameAnnotate         = "dir2mcp.annotate"
-	toolNameTranscribeAndAsk = "dir2mcp.transcribe_and_ask"
-	toolNameOpenFile         = "dir2mcp.open_file"
-	toolNameListFiles        = "dir2mcp.list_files"
-	toolNameStats            = "dir2mcp.stats"
-
 	defaultEmbedTextModel = "mistral-embed"
 	defaultEmbedCodeModel = "codestral-embed"
 	defaultOCRModel       = mistral.DefaultOCRModel
@@ -47,15 +38,15 @@ const (
 )
 
 var toolOrder = []string{
-	toolNameSearch,
-	toolNameAsk,
-	toolNameAskAudio,
-	toolNameTranscribe,
-	toolNameAnnotate,
-	toolNameTranscribeAndAsk,
-	toolNameOpenFile,
-	toolNameListFiles,
-	toolNameStats,
+	protocol.ToolNameSearch,
+	protocol.ToolNameAsk,
+	protocol.ToolNameAskAudio,
+	protocol.ToolNameTranscribe,
+	protocol.ToolNameAnnotate,
+	protocol.ToolNameTranscribeAndAsk,
+	protocol.ToolNameOpenFile,
+	protocol.ToolNameListFiles,
+	protocol.ToolNameStats,
 }
 
 type toolHandler func(context.Context, map[string]interface{}) (toolCallResult, *toolExecutionError)
@@ -102,64 +93,64 @@ type voiceAwareTTSSynthesizer interface {
 
 func (s *Server) buildToolRegistry() map[string]toolDefinition {
 	return map[string]toolDefinition{
-		toolNameSearch: {
-			Name:         toolNameSearch,
+		protocol.ToolNameSearch: {
+			Name:         protocol.ToolNameSearch,
 			Description:  "Semantic retrieval across indexed content.",
 			InputSchema:  searchInputSchema(),
 			OutputSchema: searchOutputSchema(),
 			handler:      s.handleSearchTool,
 		},
-		toolNameAsk: {
-			Name:         toolNameAsk,
+		protocol.ToolNameAsk: {
+			Name:         protocol.ToolNameAsk,
 			Description:  "RAG answer with citations; can run search-only mode.",
 			InputSchema:  askInputSchema(),
 			OutputSchema: askOutputSchema(),
 			handler:      s.handleAskTool,
 		},
-		toolNameAskAudio: {
-			Name:         toolNameAskAudio,
+		protocol.ToolNameAskAudio: {
+			Name:         protocol.ToolNameAskAudio,
 			Description:  "RAG answer with optional ElevenLabs audio synthesis.",
 			InputSchema:  askAudioInputSchema(),
 			OutputSchema: askAudioOutputSchema(),
 			handler:      s.handleAskAudioTool,
 		},
-		toolNameTranscribe: {
-			Name:         toolNameTranscribe,
+		protocol.ToolNameTranscribe: {
+			Name:         protocol.ToolNameTranscribe,
 			Description:  "Force transcription for an indexed audio document.",
 			InputSchema:  transcribeInputSchema(),
 			OutputSchema: transcribeOutputSchema(),
 			handler:      s.handleTranscribeTool,
 		},
-		toolNameAnnotate: {
-			Name:         toolNameAnnotate,
+		protocol.ToolNameAnnotate: {
+			Name:         protocol.ToolNameAnnotate,
 			Description:  "Structured extraction using provided JSON schema.",
 			InputSchema:  annotateInputSchema(),
 			OutputSchema: annotateOutputSchema(),
 			handler:      s.handleAnnotateTool,
 		},
-		toolNameTranscribeAndAsk: {
-			Name:         toolNameTranscribeAndAsk,
+		protocol.ToolNameTranscribeAndAsk: {
+			Name:         protocol.ToolNameTranscribeAndAsk,
 			Description:  "Ensure transcript exists for audio file, then answer a question with citations.",
 			InputSchema:  transcribeAndAskInputSchema(),
 			OutputSchema: transcribeAndAskOutputSchema(),
 			handler:      s.handleTranscribeAndAskTool,
 		},
-		toolNameOpenFile: {
-			Name:         toolNameOpenFile,
+		protocol.ToolNameOpenFile: {
+			Name:         protocol.ToolNameOpenFile,
 			Description:  "Open an exact source slice for verification.",
 			InputSchema:  openFileInputSchema(),
 			OutputSchema: openFileOutputSchema(),
 			handler:      s.handleOpenFileTool,
 		},
-		toolNameListFiles: {
-			Name:         toolNameListFiles,
+		protocol.ToolNameListFiles: {
+			Name:         protocol.ToolNameListFiles,
 			Description:  "List files under root for navigation and filter selection.",
 			InputSchema:  listFilesInputSchema(),
 			OutputSchema: listFilesOutputSchema(),
 			handler:      s.handleListFilesTool,
 		},
-		toolNameStats: {
-			Name:         toolNameStats,
+		protocol.ToolNameStats: {
+			Name:         protocol.ToolNameStats,
 			Description:  "Status/progress/health for indexing and models.",
 			InputSchema:  statsInputSchema(),
 			OutputSchema: statsOutputSchema(),
@@ -541,7 +532,7 @@ func (s *Server) handleSearchTool(ctx context.Context, args map[string]interface
 	}
 
 	if s.retriever == nil {
-		return toolCallResult{}, &toolExecutionError{Code: "INDEX_NOT_READY", Message: "retriever not configured", Retryable: false}
+		return toolCallResult{}, &toolExecutionError{Code: protocol.ErrorCodeIndexNotReady, Message: "retriever not configured", Retryable: false}
 	}
 	hits, searchErr := s.retriever.Search(ctx, model.SearchQuery{
 		Query:      query,
@@ -556,7 +547,7 @@ func (s *Server) handleSearchTool(ctx context.Context, args map[string]interface
 		message := "internal server error"
 		retryable := true
 		if errors.Is(searchErr, model.ErrIndexNotReady) || errors.Is(searchErr, model.ErrIndexNotConfigured) {
-			code = "INDEX_NOT_READY"
+			code = protocol.ErrorCodeIndexNotReady
 			message = "index not ready"
 		}
 		return toolCallResult{}, &toolExecutionError{Code: code, Message: message, Retryable: retryable}
@@ -614,7 +605,7 @@ func (s *Server) handleAskTool(ctx context.Context, args map[string]interface{})
 	}
 
 	if s.retriever == nil {
-		return toolCallResult{}, &toolExecutionError{Code: "INDEX_NOT_READY", Message: "retriever not configured", Retryable: false}
+		return toolCallResult{}, &toolExecutionError{Code: protocol.ErrorCodeIndexNotReady, Message: "retriever not configured", Retryable: false}
 	}
 
 	// default k should stay in sync with the schema and other tools.  the
@@ -678,10 +669,6 @@ func (s *Server) handleAskTool(ctx context.Context, args map[string]interface{})
 		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
 	}
 
-	if s.retriever == nil {
-		return toolCallResult{}, &toolExecutionError{Code: "INDEX_NOT_READY", Message: "retriever not configured", Retryable: false}
-	}
-
 	// branch early on search_only so we avoid asking the generator and can
 	// take advantage of Search-specific behaviour (and avoid throwing away the
 	// generated answer).
@@ -699,7 +686,7 @@ func (s *Server) handleAskTool(ctx context.Context, args map[string]interface{})
 			message := "internal server error"
 			retryable := true
 			if errors.Is(searchErr, model.ErrIndexNotReady) || errors.Is(searchErr, model.ErrIndexNotConfigured) {
-				code = "INDEX_NOT_READY"
+				code = protocol.ErrorCodeIndexNotReady
 				message = "index not ready"
 			}
 			return toolCallResult{}, &toolExecutionError{Code: code, Message: message, Retryable: retryable}
@@ -744,7 +731,7 @@ func (s *Server) handleAskTool(ctx context.Context, args map[string]interface{})
 		message := "internal server error"
 		retryable := true
 		if errors.Is(askErr, model.ErrIndexNotReady) || errors.Is(askErr, model.ErrIndexNotConfigured) {
-			code = "INDEX_NOT_READY"
+			code = protocol.ErrorCodeIndexNotReady
 			message = "index not ready"
 		}
 		return toolCallResult{}, &toolExecutionError{Code: code, Message: message, Retryable: retryable}
@@ -841,7 +828,7 @@ func (s *Server) handleAskAudioTool(ctx context.Context, args map[string]interfa
 	}
 
 	if s.retriever == nil {
-		return toolCallResult{}, &toolExecutionError{Code: "INDEX_NOT_READY", Message: "retriever not configured", Retryable: false}
+		return toolCallResult{}, &toolExecutionError{Code: protocol.ErrorCodeIndexNotReady, Message: "retriever not configured", Retryable: false}
 	}
 
 	if mode == "search_only" {
@@ -856,7 +843,7 @@ func (s *Server) handleAskAudioTool(ctx context.Context, args map[string]interfa
 		if searchErr != nil {
 			switch {
 			case errors.Is(searchErr, model.ErrIndexNotReady), errors.Is(searchErr, model.ErrIndexNotConfigured):
-				return toolCallResult{}, &toolExecutionError{Code: "INDEX_NOT_READY", Message: "index not ready", Retryable: true}
+				return toolCallResult{}, &toolExecutionError{Code: protocol.ErrorCodeIndexNotReady, Message: "index not ready", Retryable: true}
 			default:
 				return toolCallResult{}, &toolExecutionError{Code: "INTERNAL_ERROR", Message: "internal server error", Retryable: true}
 			}
@@ -905,12 +892,12 @@ func (s *Server) handleAskAudioTool(ctx context.Context, args map[string]interfa
 			}
 			return toolCallResult{
 				Content: []toolContentItem{
-					{Type: "text", Text: "ask_audio is not available yet; use dir2mcp.search while ask generation is being implemented"},
+					{Type: "text", Text: fmt.Sprintf("ask_audio is not available yet; use %s while ask generation is being implemented", protocol.ToolNameSearch)},
 				},
 				StructuredContent: fallbackStructured,
 			}, nil
 		case errors.Is(askErr, model.ErrIndexNotReady), errors.Is(askErr, model.ErrIndexNotConfigured):
-			return toolCallResult{}, &toolExecutionError{Code: "INDEX_NOT_READY", Message: "index not ready", Retryable: true}
+			return toolCallResult{}, &toolExecutionError{Code: protocol.ErrorCodeIndexNotReady, Message: "index not ready", Retryable: true}
 		default:
 			return toolCallResult{}, &toolExecutionError{Code: "INTERNAL_ERROR", Message: "internal server error", Retryable: true}
 		}
@@ -927,7 +914,7 @@ func (s *Server) handleAskAudioTool(ctx context.Context, args map[string]interfa
 	}
 
 	if s.tts == nil {
-		text := answerText + "\n\nAudio synthesis is disabled. Set ELEVENLABS_API_KEY to enable dir2mcp.ask_audio voice output."
+		text := answerText + "\n\nAudio synthesis is disabled. Set ELEVENLABS_API_KEY to enable " + protocol.ToolNameAskAudio + " voice output."
 		return toolCallResult{
 			Content: []toolContentItem{
 				{Type: "text", Text: text},
@@ -1224,7 +1211,7 @@ func (s *Server) handleTranscribeAndAskTool(ctx context.Context, args map[string
 	}
 
 	if s.retriever == nil {
-		return toolCallResult{}, &toolExecutionError{Code: "INDEX_NOT_READY", Message: "retriever not configured", Retryable: false}
+		return toolCallResult{}, &toolExecutionError{Code: protocol.ErrorCodeIndexNotReady, Message: "retriever not configured", Retryable: false}
 	}
 
 	doc, toolErr := s.lookupDocumentForTool(ctx, relPath)
@@ -1247,7 +1234,7 @@ func (s *Server) handleTranscribeAndAskTool(ctx context.Context, args map[string
 	})
 	if askErr != nil {
 		if errors.Is(askErr, model.ErrIndexNotReady) || errors.Is(askErr, model.ErrIndexNotConfigured) {
-			return toolCallResult{}, &toolExecutionError{Code: "INDEX_NOT_READY", Message: "index not ready", Retryable: true}
+			return toolCallResult{}, &toolExecutionError{Code: protocol.ErrorCodeIndexNotReady, Message: "index not ready", Retryable: true}
 		}
 		return toolCallResult{}, &toolExecutionError{Code: "INTERNAL_ERROR", Message: "internal server error", Retryable: true}
 	}
@@ -1289,7 +1276,7 @@ func (s *Server) handleOpenFileTool(ctx context.Context, args map[string]interfa
 	}
 
 	if s.retriever == nil {
-		return toolCallResult{}, &toolExecutionError{Code: "INDEX_NOT_READY", Message: "retriever not configured", Retryable: false}
+		return toolCallResult{}, &toolExecutionError{Code: protocol.ErrorCodeIndexNotReady, Message: "retriever not configured", Retryable: false}
 	}
 
 	maxChars := 20000
@@ -1400,13 +1387,13 @@ func (s *Server) handleOpenFileTool(ctx context.Context, args map[string]interfa
 	if openErr != nil {
 		switch {
 		case errors.Is(openErr, model.ErrForbidden):
-			return toolCallResult{}, &toolExecutionError{Code: "FORBIDDEN", Message: "forbidden", Retryable: false}
+			return toolCallResult{}, &toolExecutionError{Code: protocol.ErrorCodePermissionDenied, Message: "forbidden", Retryable: false}
 		case errors.Is(openErr, model.ErrPathOutsideRoot):
 			return toolCallResult{}, &toolExecutionError{Code: "PATH_OUTSIDE_ROOT", Message: "path outside root", Retryable: false}
 		case errors.Is(openErr, model.ErrDocTypeUnsupported):
 			return toolCallResult{}, &toolExecutionError{Code: "DOC_TYPE_UNSUPPORTED", Message: "doc type unsupported", Retryable: false}
 		case errors.Is(openErr, os.ErrNotExist):
-			return toolCallResult{}, &toolExecutionError{Code: "NOT_FOUND", Message: "file not found", Retryable: false}
+			return toolCallResult{}, &toolExecutionError{Code: protocol.ErrorCodeFileNotFound, Message: "file not found", Retryable: false}
 		default:
 			return toolCallResult{}, &toolExecutionError{Code: "INTERNAL_ERROR", Message: "internal server error", Retryable: true}
 		}
@@ -1475,13 +1462,13 @@ func (s *Server) lookupDocumentForTool(ctx context.Context, relPath string) (mod
 	if err != nil {
 		switch {
 		case errors.Is(err, os.ErrNotExist), errors.Is(err, model.ErrNotFound):
-			return model.Document{}, &toolExecutionError{Code: "NOT_FOUND", Message: "file not found", Retryable: false}
+			return model.Document{}, &toolExecutionError{Code: protocol.ErrorCodeFileNotFound, Message: "file not found", Retryable: false}
 		default:
 			return model.Document{}, &toolExecutionError{Code: "STORE_CORRUPT", Message: err.Error(), Retryable: false}
 		}
 	}
 	if doc.Deleted {
-		return model.Document{}, &toolExecutionError{Code: "NOT_FOUND", Message: "file not found", Retryable: false}
+		return model.Document{}, &toolExecutionError{Code: protocol.ErrorCodeFileNotFound, Message: "file not found", Retryable: false}
 	}
 	return doc, nil
 }
@@ -1491,11 +1478,11 @@ func (s *Server) ensureTranscriptForAudioDoc(ctx context.Context, doc model.Docu
 	if err != nil {
 		switch {
 		case errors.Is(err, os.ErrNotExist):
-			return "", false, false, &toolExecutionError{Code: "NOT_FOUND", Message: "file not found", Retryable: false}
+			return "", false, false, &toolExecutionError{Code: protocol.ErrorCodeFileNotFound, Message: "file not found", Retryable: false}
 		case errors.Is(err, model.ErrPathOutsideRoot):
 			return "", false, false, &toolExecutionError{Code: "PATH_OUTSIDE_ROOT", Message: err.Error(), Retryable: false}
 		default:
-			return "", false, false, &toolExecutionError{Code: "FORBIDDEN", Message: err.Error(), Retryable: false}
+			return "", false, false, &toolExecutionError{Code: protocol.ErrorCodePermissionDenied, Message: err.Error(), Retryable: false}
 		}
 	}
 
@@ -1579,11 +1566,11 @@ func (s *Server) sourceTextForAnnotation(ctx context.Context, doc model.Document
 		if err != nil {
 			switch {
 			case errors.Is(err, os.ErrNotExist):
-				return "", "", &toolExecutionError{Code: "NOT_FOUND", Message: "file not found", Retryable: false}
+				return "", "", &toolExecutionError{Code: protocol.ErrorCodeFileNotFound, Message: "file not found", Retryable: false}
 			case errors.Is(err, model.ErrPathOutsideRoot):
 				return "", "", &toolExecutionError{Code: "PATH_OUTSIDE_ROOT", Message: err.Error(), Retryable: false}
 			default:
-				return "", "", &toolExecutionError{Code: "FORBIDDEN", Message: err.Error(), Retryable: false}
+				return "", "", &toolExecutionError{Code: protocol.ErrorCodePermissionDenied, Message: err.Error(), Retryable: false}
 			}
 		}
 		client, toolErr := s.newMistralClient()
@@ -1602,11 +1589,11 @@ func (s *Server) sourceTextForAnnotation(ctx context.Context, doc model.Document
 		if err != nil {
 			switch {
 			case errors.Is(err, os.ErrNotExist):
-				return "", "", &toolExecutionError{Code: "NOT_FOUND", Message: "file not found", Retryable: false}
+				return "", "", &toolExecutionError{Code: protocol.ErrorCodeFileNotFound, Message: "file not found", Retryable: false}
 			case errors.Is(err, model.ErrPathOutsideRoot):
 				return "", "", &toolExecutionError{Code: "PATH_OUTSIDE_ROOT", Message: err.Error(), Retryable: false}
 			default:
-				return "", "", &toolExecutionError{Code: "FORBIDDEN", Message: err.Error(), Retryable: false}
+				return "", "", &toolExecutionError{Code: protocol.ErrorCodePermissionDenied, Message: err.Error(), Retryable: false}
 			}
 		}
 		return string(ingest.NormalizeUTF8(content)), ingest.RepTypeRawText, nil
