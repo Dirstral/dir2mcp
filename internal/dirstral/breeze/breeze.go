@@ -1,4 +1,4 @@
-package chat
+package breeze
 
 import (
 	"bufio"

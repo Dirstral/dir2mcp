@@ -7,10 +7,10 @@ import (
 	"strings"
 	"testing"
 
-	"dir2mcp/internal/dirstral/voice"
+	"dir2mcp/internal/dirstral/tempest"
 )
 
-func TestVoiceRunFailsFastWithoutAudioPrereqs(t *testing.T) {
+func TestTempestRunFailsFastWithoutAudioPrereqs(t *testing.T) {
 	binDir := t.TempDir()
 	ffmpegPath := filepath.Join(binDir, "ffmpeg")
 	if err := os.WriteFile(ffmpegPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
@@ -19,13 +19,13 @@ func TestVoiceRunFailsFastWithoutAudioPrereqs(t *testing.T) {
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("ELEVENLABS_API_KEY", "")
 
-	err := voice.Run(context.Background(), voice.Options{Mute: true})
+	err := tempest.Run(context.Background(), tempest.Options{Mute: true})
 	if err == nil {
-		t.Fatal("expected voice run to fail without local audio prerequisites")
+		t.Fatal("expected tempest run to fail without local audio prerequisites")
 	}
 
 	msg := strings.ToLower(err.Error())
 	if !strings.Contains(msg, "elevenlabs_api_key is required") {
-		t.Fatalf("unexpected voice preflight error: %v", err)
+		t.Fatalf("unexpected tempest preflight error: %v", err)
 	}
 }

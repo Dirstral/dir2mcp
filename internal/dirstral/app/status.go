@@ -9,21 +9,21 @@ import (
 
 const statusPollInterval = 3 * time.Second
 
-// serverStatusMsg carries the latest health check result.
-type serverStatusMsg struct {
+// lighthouseStatusMsg carries the latest health check result.
+type lighthouseStatusMsg struct {
 	Health host.HealthInfo
 }
 
-// pollServerStatus returns a tea.Msg that checks server health and
-// sends the result as a serverStatusMsg.
-func pollServerStatus() tea.Msg {
-	return serverStatusMsg{Health: host.CheckHealth()}
+// pollLighthouseStatus returns a tea.Msg that checks lighthouse health and
+// sends the result as a lighthouseStatusMsg.
+func pollLighthouseStatus() tea.Msg {
+	return lighthouseStatusMsg{Health: host.CheckHealth()}
 }
 
-// tickServerStatus returns a tea.Cmd that waits for the poll interval
+// tickLighthouseStatus returns a tea.Cmd that waits for the poll interval
 // then triggers another health check.
-func tickServerStatus() tea.Cmd {
+func tickLighthouseStatus() tea.Cmd {
 	return tea.Tick(statusPollInterval, func(t time.Time) tea.Msg {
-		return serverStatusMsg{Health: host.CheckHealth()}
+		return lighthouseStatusMsg{Health: host.CheckHealth()}
 	})
 }

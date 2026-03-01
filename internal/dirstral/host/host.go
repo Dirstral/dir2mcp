@@ -44,7 +44,7 @@ type UpOptions struct {
 	JSON    bool
 }
 
-var errUnhealthy = errors.New("mcp server not ready")
+var errUnhealthy = errors.New("lighthouse not ready")
 
 const (
 	defaultEndpointCaptureTimeout      = 20 * time.Second
@@ -123,7 +123,7 @@ func Up(ctx context.Context, opts UpOptions) error {
 	go streamLogs(stdout, "")
 	go streamLogs(stderr, "[dir2mcp] ")
 
-	fmt.Println(ui.Info("mcp server:", fmt.Sprintf("started dir2mcp (pid=%d). Press Ctrl+C to stop.", cmd.Process.Pid)))
+	fmt.Println(ui.Info("lighthouse:", fmt.Sprintf("started dir2mcp (pid=%d). Press Ctrl+C to stop.", cmd.Process.Pid)))
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
@@ -136,11 +136,11 @@ func Up(ctx context.Context, opts UpOptions) error {
 		if err != nil {
 			return fmt.Errorf("dir2mcp exited: %w", err)
 		}
-		fmt.Println(ui.Info("mcp server:", "dir2mcp stopped"))
+		fmt.Println(ui.Info("lighthouse:", "dir2mcp stopped"))
 		return nil
 	case <-sigCh:
 		close(stopCapture)
-		fmt.Println("\n" + ui.Info("mcp server:", "shutting down dir2mcp..."))
+		fmt.Println("\n" + ui.Info("lighthouse:", "shutting down dir2mcp..."))
 		if err := terminateProcess(cmd.Process.Pid); err != nil {
 			return err
 		}
@@ -150,14 +150,14 @@ func Up(ctx context.Context, opts UpOptions) error {
 			_ = cmd.Process.Kill()
 		}
 		_ = ClearState()
-		fmt.Println(ui.Info("mcp server:", "stopped"))
+		fmt.Println(ui.Info("lighthouse:", "stopped"))
 		return nil
 	}
 }
 
-// LogPath returns the path to the MCP server log file.
+// LogPath returns the path to the lighthouse log file.
 func LogPath() string {
-	return filepath.Join(os.TempDir(), "dirstral-mcp-server.log")
+	return filepath.Join(os.TempDir(), "dirstral-lighthouse.log")
 }
 
 // UpDetached starts dir2mcp as a managed background process and returns immediately.
@@ -243,7 +243,7 @@ func UpDetached(ctx context.Context, opts UpOptions) error {
 func Status() error {
 	health := CheckHealth()
 	if !health.Found {
-		fmt.Println(ui.Dim("mcp server: no managed dir2mcp process"))
+		fmt.Println(ui.Dim("lighthouse: no managed dir2mcp process"))
 		return fmt.Errorf("%w: no managed process", errUnhealthy)
 	}
 
@@ -252,10 +252,10 @@ func Status() error {
 	if alive {
 		aliveStr = ui.Green.Render("true")
 	}
-	fmt.Printf("%s pid=%d alive=%s\n", ui.Brand.Render("mcp server:"), health.PID, aliveStr)
+	fmt.Printf("%s pid=%d alive=%s\n", ui.Brand.Render("lighthouse:"), health.PID, aliveStr)
 
 	if health.MCPURL == "" {
-		fmt.Printf("%s endpoint=%s reachable=%s mcp_ready=%s\n", ui.Brand.Render("mcp server:"), ui.Dim("unknown"), ui.Red.Render("false"), ui.Red.Render("false"))
+		fmt.Printf("%s endpoint=%s reachable=%s mcp_ready=%s\n", ui.Brand.Render("lighthouse:"), ui.Dim("unknown"), ui.Red.Render("false"), ui.Red.Render("false"))
 		return fmt.Errorf("%w: endpoint unknown", errUnhealthy)
 	}
 
@@ -267,14 +267,14 @@ func Status() error {
 	if health.MCPReady {
 		readyStr = ui.Green.Render("true")
 	}
-	fmt.Printf("%s endpoint=%s reachable=%s mcp_ready=%s\n", ui.Brand.Render("mcp server:"), ui.Cyan.Render(health.MCPURL), reachStr, readyStr)
-	fmt.Printf("%s protocol=%s session_header=%s\n", ui.Brand.Render("mcp server:"), ui.Cyan.Render(OrUnknown(health.ProtocolHeader)), ui.Cyan.Render(OrUnknown(health.SessionHeaderName)))
-	fmt.Printf("%s auth_source=%s\n", ui.Brand.Render("mcp server:"), ui.Cyan.Render(OrUnknown(health.AuthSourceType)))
+	fmt.Printf("%s endpoint=%s reachable=%s mcp_ready=%s\n", ui.Brand.Render("lighthouse:"), ui.Cyan.Render(health.MCPURL), reachStr, readyStr)
+	fmt.Printf("%s protocol=%s session_header=%s\n", ui.Brand.Render("lighthouse:"), ui.Cyan.Render(OrUnknown(health.ProtocolHeader)), ui.Cyan.Render(OrUnknown(health.SessionHeaderName)))
+	fmt.Printf("%s auth_source=%s\n", ui.Brand.Render("lighthouse:"), ui.Cyan.Render(OrUnknown(health.AuthSourceType)))
 	if health.AuthDiagnostic != "" {
-		fmt.Printf("%s auth_diagnostic=%s\n", ui.Brand.Render("mcp server:"), ui.Yellow.Render(health.AuthDiagnostic))
+		fmt.Printf("%s auth_diagnostic=%s\n", ui.Brand.Render("lighthouse:"), ui.Yellow.Render(health.AuthDiagnostic))
 	}
 	if health.LastError != "" {
-		fmt.Printf("%s detail=%s\n", ui.Brand.Render("mcp server:"), ui.Dim(health.LastError))
+		fmt.Printf("%s detail=%s\n", ui.Brand.Render("lighthouse:"), ui.Dim(health.LastError))
 	}
 
 	if !health.Ready {
@@ -313,9 +313,9 @@ func StatusRemote(ctx context.Context, endpoint string) error {
 	if mcpReady {
 		readyStr = ui.Green.Render("true")
 	}
-	fmt.Printf("%s endpoint=%s reachable=%s mcp_ready=%s\n", ui.Brand.Render("mcp server(remote):"), ui.Cyan.Render(endpoint), reachStr, readyStr)
+	fmt.Printf("%s endpoint=%s reachable=%s mcp_ready=%s\n", ui.Brand.Render("lighthouse(remote):"), ui.Cyan.Render(endpoint), reachStr, readyStr)
 	if lastErr != "" {
-		fmt.Printf("%s detail=%s\n", ui.Brand.Render("mcp server(remote):"), ui.Dim(lastErr))
+		fmt.Printf("%s detail=%s\n", ui.Brand.Render("lighthouse(remote):"), ui.Dim(lastErr))
 	}
 
 	if !reachable || !mcpReady {
@@ -331,21 +331,21 @@ func Down() error {
 	state, err := LoadState()
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			fmt.Println(ui.Dim("mcp server: nothing to stop"))
+			fmt.Println(ui.Dim("lighthouse: nothing to stop"))
 			return nil
 		}
 		return err
 	}
 	if !processAlive(state.PID) {
 		_ = ClearState()
-		fmt.Println(ui.Dim("mcp server: process already stopped"))
+		fmt.Println(ui.Dim("lighthouse: process already stopped"))
 		return nil
 	}
 	if err := terminateProcess(state.PID); err != nil {
 		return err
 	}
 	_ = ClearState()
-	fmt.Println(ui.Info("mcp server:", fmt.Sprintf("stopped pid=%d", state.PID)))
+	fmt.Println(ui.Info("lighthouse:", fmt.Sprintf("stopped pid=%d", state.PID)))
 	return nil
 }
 
@@ -865,7 +865,7 @@ func initializeMCP(ctx context.Context, client *http.Client, endpoint, token str
 	body, status, headers, err := rpcCall(ctx, client, endpoint, token, "", true, protocol.RPCMethodInitialize, map[string]any{
 		"protocolVersion": coreconfig.DefaultProtocolVersion,
 		"capabilities":    map[string]any{"tools": map[string]any{}},
-		"clientInfo":      map[string]any{"name": "dirstral-mcp-server", "version": "0.1.0"},
+		"clientInfo":      map[string]any{"name": "dirstral-lighthouse", "version": "0.1.0"},
 	})
 	if err != nil {
 		return "", fmt.Errorf("initialize failed: %w", err)

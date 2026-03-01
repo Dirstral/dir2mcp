@@ -1,4 +1,4 @@
-package voice
+package tempest
 
 import (
 	"context"
@@ -7,7 +7,7 @@ import (
 	"os"
 	"strings"
 
-	"dir2mcp/internal/dirstral/chat"
+	"dir2mcp/internal/dirstral/breeze"
 	"dir2mcp/internal/dirstral/mcp"
 	"dir2mcp/internal/dirstral/ui"
 	"dir2mcp/internal/protocol"
@@ -28,7 +28,7 @@ const (
 	stateSpeaking
 )
 
-type voiceModel struct {
+type tempestModel struct {
 	opts           Options
 	client         *mcp.Client
 	ctx            context.Context
@@ -42,10 +42,10 @@ type voiceModel struct {
 	showHelp       bool
 	helpCache      string
 	helpCacheWidth int
-	pendingParsed  chat.ParsedInput
+	pendingParsed  breeze.ParsedInput
 	hasPendingTool bool
-	parseInputFn   func(input, model string) chat.ParsedInput
-	executeParsed  func(ctx context.Context, client *mcp.Client, parsed chat.ParsedInput) (*chat.ToolExecution, error)
+	parseInputFn   func(input, model string) breeze.ParsedInput
+	executeParsed  func(ctx context.Context, client *mcp.Client, parsed breeze.ParsedInput) (*breeze.ToolExecution, error)
 }
 
 const (
@@ -70,40 +70,40 @@ type thinkDoneMsg struct {
 }
 
 type approvalReqMsg struct {
-	parsed chat.ParsedInput
+	parsed breeze.ParsedInput
 }
 
 type speakDoneMsg struct {
 	err error
 }
 
-func initialModel(ctx context.Context, client *mcp.Client, opts Options) voiceModel {
+func initialModel(ctx context.Context, client *mcp.Client, opts Options) tempestModel {
 	s := spinner.New()
 	s.Spinner = spinner.Dot
 	s.Style = lipgloss.NewStyle().Foreground(ui.ClrBrand)
 
 	msgs := []string{
 		ui.Info("Connected to", opts.MCPURL),
-		ui.Dim("Voice mode: Press Enter to record (6s), Esc/Ctrl+C to quit."),
+		ui.Dim("Tempest mode: Press Enter to record (6s), Esc/Ctrl+C to quit."),
 	}
 
-	return voiceModel{
+	return tempestModel{
 		opts:          opts,
 		client:        client,
 		ctx:           ctx,
 		spinner:       s,
 		messages:      msgs,
 		state:         stateIdle,
-		parseInputFn:  chat.ParseInput,
-		executeParsed: chat.ExecuteParsed,
+		parseInputFn:  breeze.ParseInput,
+		executeParsed: breeze.ExecuteParsed,
 	}
 }
 
-func (m voiceModel) Init() tea.Cmd {
+func (m tempestModel) Init() tea.Cmd {
 	return m.spinner.Tick
 }
 
-func (m voiceModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m tempestModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var (
 		vpCmd tea.Cmd
 		spCmd tea.Cmd
@@ -123,7 +123,7 @@ func (m voiceModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.messages = append(m.messages, ui.Brand.Render("Approving "+m.pendingParsed.Tool+"..."))
 				parsed := m.pendingParsed
-				m.pendingParsed = chat.ParsedInput{}
+				m.pendingParsed = breeze.ParsedInput{}
 				m.hasPendingTool = false
 				m.state = stateThinking
 				m.scrollToBottom()
@@ -132,7 +132,7 @@ func (m voiceModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.hasPendingTool {
 					m.messages = append(m.messages, ui.Dim("Cancelled "+m.pendingParsed.Tool+"."))
 				}
-				m.pendingParsed = chat.ParsedInput{}
+				m.pendingParsed = breeze.ParsedInput{}
 				m.hasPendingTool = false
 				m.state = stateIdle
 				m.scrollToBottom()
@@ -246,12 +246,12 @@ func (m voiceModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(vpCmd, spCmd)
 }
 
-func (m *voiceModel) scrollToBottom() {
+func (m *tempestModel) scrollToBottom() {
 	m.viewport.SetContent(strings.Join(m.messages, "\n\n"))
 	m.viewport.GotoBottom()
 }
 
-func (m voiceModel) View() string {
+func (m tempestModel) View() string {
 	if !m.ready {
 		return "\n  Initializing..."
 	}
@@ -288,7 +288,7 @@ func (m voiceModel) View() string {
 	return b.String()
 }
 
-func (m *voiceModel) applyWindowSize(width, height int) {
+func (m *tempestModel) applyWindowSize(width, height int) {
 	if m.ready {
 		if width <= tinyResizeThresholdWidth {
 			width = m.width
@@ -323,18 +323,18 @@ func (m *voiceModel) applyWindowSize(width, height int) {
 	m.viewport.Height = vpHeight
 }
 
-func (m *voiceModel) relayout() {
+func (m *tempestModel) relayout() {
 	if !m.ready {
 		return
 	}
 	m.applyWindowSize(m.width, m.height)
 }
 
-func (m voiceModel) renderWidth() int {
+func (m tempestModel) renderWidth() int {
 	return maxInt(m.width-2, 1)
 }
 
-func (m voiceModel) footerHeight(help string) int {
+func (m tempestModel) footerHeight(help string) int {
 	footerLines := 2
 	if help != "" {
 		footerLines += 1 + lipgloss.Height(help)
@@ -342,7 +342,7 @@ func (m voiceModel) footerHeight(help string) int {
 	return footerLines
 }
 
-func (m *voiceModel) helpForWidth(width int) string {
+func (m *tempestModel) helpForWidth(width int) string {
 	if !m.showHelp {
 		return ""
 	}
@@ -354,14 +354,14 @@ func (m *voiceModel) helpForWidth(width int) string {
 	return m.helpCache
 }
 
-func (m *voiceModel) invalidateHelpCache() {
+func (m *tempestModel) invalidateHelpCache() {
 	m.helpCache = ""
 	m.helpCacheWidth = 0
 }
 
 func renderHelp(width int) string {
 	helpText := strings.Join([]string{
-		ui.Brand.Render("Voice Keymap"),
+		ui.Brand.Render("Tempest Keymap"),
 		ui.Muted.Render("enter  start recording"),
 		ui.Muted.Render("esc    quit"),
 		ui.Muted.Render("?      toggle help"),
@@ -382,14 +382,14 @@ func maxInt(a, b int) int {
 	return b
 }
 
-func (m *voiceModel) recordCmd() tea.Cmd {
+func (m *tempestModel) recordCmd() tea.Cmd {
 	return func() tea.Msg {
 		path, err := recordAudio(m.ctx, m.opts.Device)
 		return recordDoneMsg{path: path, err: err}
 	}
 }
 
-func (m *voiceModel) transcribeCmd(path string) tea.Cmd {
+func (m *tempestModel) transcribeCmd(path string) tea.Cmd {
 	return func() tea.Msg {
 		defer func() {
 			_ = os.Remove(path)
@@ -399,13 +399,13 @@ func (m *voiceModel) transcribeCmd(path string) tea.Cmd {
 	}
 }
 
-func (m *voiceModel) thinkCmd(question string) tea.Cmd {
+func (m *tempestModel) thinkCmd(question string) tea.Cmd {
 	return func() tea.Msg {
 		parsed := m.parseInputFn(question, m.opts.Model)
-		if parsed.Tool != "" && chat.RequiresApproval(parsed.Tool) {
+		if parsed.Tool != "" && breeze.RequiresApproval(parsed.Tool) {
 			return approvalReqMsg{parsed: parsed}
 		}
-		answer, audioPath, err := m.executeParsedForVoice(parsed)
+		answer, audioPath, err := m.executeParsedForTempest(parsed)
 		if err != nil {
 			return thinkDoneMsg{err: err}
 		}
@@ -413,9 +413,9 @@ func (m *voiceModel) thinkCmd(question string) tea.Cmd {
 	}
 }
 
-func (m *voiceModel) runParsedCmd(parsed chat.ParsedInput) tea.Cmd {
+func (m *tempestModel) runParsedCmd(parsed breeze.ParsedInput) tea.Cmd {
 	return func() tea.Msg {
-		answer, audioPath, err := m.executeParsedForVoice(parsed)
+		answer, audioPath, err := m.executeParsedForTempest(parsed)
 		if err != nil {
 			return thinkDoneMsg{err: err}
 		}
@@ -423,7 +423,7 @@ func (m *voiceModel) runParsedCmd(parsed chat.ParsedInput) tea.Cmd {
 	}
 }
 
-func (m *voiceModel) speakCmd(audioPath string) tea.Cmd {
+func (m *tempestModel) speakCmd(audioPath string) tea.Cmd {
 	return func() tea.Msg {
 		defer func() {
 			_ = os.Remove(audioPath)
@@ -433,7 +433,7 @@ func (m *voiceModel) speakCmd(audioPath string) tea.Cmd {
 	}
 }
 
-func (m *voiceModel) executeParsedForVoice(parsed chat.ParsedInput) (string, string, error) {
+func (m *tempestModel) executeParsedForTempest(parsed breeze.ParsedInput) (string, string, error) {
 	if parsed.Tool == "" {
 		return "", "", nil
 	}
@@ -458,7 +458,7 @@ func (m *voiceModel) executeParsedForVoice(parsed chat.ParsedInput) (string, str
 		askAudioArgs["voice_id"] = voiceID
 	}
 
-	execRes, err := m.executeParsed(m.ctx, m.client, chat.ParsedInput{Tool: protocol.ToolNameAskAudio, Args: askAudioArgs})
+	execRes, err := m.executeParsed(m.ctx, m.client, breeze.ParsedInput{Tool: protocol.ToolNameAskAudio, Args: askAudioArgs})
 	if err != nil {
 		return "", "", err
 	}
@@ -484,7 +484,7 @@ func (m *voiceModel) executeParsedForVoice(parsed chat.ParsedInput) (string, str
 	return answer, path, nil
 }
 
-func extractAskAudioPayload(execRes *chat.ToolExecution) (string, string) {
+func extractAskAudioPayload(execRes *breeze.ToolExecution) (string, string) {
 	if execRes == nil || execRes.Result == nil {
 		return "", ""
 	}

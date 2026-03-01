@@ -1,4 +1,4 @@
-package voice
+package tempest
 
 import (
 	"bytes"
@@ -177,7 +177,7 @@ func playAudio(ctx context.Context, path string) error {
 
 func preflight(opts Options) error {
 	if _, err := exec.LookPath("ffmpeg"); err != nil {
-		return fmt.Errorf("ffmpeg is required for Voice mic recording")
+		return fmt.Errorf("ffmpeg is required for Tempest mic recording")
 	}
 	if strings.TrimSpace(os.Getenv("ELEVENLABS_API_KEY")) == "" {
 		return fmt.Errorf("ELEVENLABS_API_KEY is required")

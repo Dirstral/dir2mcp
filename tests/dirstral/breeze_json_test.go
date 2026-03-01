@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"dir2mcp/internal/dirstral/chat"
+	"dir2mcp/internal/dirstral/breeze"
 	"dir2mcp/internal/dirstral/mcp"
 	"dir2mcp/internal/protocol"
 )
@@ -64,19 +64,19 @@ func assertNoHandlerError(t *testing.T, errCh chan error) {
 }
 
 func TestAskTopKForModel(t *testing.T) {
-	if got := chat.AskTopKForModel("mistral-large-latest"); got != 12 {
+	if got := breeze.AskTopKForModel("mistral-large-latest"); got != 12 {
 		t.Fatalf("unexpected top-k for large model: %d", got)
 	}
-	if got := chat.AskTopKForModel("mistral-small-latest"); got != 6 {
+	if got := breeze.AskTopKForModel("mistral-small-latest"); got != 6 {
 		t.Fatalf("unexpected top-k for small model: %d", got)
 	}
-	if got := chat.AskTopKForModel("custom-model"); got != 8 {
+	if got := breeze.AskTopKForModel("custom-model"); got != 8 {
 		t.Fatalf("unexpected top-k default: %d", got)
 	}
 }
 
 func TestParseInputUsesModelProfileForAsk(t *testing.T) {
-	parsed := chat.ParseInput("how does this work?", "mistral-small-latest")
+	parsed := breeze.ParseInput("how does this work?", "mistral-small-latest")
 	if parsed.Tool != protocol.ToolNameAsk {
 		t.Fatalf("expected %s, got %q", protocol.ToolNameAsk, parsed.Tool)
 	}
@@ -85,7 +85,7 @@ func TestParseInputUsesModelProfileForAsk(t *testing.T) {
 	}
 }
 
-func TestChatJSONOutputStructureAndModelPropagation(t *testing.T) {
+func TestBreezeJSONOutputStructureAndModelPropagation(t *testing.T) {
 	var askK any
 	calledTools := make([]string, 0)
 	handlerErrCh := make(chan error, 1)
@@ -166,8 +166,8 @@ func TestChatJSONOutputStructureAndModelPropagation(t *testing.T) {
 
 	in := bytes.NewBufferString("what changed\n/quit\n")
 	out := &bytes.Buffer{}
-	opts := chat.Options{MCPURL: server.URL, Transport: "streamable-http", Model: "mistral-large-latest", JSON: true}
-	if err := chat.RunJSONLoopWithIO(context.Background(), client, opts, in, out); err != nil {
+	opts := breeze.Options{MCPURL: server.URL, Transport: "streamable-http", Model: "mistral-large-latest", JSON: true}
+	if err := breeze.RunJSONLoopWithIO(context.Background(), client, opts, in, out); err != nil {
 		t.Fatalf("json loop: %v", err)
 	}
 	assertNoHandlerError(t, handlerErrCh)
@@ -218,7 +218,7 @@ func TestChatJSONOutputStructureAndModelPropagation(t *testing.T) {
 	assertNoHandlerError(t, handlerErrCh)
 }
 
-func TestChatJSONHelpErrorAndExitEvents(t *testing.T) {
+func TestBreezeJSONHelpErrorAndExitEvents(t *testing.T) {
 	handlerErrCh := make(chan error, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
@@ -252,8 +252,8 @@ func TestChatJSONHelpErrorAndExitEvents(t *testing.T) {
 
 	in := bytes.NewBufferString("/help\n/open\n/quit\n")
 	out := &bytes.Buffer{}
-	opts := chat.Options{MCPURL: server.URL, Transport: "streamable-http", Model: "mistral-small-latest", JSON: true}
-	if err := chat.RunJSONLoopWithIO(context.Background(), client, opts, in, out); err != nil {
+	opts := breeze.Options{MCPURL: server.URL, Transport: "streamable-http", Model: "mistral-small-latest", JSON: true}
+	if err := breeze.RunJSONLoopWithIO(context.Background(), client, opts, in, out); err != nil {
 		t.Fatalf("json loop: %v", err)
 	}
 	assertNoHandlerError(t, handlerErrCh)
@@ -294,7 +294,7 @@ func TestChatJSONHelpErrorAndExitEvents(t *testing.T) {
 	assertNoHandlerError(t, handlerErrCh)
 }
 
-func TestChatJSONClearEvent(t *testing.T) {
+func TestBreezeJSONClearEvent(t *testing.T) {
 	handlerErrCh := make(chan error, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
@@ -328,8 +328,8 @@ func TestChatJSONClearEvent(t *testing.T) {
 
 	in := bytes.NewBufferString("/clear\n/quit\n")
 	out := &bytes.Buffer{}
-	opts := chat.Options{MCPURL: server.URL, Transport: "streamable-http", Model: "mistral-small-latest", JSON: true}
-	if err := chat.RunJSONLoopWithIO(context.Background(), client, opts, in, out); err != nil {
+	opts := breeze.Options{MCPURL: server.URL, Transport: "streamable-http", Model: "mistral-small-latest", JSON: true}
+	if err := breeze.RunJSONLoopWithIO(context.Background(), client, opts, in, out); err != nil {
 		t.Fatalf("json loop: %v", err)
 	}
 	assertNoHandlerError(t, handlerErrCh)
