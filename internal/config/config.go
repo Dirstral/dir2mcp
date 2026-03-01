@@ -316,7 +316,7 @@ func Default() Config {
 		IngestMaxFileMB:           20,
 		STTProvider:               "mistral",
 		STTMistralModel:           "voxtral-mini-latest",
-		STTElevenLabsModel:        "scribe",
+		STTElevenLabsModel:        "scribe_v1",
 		STTElevenLabsLanguageCode: "",
 		ServerTLSCertFile:         "",
 		ServerTLSKeyFile:          "",
@@ -1523,8 +1523,17 @@ func (c *Config) Validate() error {
 	if c.RAGMaxContextChars < 0 {
 		return fmt.Errorf("rag.max_context_chars must be non-negative: %d", c.RAGMaxContextChars)
 	}
+	if c.RAGKDefault < 0 {
+		return fmt.Errorf("rag.k_default must be non-negative: %d", c.RAGKDefault)
+	}
 	if c.RAGOversampleFactor < 0 {
 		return fmt.Errorf("rag.oversample_factor must be non-negative: %d", c.RAGOversampleFactor)
+	}
+	if c.ChunkingMaxTokens < 0 {
+		return fmt.Errorf("chunking.max_tokens must be non-negative: %d", c.ChunkingMaxTokens)
+	}
+	if c.ChunkingOverlapTokens < 0 {
+		return fmt.Errorf("chunking.overlap_tokens must be non-negative: %d", c.ChunkingOverlapTokens)
 	}
 	if c.IngestMaxFileMB < 0 {
 		return fmt.Errorf("ingest.max_file_mb must be non-negative: %d", c.IngestMaxFileMB)

@@ -388,7 +388,8 @@ func isWithinRoot(rootResolved, candidate string) bool {
 	if rel == "." {
 		return true
 	}
-	if strings.HasPrefix(rel, "..") {
+	rel = filepath.Clean(rel)
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return false
 	}
 	if filepath.IsAbs(rel) {

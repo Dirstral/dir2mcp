@@ -282,6 +282,60 @@ func TestTranscriberFromConfig_AutoWiresElevenLabsWhenAPIKeyPresent(t *testing.T
 	}
 }
 
+func TestTranscriberFromConfig_ExplicitProviderRequiresCredentials(t *testing.T) {
+	tests := []struct {
+		name     string
+		provider string
+		wantErr  string
+	}{
+		{
+			name:     "mistral missing key",
+			provider: "mistral",
+			wantErr:  "requires MISTRAL_API_KEY",
+		},
+		{
+			name:     "elevenlabs missing key",
+			provider: "elevenlabs",
+			wantErr:  "requires ELEVENLABS_API_KEY",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.Default()
+			cfg.STTProvider = tc.provider
+			cfg.MistralAPIKey = ""
+			cfg.ElevenLabsAPIKey = ""
+
+			transcriber, err := ingest.TranscriberFromConfig(cfg)
+			if err == nil {
+				t.Fatalf("expected error for provider %q", tc.provider)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error mismatch: got=%v want substring=%q", err, tc.wantErr)
+			}
+			if transcriber != nil {
+				t.Fatalf("expected nil transcriber on config error, got %T", transcriber)
+			}
+		})
+	}
+}
+
+func TestTranscriberFromConfig_AutoProviderWithoutCredentialsReturnsNil(t *testing.T) {
+	cfg := config.Default()
+	cfg.STTProvider = "auto"
+	cfg.MistralAPIKey = ""
+	cfg.ElevenLabsAPIKey = ""
+
+	transcriber, err := ingest.TranscriberFromConfig(cfg)
+	if err != nil {
+		t.Fatalf("TranscriberFromConfig should not fail in auto mode without credentials: %v", err)
+	}
+	if transcriber != nil {
+		t.Fatalf("expected nil transcriber in auto mode without credentials, got %T", transcriber)
+	}
+}
+
 type memoryStore struct {
 	docs map[string]model.Document
 	// hold persisted representations for verification

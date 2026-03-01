@@ -330,7 +330,7 @@ func (a *App) RunWithContext(ctx context.Context, args []string) int {
 	case "ask":
 		return a.runAsk(ctx, globalOpts, remaining[1:])
 	case "reindex":
-		return a.runReindex(ctx, globalOpts)
+		return a.runReindex(ctx, globalOpts, remaining[1:])
 	case "config":
 		return a.runConfig(ctx, globalOpts, remaining[1:])
 	case "version":
@@ -1100,7 +1100,12 @@ func (a *App) runAsk(ctx context.Context, global globalOptions, args []string) i
 	return exitSuccess
 }
 
-func (a *App) runReindex(ctx context.Context, global globalOptions) int {
+func (a *App) runReindex(ctx context.Context, global globalOptions, args []string) int {
+	if len(args) > 0 {
+		writef(a.stderr, "reindex command does not accept arguments: %s\n", strings.Join(args, " "))
+		return exitConfigInvalid
+	}
+
 	// load configuration first so that both the ingestor and any
 	// auxiliary components (OCR client) share the same settings.  When
 	// Load returns an error we treat it as fatal instead of silently

@@ -141,7 +141,7 @@ func TranscriberFromConfig(cfg config.Config) (model.Transcriber, error) {
 		return nil, nil
 	case transcriberProviderMistral:
 		if strings.TrimSpace(cfg.MistralAPIKey) == "" {
-			return nil, nil
+			return nil, fmt.Errorf("stt provider %q requires MISTRAL_API_KEY", transcriberProviderMistral)
 		}
 		client := mistral.NewClient(cfg.MistralBaseURL, cfg.MistralAPIKey)
 		if modelName := strings.TrimSpace(cfg.STTMistralModel); modelName != "" {
@@ -161,7 +161,9 @@ func TranscriberFromConfig(cfg config.Config) (model.Transcriber, error) {
 		}
 		provider = transcriberProviderElevenLabs
 	case transcriberProviderElevenLabs:
-		// handled below
+		if strings.TrimSpace(cfg.ElevenLabsAPIKey) == "" {
+			return nil, fmt.Errorf("stt provider %q requires ELEVENLABS_API_KEY", transcriberProviderElevenLabs)
+		}
 	default:
 		return nil, fmt.Errorf("unsupported transcriber provider %q", provider)
 	}

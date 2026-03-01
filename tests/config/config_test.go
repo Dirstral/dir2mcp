@@ -689,8 +689,51 @@ func TestDefault_NestedConfigFieldDefaults(t *testing.T) {
 	if cfg.STTProvider != "mistral" || cfg.STTMistralModel == "" || cfg.STTElevenLabsModel == "" {
 		t.Fatalf("unexpected stt defaults: provider=%q mistral=%q eleven=%q", cfg.STTProvider, cfg.STTMistralModel, cfg.STTElevenLabsModel)
 	}
+	if cfg.STTElevenLabsModel != "scribe_v1" {
+		t.Fatalf("unexpected elevenlabs stt default model: %q", cfg.STTElevenLabsModel)
+	}
 	if cfg.ServerTLSCertFile != "" || cfg.ServerTLSKeyFile != "" {
 		t.Fatalf("unexpected tls defaults: cert=%q key=%q", cfg.ServerTLSCertFile, cfg.ServerTLSKeyFile)
+	}
+}
+
+func TestLoad_RejectsNegativeRAGAndChunkingTunables(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, ".dir2mcp.yaml")
+
+	tests := []struct {
+		name string
+		yaml string
+		want string
+	}{
+		{
+			name: "negative rag k default",
+			yaml: "rag_k_default: -1\n",
+			want: "rag.k_default must be non-negative",
+		},
+		{
+			name: "negative chunking max tokens",
+			yaml: "chunking_max_tokens: -5\n",
+			want: "chunking.max_tokens must be non-negative",
+		},
+		{
+			name: "negative chunking overlap tokens",
+			yaml: "chunking_overlap_tokens: -3\n",
+			want: "chunking.overlap_tokens must be non-negative",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			writeFile(t, path, tc.yaml)
+			_, err := config.LoadFile(path)
+			if err == nil {
+				t.Fatalf("expected error for %s", tc.name)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error mismatch: got=%v want substring=%q", err, tc.want)
+			}
+		})
 	}
 }
 

@@ -342,6 +342,26 @@ func TestReindexConfigLoadErrorReturnsExitCode2(t *testing.T) {
 	}
 }
 
+func TestReindexRejectsUnexpectedArguments(t *testing.T) {
+	tmp := t.TempDir()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := cli.NewAppWithIO(&stdout, &stderr)
+
+	var code int
+	withWorkingDir(t, tmp, func() {
+		code = app.RunWithContext(context.Background(), []string{"reindex", "extra"})
+	})
+
+	if code != 2 {
+		t.Fatalf("unexpected exit code: got=%d want=2", code)
+	}
+	if !strings.Contains(stderr.String(), "reindex command does not accept arguments") {
+		t.Fatalf("expected argument validation error, got: %s", stderr.String())
+	}
+}
+
 // When a real configuration is available it should be passed through to the
 // ingestor factory.  Previously runReindex always used config.Default(),
 // causing the ingest service to be unaware of any environment overrides.

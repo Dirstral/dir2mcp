@@ -1566,7 +1566,7 @@ stt:
     timestamps: true
   elevenlabs:
     api_key: ${ELEVENLABS_API_KEY}
-    model: scribe
+    model: scribe_v1
     timestamps: true
 
 x402:
