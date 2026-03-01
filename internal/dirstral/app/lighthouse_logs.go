@@ -40,17 +40,13 @@ func newLogModel() logModel {
 }
 
 func (m logModel) Init() tea.Cmd {
-	return tea.Batch(tickLogs(), m.loadLogs)
+	return tickLogs()
 }
 
 func tickLogs() tea.Cmd {
 	return tea.Tick(logTickInterval, func(t time.Time) tea.Msg {
 		return logTickMsg(t)
 	})
-}
-
-func (m logModel) loadLogs() tea.Msg {
-	return logTickMsg(time.Now())
 }
 
 func (m logModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
