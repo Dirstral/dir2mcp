@@ -330,7 +330,7 @@ func x402EnabledTestConfig(resourceBaseURL string) config.Config {
 	cfg.X402.ResourceBaseURL = resourceBaseURL
 	cfg.X402.Scheme = "exact"
 	cfg.X402.PriceAtomic = "1000"
-	cfg.X402.Network = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"
+	cfg.X402.Network = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d"
 	cfg.X402.Asset = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 	cfg.X402.PayTo = "8N5A4rQU8vJrQmH3iiA7kE4m1df4WeyueXQqGb4G9tTj"
 	return cfg

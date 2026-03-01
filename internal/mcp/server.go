@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
@@ -49,6 +50,15 @@ const DefaultSearchK = 10
 // MaxSearchK is the highest allowed k value for search/ask requests.
 const MaxSearchK = 50
 
+// sessionInfo holds metadata tracked for each active session.  `created` is the
+// time the session was started; `lastSeen` is updated on each successful
+// request.  The server uses both values to enforce inactivity timeouts and
+// optional absolute lifetimes.
+type sessionInfo struct {
+	created  time.Time
+	lastSeen time.Time
+}
+
 type Server struct {
 	cfg       config.Config
 	authToken string
@@ -59,7 +69,11 @@ type Server struct {
 	tools     map[string]toolDefinition
 
 	sessionMu sync.RWMutex
-	sessions  map[string]time.Time
+	// sessions maps session IDs to metadata.  lastSeen is updated on each
+	// successful request; created represents the time the session was
+	// initialized.  We use both values to enforce inactivity timeouts and
+	// optional absolute lifetimes.
+	sessions map[string]sessionInfo
 
 	rateLimiter *ipRateLimiter
 
@@ -174,7 +188,7 @@ func NewServer(cfg config.Config, retriever model.Retriever, opts ...ServerOptio
 		cfg:             cfg,
 		authToken:       loadAuthToken(cfg),
 		retriever:       retriever,
-		sessions:        make(map[string]time.Time),
+		sessions:        make(map[string]sessionInfo),
 		paymentOutcomes: make(map[string]paymentExecutionOutcome),
 		paymentTTL:      paymentOutcomeTTL,
 		paymentMaxItems: paymentOutcomeMaxEntries,
@@ -214,7 +228,7 @@ func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
 			w.Header().Set("Access-Control-Allow-Headers", fmt.Sprintf("Content-Type, Authorization, %s, %s, PAYMENT-SIGNATURE", protocol.MCPProtocolVersionHeader, protocol.MCPSessionHeader))
-			w.Header().Set("Access-Control-Expose-Headers", protocol.MCPSessionHeader+", PAYMENT-REQUIRED, PAYMENT-RESPONSE")
+			w.Header().Set("Access-Control-Expose-Headers", protocol.MCPSessionHeader+", PAYMENT-REQUIRED, PAYMENT-RESPONSE, "+protocol.MCPSessionExpiredHeader)
 			w.Header().Set("Access-Control-Max-Age", "86400")
 			w.Header().Set("Vary", "Origin")
 		}
@@ -351,7 +365,15 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 
 	if req.Method != "initialize" {
 		sessionID := strings.TrimSpace(r.Header.Get(protocol.MCPSessionHeader))
-		if sessionID == "" || !s.hasActiveSession(sessionID, time.Now()) {
+		if sessionID == "" {
+			writeError(w, http.StatusNotFound, id, -32001, "session not found", protocol.ErrorCodeSessionNotFound, false)
+			return
+		}
+		if ok, reason := s.hasActiveSession(sessionID, time.Now()); !ok {
+			// optional diagnostic header
+			if reason != "" {
+				w.Header().Set(protocol.MCPSessionExpiredHeader, reason)
+			}
 			writeError(w, http.StatusNotFound, id, -32001, "session not found", protocol.ErrorCodeSessionNotFound, false)
 			return
 		}
@@ -540,31 +562,60 @@ func writeResponse(w http.ResponseWriter, statusCode int, response rpcResponse) 
 	_ = json.NewEncoder(w).Encode(response)
 }
 
-func (s *Server) hasActiveSession(id string, now time.Time) bool {
+// resolveSessionTimeouts returns the effective inactivity and max-life
+// durations for sessions.  The helper centralizes the logic of choosing the
+// hard‑coded default `sessionTTL` when a custom inactivity timeout isn't set
+// and pulling the configured max lifetime.  Both hasActiveSession and
+// cleanupExpiredSessions rely on the same rules so they call this helper to
+// avoid divergence.
+func (s *Server) resolveSessionTimeouts() (inactivity, maxLife time.Duration) {
+	inactivity = sessionTTL
+	if s.cfg.SessionInactivityTimeout > 0 {
+		inactivity = s.cfg.SessionInactivityTimeout
+	}
+	maxLife = s.cfg.SessionMaxLifetime
+	return
+}
+
+func (s *Server) hasActiveSession(id string, now time.Time) (bool, string) {
+	// returns (active, reason) reason is empty when active or unknown
+	// otherwise one of "inactivity" or "max-lifetime".
+
+	inactivity, maxLife := s.resolveSessionTimeouts()
+
 	s.sessionMu.Lock()
 	defer s.sessionMu.Unlock()
 
-	lastSeen, ok := s.sessions[id]
+	si, ok := s.sessions[id]
 	if !ok {
-		return false
+		return false, ""
 	}
-	if now.Sub(lastSeen) > sessionTTL {
+	if now.Sub(si.lastSeen) > inactivity {
 		delete(s.sessions, id)
-		return false
+		log.Printf("session %s expired due to inactivity", maskSessionID(id))
+		return false, "inactivity"
+	}
+	if maxLife > 0 && now.Sub(si.created) > maxLife {
+		delete(s.sessions, id)
+		log.Printf("session %s expired due to max lifetime", maskSessionID(id))
+		return false, "max-lifetime"
 	}
 
-	s.sessions[id] = now
-	return true
+	// update lastSeen
+	si.lastSeen = now
+	s.sessions[id] = si
+	return true, ""
 }
 
 func (s *Server) storeSession(id string) {
 	s.sessionMu.Lock()
 	defer s.sessionMu.Unlock()
-	s.sessions[id] = time.Now()
+	now := time.Now()
+	s.sessions[id] = sessionInfo{created: now, lastSeen: now}
 }
 
 func (s *Server) runSessionCleanup(ctx context.Context) {
-	ticker := time.NewTicker(sessionCleanupInterval)
+	ticker := time.NewTicker(s.sessionSweepInterval())
 	defer ticker.Stop()
 
 	for {
@@ -575,6 +626,33 @@ func (s *Server) runSessionCleanup(ctx context.Context) {
 			s.cleanupExpiredSessions(now)
 		}
 	}
+}
+
+func (s *Server) sessionSweepInterval() time.Duration {
+	inactivity, maxLife := s.resolveSessionTimeouts()
+	sweep := sessionCleanupInterval
+	if inactivity < sweep {
+		sweep = inactivity
+	}
+	if maxLife > 0 && maxLife < sweep {
+		sweep = maxLife
+	}
+	// Sweep more aggressively than the timeout window to avoid stale sessions
+	// lingering until the full timeout elapses.
+	sweep /= 2
+	if sweep < time.Second {
+		sweep = time.Second
+	}
+	return sweep
+}
+
+func maskSessionID(id string) string {
+	trimmed := strings.TrimSpace(id)
+	if trimmed == "" {
+		return "<empty>"
+	}
+	sum := sha256.Sum256([]byte(trimmed))
+	return hex.EncodeToString(sum[:4])
 }
 
 func (s *Server) runRateLimitCleanup(ctx context.Context) {
@@ -592,11 +670,18 @@ func (s *Server) runRateLimitCleanup(ctx context.Context) {
 }
 
 func (s *Server) cleanupExpiredSessions(now time.Time) {
+	// mirror the logic from hasActiveSession but without logging or updating
+	inactivity, maxLife := s.resolveSessionTimeouts()
+
 	s.sessionMu.Lock()
 	defer s.sessionMu.Unlock()
 
-	for id, lastSeen := range s.sessions {
-		if now.Sub(lastSeen) > sessionTTL {
+	for id, si := range s.sessions {
+		if now.Sub(si.lastSeen) > inactivity {
+			delete(s.sessions, id)
+			continue
+		}
+		if maxLife > 0 && now.Sub(si.created) > maxLife {
 			delete(s.sessions, id)
 		}
 	}

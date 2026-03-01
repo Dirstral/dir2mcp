@@ -37,7 +37,43 @@ type SQLiteStore struct {
 // The helper below uses it to avoid duplicating validation and SQL.
 type dbExecutor interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// activeDocCountsWith encapsulates the query logic previously found in
+// SQLiteStore.ActiveDocCounts.  It accepts any dbExecutor so callers can reuse
+// an existing *sql.DB or a *sql.Tx without having to open a handle again.
+func activeDocCountsWith(ctx context.Context, exec dbExecutor) (map[string]int64, int64, error) {
+	rows, err := exec.QueryContext(ctx, `SELECT doc_type, COUNT(*) FROM documents WHERE deleted = 0 GROUP BY doc_type`)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer func() {
+		_ = rows.Close()
+	}()
+
+	counts := make(map[string]int64)
+	var total int64
+	for rows.Next() {
+		var (
+			docType string
+			count   int64
+		)
+		if err := rows.Scan(&docType, &count); err != nil {
+			return nil, 0, err
+		}
+		docType = strings.TrimSpace(docType)
+		if docType == "" {
+			docType = "unknown"
+		}
+		counts[docType] += count
+		total += count
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+	return counts, total, nil
 }
 
 func upsertRepresentationWith(ctx context.Context, exec dbExecutor, rep model.Representation) (int64, error) {
@@ -775,7 +811,9 @@ func (s *SQLiteStore) ListFiles(ctx context.Context, prefix, glob string, limit,
 }
 
 // ActiveDocCounts returns active-document counts grouped by doc_type along
-// with the total active document count using aggregate SQL queries.
+// with the total active document count using aggregate SQL queries.  The
+// implementation simply obtains a database handle and delegates to
+// activeDocCountsWith so that callers holding an open handle can reuse it.
 func (s *SQLiteStore) ActiveDocCounts(ctx context.Context) (map[string]int64, int64, error) {
 	db, err := s.ensureDB(ctx)
 	if err != nil {
@@ -783,37 +821,18 @@ func (s *SQLiteStore) ActiveDocCounts(ctx context.Context) (map[string]int64, in
 	}
 	defer s.ReleaseDB()
 
-	rows, err := db.QueryContext(ctx, `SELECT doc_type, COUNT(*) FROM documents WHERE deleted = 0 GROUP BY doc_type`)
-	if err != nil {
-		return nil, 0, err
-	}
-	defer func() { _ = rows.Close() }()
-
-	counts := make(map[string]int64)
-	var total int64
-	for rows.Next() {
-		var (
-			docType string
-			count   int64
-		)
-		if err := rows.Scan(&docType, &count); err != nil {
-			return nil, 0, err
-		}
-		docType = strings.TrimSpace(docType)
-		if docType == "" {
-			docType = "unknown"
-		}
-		counts[docType] += count
-		total += count
-	}
-	if err := rows.Err(); err != nil {
-		return nil, 0, err
-	}
-	return counts, total, nil
+	return activeDocCountsWith(ctx, db)
 }
 
 // CorpusStats returns aggregate corpus/indexing counters derived from SQLite.
-// These values are used by retrieval stats and CLI status fallbacks.
+// It performs several independent SQL queries (counting documents by type,
+// scanning/indexed/skipped/etc., representations, chunks, etc.) outside of a
+// single transaction or snapshot. Under concurrent writes the results may be
+// slightly inconsistent – for example TotalDocs (which comes from
+// ActiveDocCounts) might not exactly equal Indexed+Skipped+Errors from the
+// lifecycle query. That's acceptable since these stats are intended for
+// monitoring and CLI status fallbacks. Callers requiring strict consistency
+// would need to run the queries in one transaction or acquire a snapshot/lock.
 func (s *SQLiteStore) CorpusStats(ctx context.Context) (model.CorpusStats, error) {
 	db, err := s.ensureDB(ctx)
 	if err != nil {
@@ -821,34 +840,15 @@ func (s *SQLiteStore) CorpusStats(ctx context.Context) (model.CorpusStats, error
 	}
 	defer s.ReleaseDB()
 
-	stats := model.CorpusStats{
-		DocCounts: make(map[string]int64),
-	}
+	stats := model.CorpusStats{}
 
-	rows, err := db.QueryContext(ctx, `SELECT doc_type, COUNT(*) FROM documents WHERE deleted = 0 GROUP BY doc_type`)
+	// fetch doc counts using helper so we don't reopen the database handle
+	counts, total, err := activeDocCountsWith(ctx, db)
 	if err != nil {
 		return model.CorpusStats{}, err
 	}
-	defer func() { _ = rows.Close() }()
-
-	for rows.Next() {
-		var (
-			docType string
-			count   int64
-		)
-		if err := rows.Scan(&docType, &count); err != nil {
-			return model.CorpusStats{}, err
-		}
-		docType = strings.TrimSpace(docType)
-		if docType == "" {
-			docType = "unknown"
-		}
-		stats.DocCounts[docType] += count
-		stats.TotalDocs += count
-	}
-	if err := rows.Err(); err != nil {
-		return model.CorpusStats{}, err
-	}
+	stats.DocCounts = counts
+	stats.TotalDocs = total
 
 	err = db.QueryRowContext(ctx, `
 		SELECT

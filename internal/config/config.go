@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"dir2mcp/internal/mistral"
 )
@@ -87,6 +88,18 @@ type Config struct {
 	// DIR2MCP_CHAT_MODEL also affects this value.
 	ChatModel string
 
+	// SessionInactivityTimeout defines how long a session may be idle before it
+	// is considered expired.  Zero means the default hardcoded value (24h).
+	SessionInactivityTimeout time.Duration
+	// SessionMaxLifetime sets an optional absolute upper bound on a session's
+	// lifespan regardless of activity.  Zero disables this limit.
+	SessionMaxLifetime time.Duration
+	// HealthCheckInterval controls how frequently the runtime polls connector
+	// health endpoints when checking for availability.  A zero value means the
+	// default (5s).  The interval is used as the base fixed delay; failures
+	// trigger bounded exponential backoff independent of this setting.
+	HealthCheckInterval time.Duration
+
 	X402 X402Config
 }
 
@@ -110,16 +123,23 @@ type fileConfig struct {
 	AllowedOrigins       []string
 	EmbedModelText       *string
 	EmbedModelCode       *string
-	X402Mode             *string
-	X402FacilitatorURL   *string
-	X402FacilitatorToken *string
-	X402ResourceBaseURL  *string
-	X402ToolsCallEnabled *bool
-	X402PriceAtomic      *string
-	X402Network          *string
-	X402Scheme           *string
-	X402Asset            *string
-	X402PayTo            *string
+	// session timings expressed as YAML duration strings.  populated by
+	// parseConfigYAML's custom parser via setFileScalarValue rather than the
+	// standard yaml.Unmarshal machinery.  struct tags are therefore omitted
+	// elsewhere and would be purely documentation if added here.
+	SessionInactivityTimeout *time.Duration
+	SessionMaxLifetime       *time.Duration
+	HealthCheckInterval      *time.Duration
+	X402Mode                 *string
+	X402FacilitatorURL       *string
+	X402FacilitatorToken     *string
+	X402ResourceBaseURL      *string
+	X402ToolsCallEnabled     *bool
+	X402PriceAtomic          *string
+	X402Network              *string
+	X402Scheme               *string
+	X402Asset                *string
+	X402PayTo                *string
 }
 
 type persistedConfig struct {
@@ -136,6 +156,10 @@ type persistedConfig struct {
 	PathExcludes    []string `yaml:"path_excludes"`
 	SecretPatterns  []string `yaml:"secret_patterns"`
 	MistralBaseURL  string   `yaml:"mistral_base_url"`
+	// optional session timeouts expressed as YAML duration strings
+	SessionInactivityTimeout time.Duration `yaml:"session_inactivity_timeout"`
+	SessionMaxLifetime       time.Duration `yaml:"session_max_lifetime"`
+	HealthCheckInterval      time.Duration `yaml:"health_check_interval"`
 
 	ElevenLabsBaseURL    string   `yaml:"elevenlabs_base_url"`
 	ElevenLabsTTSVoiceID string   `yaml:"elevenlabs_tts_voice_id"`
@@ -174,6 +198,10 @@ func Default() Config {
 		AuthMode:        "auto",
 		RateLimitRPS:    60,
 		RateLimitBurst:  20,
+		// default session inactivity matches previous hardcoded sessionTTL (24h)
+		SessionInactivityTimeout: 24 * time.Hour,
+		SessionMaxLifetime:       0,
+		HealthCheckInterval:      5 * time.Second,
 		TrustedProxies: []string{
 			"127.0.0.1/32",
 			"::1/128",
@@ -239,6 +267,13 @@ func SaveFile(path string, cfg Config) error {
 		return errors.New("config path is required")
 	}
 
+	// validate before persisting so callers don't accidentally write
+	// nonsensical values (negative durations, mismatched session
+	// lifetimes, etc.).  the error is wrapped to make the origin clear.
+	if err := cfg.Validate(); err != nil {
+		return fmt.Errorf("validate config: %w", err)
+	}
+
 	serializable := persistedConfig{
 		RootDir:              cfg.RootDir,
 		StateDir:             cfg.StateDir,
@@ -269,6 +304,10 @@ func SaveFile(path string, cfg Config) error {
 		X402Scheme:           cfg.X402.Scheme,
 		X402Asset:            cfg.X402.Asset,
 		X402PayTo:            cfg.X402.PayTo,
+		// session settings
+		SessionInactivityTimeout: cfg.SessionInactivityTimeout,
+		SessionMaxLifetime:       cfg.SessionMaxLifetime,
+		HealthCheckInterval:      cfg.HealthCheckInterval,
 	}
 
 	raw, err := marshalConfigYAML(serializable)
@@ -300,6 +339,9 @@ func load(path string, overrideEnv map[string]string, applyEnv bool) (Config, er
 		if applyEnv {
 			applyEnvOverrides(&cfg, overrideEnv)
 		}
+		if err := cfg.Validate(); err != nil {
+			return Config{}, err
+		}
 		return cfg, nil
 	}
 
@@ -307,6 +349,9 @@ func load(path string, overrideEnv map[string]string, applyEnv bool) (Config, er
 		if errors.Is(err, os.ErrNotExist) {
 			if applyEnv {
 				applyEnvOverrides(&cfg, overrideEnv)
+			}
+			if err := cfg.Validate(); err != nil {
+				return Config{}, err
 			}
 			return cfg, nil
 		}
@@ -318,6 +363,9 @@ func load(path string, overrideEnv map[string]string, applyEnv bool) (Config, er
 	}
 	if applyEnv {
 		applyEnvOverrides(&cfg, overrideEnv)
+	}
+	if err := cfg.Validate(); err != nil {
+		return Config{}, err
 	}
 	return cfg, nil
 }
@@ -378,6 +426,15 @@ func applyFileOverrides(cfg *Config, path string) error {
 	}
 	if fileCfg.MistralBaseURL != nil {
 		cfg.MistralBaseURL = *fileCfg.MistralBaseURL
+	}
+	if fileCfg.SessionInactivityTimeout != nil {
+		cfg.SessionInactivityTimeout = *fileCfg.SessionInactivityTimeout
+	}
+	if fileCfg.SessionMaxLifetime != nil {
+		cfg.SessionMaxLifetime = *fileCfg.SessionMaxLifetime
+	}
+	if fileCfg.HealthCheckInterval != nil {
+		cfg.HealthCheckInterval = *fileCfg.HealthCheckInterval
 	}
 	if fileCfg.ElevenLabsBaseURL != nil {
 		cfg.ElevenLabsBaseURL = *fileCfg.ElevenLabsBaseURL
@@ -563,6 +620,33 @@ func setFileScalarValue(cfg *fileConfig, key, value string) error {
 		cfg.EmbedModelText = strPtr(value)
 	case "embed_model_code":
 		cfg.EmbedModelCode = strPtr(value)
+	case "session_inactivity_timeout":
+		if value == "" {
+			return nil
+		}
+		d, err := time.ParseDuration(value)
+		if err != nil {
+			return fmt.Errorf("invalid duration for %s", key)
+		}
+		cfg.SessionInactivityTimeout = &d
+	case "session_max_lifetime":
+		if value == "" {
+			return nil
+		}
+		d, err := time.ParseDuration(value)
+		if err != nil {
+			return fmt.Errorf("invalid duration for %s", key)
+		}
+		cfg.SessionMaxLifetime = &d
+	case "health_check_interval":
+		if value == "" {
+			return nil
+		}
+		d, err := time.ParseDuration(value)
+		if err != nil {
+			return fmt.Errorf("invalid duration for %s", key)
+		}
+		cfg.HealthCheckInterval = &d
 	case "x402_mode":
 		cfg.X402Mode = strPtr(value)
 	case "x402_facilitator_url":
@@ -667,6 +751,9 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeList("path_excludes", cfg.PathExcludes)
 	writeList("secret_patterns", cfg.SecretPatterns)
 	writeScalar("mistral_base_url", cfg.MistralBaseURL)
+	writeScalar("session_inactivity_timeout", cfg.SessionInactivityTimeout.String())
+	writeScalar("session_max_lifetime", cfg.SessionMaxLifetime.String())
+	writeScalar("health_check_interval", cfg.HealthCheckInterval.String())
 	writeScalar("elevenlabs_base_url", cfg.ElevenLabsBaseURL)
 	writeScalar("elevenlabs_tts_voice_id", cfg.ElevenLabsTTSVoiceID)
 	writeList("allowed_origins", cfg.AllowedOrigins)
@@ -750,6 +837,58 @@ func applyEnvOverrides(cfg *Config, overrideEnv map[string]string) {
 	if trustedProxies, ok := envLookup("DIR2MCP_TRUSTED_PROXIES", overrideEnv); ok {
 		cfg.TrustedProxies = MergeTrustedProxies(cfg.TrustedProxies, trustedProxies)
 	}
+	// session-related environment variables are durations parsed by time.ParseDuration.
+	// Syntactically invalid values (parse errors) are warned about but not fatal; values
+	// that parse successfully (including negative durations) are stored and may still
+	// cause Validate() to fail later.
+	// Historically the variable was named DIR2MCP_SESSION_TIMEOUT; we
+	// elect to prefer the more explicit DIR2MCP_SESSION_INACTIVITY_TIMEOUT
+	// while still accepting the old name for compatibility.
+	if raw, ok := envLookup("DIR2MCP_SESSION_INACTIVITY_TIMEOUT", overrideEnv); ok {
+		trimmed := strings.TrimSpace(raw)
+		if trimmed != "" {
+			d, err := time.ParseDuration(trimmed)
+			if err != nil {
+				cfg.Warnings = append(cfg.Warnings, fmt.Errorf("invalid duration for DIR2MCP_SESSION_INACTIVITY_TIMEOUT: %q (%v)", trimmed, err))
+			} else {
+				cfg.SessionInactivityTimeout = d
+			}
+		}
+	} else if raw, ok := envLookup("DIR2MCP_SESSION_TIMEOUT", overrideEnv); ok {
+		// fallback to old name
+		trimmed := strings.TrimSpace(raw)
+		if trimmed != "" {
+			cfg.Warnings = append(cfg.Warnings, fmt.Errorf("DIR2MCP_SESSION_TIMEOUT is deprecated; use DIR2MCP_SESSION_INACTIVITY_TIMEOUT instead (current value: %q)", trimmed))
+			d, err := time.ParseDuration(trimmed)
+			if err != nil {
+				cfg.Warnings = append(cfg.Warnings, fmt.Errorf("invalid duration for DIR2MCP_SESSION_TIMEOUT: %q (%v)", trimmed, err))
+			} else {
+				cfg.SessionInactivityTimeout = d
+			}
+		}
+	}
+	if raw, ok := envLookup("DIR2MCP_SESSION_MAX_LIFETIME", overrideEnv); ok {
+		if trimmed := strings.TrimSpace(raw); trimmed != "" {
+			d, err := time.ParseDuration(trimmed)
+			if err != nil {
+				cfg.Warnings = append(cfg.Warnings, fmt.Errorf("invalid duration for DIR2MCP_SESSION_MAX_LIFETIME: %q (%v)", trimmed, err))
+			} else {
+				cfg.SessionMaxLifetime = d
+			}
+		}
+	}
+	// health check interval env; zero duration interpreted as default later
+	if raw, ok := envLookup("DIR2MCP_HEALTH_CHECK_INTERVAL", overrideEnv); ok {
+		trimmed := strings.TrimSpace(raw)
+		if trimmed != "" {
+			d, err := time.ParseDuration(trimmed)
+			if err != nil {
+				cfg.Warnings = append(cfg.Warnings, fmt.Errorf("invalid duration for DIR2MCP_HEALTH_CHECK_INTERVAL: %q (%v)", trimmed, err))
+			} else {
+				cfg.HealthCheckInterval = d
+			}
+		}
+	}
 	if raw, ok := envLookup("DIR2MCP_X402_MODE", overrideEnv); ok && strings.TrimSpace(raw) != "" {
 		cfg.X402.Mode = strings.TrimSpace(raw)
 	}
@@ -792,6 +931,45 @@ func applyEnvOverrides(cfg *Config, overrideEnv map[string]string) {
 	if raw, ok := envLookup("DIR2MCP_X402_PAY_TO", overrideEnv); ok && strings.TrimSpace(raw) != "" {
 		cfg.X402.PayTo = strings.TrimSpace(raw)
 	}
+}
+
+// Validate checks configuration consistency and applies normalization
+// or defaults.  It currently enforces rules around session durations:
+//
+//   - both SessionInactivityTimeout and SessionMaxLifetime must be >= 0
+//   - a zero SessionInactivityTimeout is interpreted as the default value
+//     (24h) and is rewritten accordingly.  callers should invoke this
+//     method after the config is loaded so they needn't special-case a
+//     zero value elsewhere.
+//
+// Future validations unrelated to x402 should also live here.  Like
+// ValidateX402, this method operates on a pointer receiver so that it can
+// modify the receiver in-place.
+func (c *Config) Validate() error {
+	if c.SessionInactivityTimeout < 0 {
+		return fmt.Errorf("session_inactivity_timeout must be non-negative: %v", c.SessionInactivityTimeout)
+	}
+	if c.SessionMaxLifetime < 0 {
+		return fmt.Errorf("session_max_lifetime must be non-negative: %v", c.SessionMaxLifetime)
+	}
+	if c.HealthCheckInterval < 0 {
+		return fmt.Errorf("health_check_interval must be non-negative: %v", c.HealthCheckInterval)
+	}
+	if c.SessionInactivityTimeout == 0 {
+		// zero is shorthand for the default
+		c.SessionInactivityTimeout = Default().SessionInactivityTimeout
+	}
+	if c.HealthCheckInterval == 0 {
+		c.HealthCheckInterval = Default().HealthCheckInterval
+	}
+	// if both timeouts are set, the max lifetime must not be shorter than
+	// the inactivity timeout; otherwise the session would expire before
+	// inactivity checks could ever trigger.
+	if c.SessionMaxLifetime > 0 && c.SessionMaxLifetime < c.SessionInactivityTimeout {
+		return fmt.Errorf("session_max_lifetime (%v) must be >= session_inactivity_timeout (%v)",
+			c.SessionMaxLifetime, c.SessionInactivityTimeout)
+	}
+	return nil
 }
 
 // ValidateX402 performs consistency checks on the embedded X402Config

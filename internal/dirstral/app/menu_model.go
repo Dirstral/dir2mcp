@@ -266,10 +266,12 @@ func (m MenuModel) View() string {
 			helpText = styleMuted.Render(truncateText("Keys: up/down or j/k move · enter choose · esc/q back · ? toggle help", contentWidth))
 		}
 		helpBox := menuStyle.MaxWidth(panelWidth).Render(helpText)
+		// Help is an overlay panel: replace menu content so keymap text stays visible
+		// even on shorter terminals where stacking panels would clip the footer area.
 		if tinyHeight {
-			body = joinVerticalNonEmpty(lipgloss.Left, body, helpBox)
+			body = joinVerticalNonEmpty(lipgloss.Left, header, helpBox)
 		} else {
-			body = joinVerticalNonEmpty(lipgloss.Center, body, helpBox)
+			body = joinVerticalNonEmpty(lipgloss.Center, header, helpBox)
 		}
 	}
 	content := composeWithPinnedFooter(body, footer, m.height)

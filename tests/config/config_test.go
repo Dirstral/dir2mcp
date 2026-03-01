@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"dir2mcp/internal/config"
 	"dir2mcp/tests/testutil"
@@ -156,6 +157,223 @@ func TestLoad_DefaultElevenLabsVoiceID(t *testing.T) {
 		if cfg.ElevenLabsTTSVoiceID != "JBFqnCBsd6RMkjVDRZzb" {
 			t.Fatalf("unexpected default elevenlabs voice id: %q", cfg.ElevenLabsTTSVoiceID)
 		}
+	})
+}
+
+func TestLoad_SessionTimeout_EnvAndYAML(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, ".dir2mcp.yaml")
+	writeFile(t, path, "session_inactivity_timeout: 1s\nsession_max_lifetime: 2s\n")
+	cfg, err := config.LoadFile(path)
+	if err != nil {
+		t.Fatalf("LoadFile failed: %v", err)
+	}
+	if cfg.SessionInactivityTimeout != time.Second {
+		t.Fatalf("unexpected inactivity timeout: %v", cfg.SessionInactivityTimeout)
+	}
+	if cfg.SessionMaxLifetime != 2*time.Second {
+		t.Fatalf("unexpected max lifetime: %v", cfg.SessionMaxLifetime)
+	}
+
+	testutil.WithWorkingDir(t, tmp, func() {
+		// old variable name should still work
+		t.Setenv("DIR2MCP_SESSION_TIMEOUT", "3s")
+		t.Setenv("DIR2MCP_SESSION_MAX_LIFETIME", "4s")
+		cfg2, err := config.Load(path)
+		if err != nil {
+			t.Fatalf("Load failed: %v", err)
+		}
+		if cfg2.SessionInactivityTimeout != 3*time.Second {
+			t.Fatalf("env override inactivity timeout=%v want=3s", cfg2.SessionInactivityTimeout)
+		}
+		if cfg2.SessionMaxLifetime != 4*time.Second {
+			t.Fatalf("env override max lifetime=%v want=4s", cfg2.SessionMaxLifetime)
+		}
+
+		// now prefer new variable name when both are present
+		t.Setenv("DIR2MCP_SESSION_INACTIVITY_TIMEOUT", "5s")
+		// keep max lifetime >= inactivity timeout for validation
+		t.Setenv("DIR2MCP_SESSION_MAX_LIFETIME", "6s")
+		cfg3, err := config.Load(path)
+		if err != nil {
+			t.Fatalf("Load failed: %v", err)
+		}
+		if cfg3.SessionInactivityTimeout != 5*time.Second {
+			t.Fatalf("prefer new env var; got %v want=5s", cfg3.SessionInactivityTimeout)
+		}
+		if cfg3.SessionMaxLifetime != 6*time.Second {
+			t.Fatalf("env max lifetime=%v want=6s", cfg3.SessionMaxLifetime)
+		}
+	})
+}
+
+func TestLoad_SessionTimeout_EnvWhitespace(t *testing.T) {
+	tmp := t.TempDir()
+	testutil.WithWorkingDir(t, tmp, func() {
+		// two related scenarios are exercised via subtests so that the
+		// outer t.Setenv cleanups stay in place and we never manually
+		// call os.Unsetenv.
+		t.Run("trimmed values", func(t *testing.T) {
+			// whitespace around duration should be trimmed before parsing
+			t.Setenv("DIR2MCP_SESSION_INACTIVITY_TIMEOUT", " 7s ")
+			t.Setenv("DIR2MCP_SESSION_MAX_LIFETIME", " 8s ")
+			cfg, err := config.Load("")
+			if err != nil {
+				t.Fatalf("Load failed: %v", err)
+			}
+			if cfg.SessionInactivityTimeout != 7*time.Second {
+				t.Fatalf("expected 7s after trimming whitespace; got %v", cfg.SessionInactivityTimeout)
+			}
+			if cfg.SessionMaxLifetime != 8*time.Second {
+				t.Fatalf("expected 8s after trimming whitespace; got %v", cfg.SessionMaxLifetime)
+			}
+		})
+
+		t.Run("invalid trimmed DIR2MCP_SESSION_INACTIVITY_TIMEOUT warns mentioning trimmed value", func(t *testing.T) {
+			// invalid value with whitespace should produce a warning mentioning the trimmed
+			// clear max lifetime so default inactivity fallback does not violate
+			// max>=inactivity validation when inactivity parsing fails.
+			t.Setenv("DIR2MCP_SESSION_MAX_LIFETIME", "")
+			t.Setenv("DIR2MCP_SESSION_INACTIVITY_TIMEOUT", "  notaduration  ")
+			cfg2, err := config.Load("")
+			if err != nil {
+				t.Fatalf("Load failed: %v", err)
+			}
+			if len(cfg2.Warnings) == 0 {
+				t.Fatal("expected warning for invalid duration")
+			}
+			found := false
+			for _, w := range cfg2.Warnings {
+				if strings.Contains(w.Error(), "notaduration") {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Fatalf("warning did not mention trimmed value: %v", cfg2.Warnings)
+			}
+		})
+	})
+}
+
+func TestLoad_SessionDurations_Validation(t *testing.T) {
+	// negative values should be rejected and zero becomes default
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, ".dir2mcp.yaml")
+
+	// inactivity checks (already present)
+	t.Run("negative inactivity YAML", func(t *testing.T) {
+		writeFile(t, path, "session_inactivity_timeout: -1s\n")
+		if _, err := config.LoadFile(path); err == nil {
+			t.Fatalf("expected error loading negative inactivity timeout")
+		}
+	})
+
+	t.Run("zero inactivity defaults YAML", func(t *testing.T) {
+		writeFile(t, path, "session_inactivity_timeout: 0s\n")
+		cfg, err := config.LoadFile(path)
+		if err != nil {
+			t.Fatalf("load failed: %v", err)
+		}
+		if cfg.SessionInactivityTimeout != 24*time.Hour {
+			t.Fatalf("zero inactivity timeout did not default, got %v", cfg.SessionInactivityTimeout)
+		}
+	})
+
+	// now add symmetric checks for max lifetime
+	t.Run("negative max lifetime YAML", func(t *testing.T) {
+		writeFile(t, path, "session_max_lifetime: -1s\n")
+		if _, err := config.LoadFile(path); err == nil {
+			t.Fatalf("expected error loading negative max lifetime")
+		}
+	})
+
+	t.Run("zero max lifetime defaults YAML", func(t *testing.T) {
+		writeFile(t, path, "session_max_lifetime: 0s\n")
+		cfg, err := config.LoadFile(path)
+		if err != nil {
+			t.Fatalf("load failed: %v", err)
+		}
+		if cfg.SessionMaxLifetime != config.Default().SessionMaxLifetime {
+			t.Fatalf("zero max lifetime did not default, got %v want %v", cfg.SessionMaxLifetime, config.Default().SessionMaxLifetime)
+		}
+	})
+
+	t.Run("env negative inactivity", func(t *testing.T) {
+		testutil.WithWorkingDir(t, tmp, func() {
+			t.Setenv("DIR2MCP_SESSION_INACTIVITY_TIMEOUT", "-5s")
+			if _, err := config.Load(""); err == nil {
+				t.Fatalf("expected error for negative inactivity via env")
+			}
+		})
+	})
+
+	t.Run("env negative max lifetime", func(t *testing.T) {
+		testutil.WithWorkingDir(t, tmp, func() {
+			t.Setenv("DIR2MCP_SESSION_MAX_LIFETIME", "-5s")
+			if _, err := config.Load(""); err == nil {
+				t.Fatalf("expected error for negative max lifetime via env")
+			}
+		})
+	})
+
+	t.Run("health_check interval YAML and env override", func(t *testing.T) {
+		testutil.WithWorkingDir(t, tmp, func() {
+			// clear any session env vars left over from earlier subtests
+			t.Setenv("DIR2MCP_SESSION_INACTIVITY_TIMEOUT", "")
+			t.Setenv("DIR2MCP_SESSION_MAX_LIFETIME", "")
+			writeFile(t, path, "health_check_interval: 10s\n")
+			cfg, err := config.LoadFile(path)
+			if err != nil {
+				t.Fatalf("LoadFile failed: %v", err)
+			}
+			if cfg.HealthCheckInterval != 10*time.Second {
+				t.Fatalf("unexpected health interval from YAML: %v", cfg.HealthCheckInterval)
+			}
+
+			// env override within same working-dir scope
+			t.Setenv("DIR2MCP_HEALTH_CHECK_INTERVAL", "15s")
+			cfg, err = config.Load(path)
+			if err != nil {
+				t.Fatalf("Load failed: %v", err)
+			}
+			if cfg.HealthCheckInterval != 15*time.Second {
+				t.Fatalf("env override health interval=%v want=15s", cfg.HealthCheckInterval)
+			}
+		})
+	})
+
+	t.Run("negative health YAML", func(t *testing.T) {
+		writeFile(t, path, "health_check_interval: -1s\n")
+		if _, err := config.LoadFile(path); err == nil {
+			t.Fatalf("expected error loading negative health interval")
+		}
+	})
+
+	t.Run("negative health env", func(t *testing.T) {
+		testutil.WithWorkingDir(t, tmp, func() {
+			t.Setenv("DIR2MCP_HEALTH_CHECK_INTERVAL", "-5s")
+			if _, err := config.Load(""); err == nil {
+				t.Fatalf("expected error for negative health interval via env")
+			}
+		})
+	})
+
+	t.Run("max lifetime < inactivity YAML", func(t *testing.T) {
+		writeFile(t, path, "session_inactivity_timeout: 10s\nsession_max_lifetime: 5s\n")
+		if _, err := config.LoadFile(path); err == nil {
+			t.Fatalf("expected error when max lifetime < inactivity timeout")
+		}
+	})
+
+	t.Run("env max lifetime < inactivity", func(t *testing.T) {
+		testutil.WithWorkingDir(t, tmp, func() {
+			t.Setenv("DIR2MCP_SESSION_INACTIVITY_TIMEOUT", "10s")
+			t.Setenv("DIR2MCP_SESSION_MAX_LIFETIME", "5s")
+			if _, err := config.Load(""); err == nil {
+				t.Fatalf("expected error for env max lifetime < inactivity")
+			}
+		})
 	})
 }
 

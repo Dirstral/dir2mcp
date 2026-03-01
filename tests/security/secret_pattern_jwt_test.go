@@ -125,10 +125,11 @@ func parseSecretPatternsFromSpec(t *testing.T) []string {
 	t.Helper()
 
 	root := repoRoot(t)
-	specPath := filepath.Join(root, "SPEC.md")
+	// SPEC.md lives under docs/ in the repository
+	specPath := filepath.Join(root, "docs", "SPEC.md")
 	file, err := os.Open(specPath)
 	if err != nil {
-		t.Fatalf("failed to open SPEC.md: %v", err)
+		t.Fatalf("failed to open docs/SPEC.md: %v", err)
 	}
 	defer func() {
 		if closeErr := file.Close(); closeErr != nil {
@@ -218,5 +219,17 @@ func TestSpecYAMLSecretPatterns_Compile_JWTAndBearer(t *testing.T) {
 	}
 	if _, err := regexp.Compile(bearerFromSpec); err != nil {
 		t.Fatalf("bearer pattern from SPEC failed to compile: %v", err)
+	}
+
+	// Ensure our local constants stay in sync with the SPEC patterns
+	// Compare compiled string representations to avoid differences in
+	// escaping or formatting causing false negatives.
+	if regexp.MustCompile(jwtPattern).String() != regexp.MustCompile(jwtFromSpec).String() {
+		t.Fatalf("jwtPattern constant and SPEC pattern differ\nlocal: %s\nSPEC : %s",
+			jwtPattern, jwtFromSpec)
+	}
+	if regexp.MustCompile(bearerPattern).String() != regexp.MustCompile(bearerFromSpec).String() {
+		t.Fatalf("bearerPattern constant and SPEC pattern differ\nlocal: %s\nSPEC : %s",
+			bearerPattern, bearerFromSpec)
 	}
 }

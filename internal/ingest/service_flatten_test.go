@@ -3,6 +3,9 @@ package ingest
 import (
 	"strings"
 	"testing"
+	"time"
+
+	"dir2mcp/internal/config"
 )
 
 func TestFlattenJSONForIndexing_MapAndArray(t *testing.T) {
@@ -62,4 +65,29 @@ func TestFlattenJSONForIndexing_TopLevelScalar(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestHealthCheckIntervalHelper(t *testing.T) {
+	// split into cases so failures are isolated and named
+	t.Run("zero-value config", func(t *testing.T) {
+		// zero-value config triggers the fallback branch in healthCheckInterval
+		s := &Service{cfg: config.Config{HealthCheckInterval: 0}}
+		if got := s.healthCheckInterval(); got != 5*time.Second {
+			t.Fatalf("zero-value health interval = %v; want 5s", got)
+		}
+	})
+
+	t.Run("explicit override", func(t *testing.T) {
+		s := &Service{cfg: config.Config{HealthCheckInterval: 8 * time.Second}}
+		if got := s.healthCheckInterval(); got != 8*time.Second {
+			t.Fatalf("override health interval = %v; want 8s", got)
+		}
+	})
+
+	t.Run("nil receiver", func(t *testing.T) {
+		var nilSvc *Service
+		if got := nilSvc.healthCheckInterval(); got != 5*time.Second {
+			t.Fatalf("nil service health interval = %v; want default 5s", got)
+		}
+	})
 }
