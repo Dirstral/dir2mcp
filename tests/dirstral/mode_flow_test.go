@@ -226,7 +226,7 @@ func newModeFlowMCPServer(t *testing.T) (*httptest.Server, *modeFlowCalls) {
 
 		switch method {
 		case "initialize":
-			w.Header().Set("MCP-Session-Id", sessionID)
+			w.Header().Set(protocol.MCPSessionHeader, sessionID)
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"jsonrpc": "2.0",
@@ -236,7 +236,7 @@ func newModeFlowMCPServer(t *testing.T) (*httptest.Server, *modeFlowCalls) {
 		case "notifications/initialized":
 			w.WriteHeader(http.StatusAccepted)
 		case "tools/list":
-			if r.Header.Get("MCP-Session-Id") != sessionID {
+			if r.Header.Get(protocol.MCPSessionHeader) != sessionID {
 				http.Error(w, "unknown session", http.StatusNotFound)
 				return
 			}
@@ -255,7 +255,7 @@ func newModeFlowMCPServer(t *testing.T) (*httptest.Server, *modeFlowCalls) {
 				},
 			})
 		case "tools/call":
-			if r.Header.Get("MCP-Session-Id") != sessionID {
+			if r.Header.Get(protocol.MCPSessionHeader) != sessionID {
 				http.Error(w, "unknown session", http.StatusNotFound)
 				return
 			}
