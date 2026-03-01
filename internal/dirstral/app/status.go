@@ -14,7 +14,7 @@ type lighthouseStatusMsg struct {
 	Health host.HealthInfo
 }
 
-// pollLighthouseStatus returns a tea.Cmd that checks lighthouse health and
+// pollLighthouseStatus returns a tea.Msg that checks lighthouse health and
 // sends the result as a lighthouseStatusMsg.
 func pollLighthouseStatus() tea.Msg {
 	return lighthouseStatusMsg{Health: host.CheckHealth()}
