@@ -15,6 +15,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -42,9 +43,12 @@ const (
 )
 
 const (
-	authTokenEnvVar    = "DIR2MCP_AUTH_TOKEN"
-	connectionFileName = "connection.json"
-	secretTokenName    = "secret.token"
+	authTokenEnvVar = "DIR2MCP_AUTH_TOKEN"
+	// environment variable for the x402 facilitator bearer token; CLI honors
+	// this value (but it is *not* persisted to disk) in addition to flags.
+	x402FacilitatorTokenEnvVar = "DIR2MCP_X402_FACILITATOR_TOKEN"
+	connectionFileName         = "connection.json"
+	secretTokenName            = "secret.token"
 )
 
 var commands = map[string]struct{}{
@@ -98,18 +102,60 @@ type globalOptions struct {
 
 type upOptions struct {
 	globalOptions
-	readOnly            bool
-	public              bool
-	forceInsecure       bool
-	x402ResourceBaseURL string
-	auth                string
-	listen              string
-	mcpPath             string
-	allowedOrigins      string
+	readOnly           bool
+	public             bool
+	forceInsecure      bool
+	x402Mode           string
+	x402FacilitatorURL string
+	// token values may come from a flag, environment variable, or file path
+	x402FacilitatorToken     string
+	x402FacilitatorTokenFile string
+	// original direct token flag presence; true when the user supplied
+	// --x402-facilitator-token and it was non-empty before any precedence
+	// logic cleared it in favor of a file path.
+	x402FacilitatorTokenDirectSet bool
+	x402ResourceBaseURL           string
+	x402Network                   string
+	x402Price                     string
+	x402Scheme                    string
+	x402Asset                     string
+	x402PayTo                     string
+	x402ToolsCallEnabled          bool
+	x402ToolsCallEnabledIsSet     bool
+	auth                          string
+	listen                        string
+	mcpPath                       string
+	allowedOrigins                string
 	// overrideable models, set via flags or env/config
 	embedModelText string
 	embedModelCode string
 	chatModel      string
+}
+
+type optionalBoolFlag struct {
+	value bool
+	set   bool
+}
+
+func (o *optionalBoolFlag) String() string {
+	if o == nil {
+		return "false"
+	}
+	return strconv.FormatBool(o.value)
+}
+
+func (o *optionalBoolFlag) Set(s string) error {
+	parsed, err := strconv.ParseBool(strings.TrimSpace(s))
+	if err != nil {
+		return err
+	}
+	o.value = parsed
+	o.set = true
+	return nil
+}
+
+func (o *optionalBoolFlag) IsBoolFlag() bool {
+	return true
 }
 
 type askOptions struct {
@@ -286,7 +332,7 @@ func (a *App) printUsage() {
 	writeln(a.stdout, "dir2mcp")
 	writeln(a.stdout, "usage: dir2mcp [--json] [--non-interactive] <command>")
 	writeln(a.stdout, "commands: up, status, ask, reindex, config, version")
-	writeln(a.stdout, "for 'up' the following flags are available: --listen, --mcp-path, --public, --read-only, --auth, --allowed-origins, --embed-model-text, --embed-model-code, --chat-model, ...")
+	writeln(a.stdout, "for 'up' the following flags are available: --listen, --mcp-path, --public, --read-only, --auth, --allowed-origins, --embed-model-text, --embed-model-code, --chat-model, --x402, --x402-facilitator-url, ...")
 }
 
 func (a *App) runUp(ctx context.Context, opts upOptions) int {
@@ -294,6 +340,12 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	if err != nil {
 		writef(a.stderr, "load config: %v\n", err)
 		return exitConfigInvalid
+	}
+	// warn the user if a direct facilitator token was supplied but is being
+	// ignored in favor of a file path. parseUpOptions recorded the original
+	// flag presence in x402FacilitatorTokenDirectSet.
+	if opts.x402FacilitatorTokenDirectSet && opts.x402FacilitatorTokenFile != "" {
+		writef(a.stderr, "warning: --x402-facilitator-token ignored; using --x402-facilitator-token-file\n")
 	}
 
 	if opts.listen != "" {
@@ -317,6 +369,51 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	if strings.TrimSpace(opts.chatModel) != "" {
 		cfg.ChatModel = strings.TrimSpace(opts.chatModel)
 	}
+	if strings.TrimSpace(opts.x402Mode) != "" {
+		cfg.X402.Mode = strings.TrimSpace(opts.x402Mode)
+	}
+	if strings.TrimSpace(opts.x402FacilitatorURL) != "" {
+		cfg.X402.FacilitatorURL = strings.TrimSpace(opts.x402FacilitatorURL)
+	}
+	// precedence: file path > env var > flag
+	if opts.x402FacilitatorTokenFile != "" {
+		data, err := os.ReadFile(filepath.Clean(opts.x402FacilitatorTokenFile))
+		if err != nil {
+			writef(a.stderr, "failed to read x402 facilitator token file: %v\n", err)
+			return exitConfigInvalid
+		}
+		token := strings.TrimSpace(string(data))
+		if token == "" {
+			writef(a.stderr, "x402 facilitator token file is empty\n")
+			return exitConfigInvalid
+		}
+		cfg.X402.FacilitatorToken = token
+	} else if token := strings.TrimSpace(os.Getenv(x402FacilitatorTokenEnvVar)); token != "" {
+		cfg.X402.FacilitatorToken = token
+	} else if strings.TrimSpace(opts.x402FacilitatorToken) != "" {
+		cfg.X402.FacilitatorToken = strings.TrimSpace(opts.x402FacilitatorToken)
+	}
+	if strings.TrimSpace(opts.x402ResourceBaseURL) != "" {
+		cfg.X402.ResourceBaseURL = strings.TrimSpace(opts.x402ResourceBaseURL)
+	}
+	if strings.TrimSpace(opts.x402Network) != "" {
+		cfg.X402.Network = strings.TrimSpace(opts.x402Network)
+	}
+	if strings.TrimSpace(opts.x402Price) != "" {
+		cfg.X402.PriceAtomic = strings.TrimSpace(opts.x402Price)
+	}
+	if strings.TrimSpace(opts.x402Scheme) != "" {
+		cfg.X402.Scheme = strings.TrimSpace(opts.x402Scheme)
+	}
+	if strings.TrimSpace(opts.x402Asset) != "" {
+		cfg.X402.Asset = strings.TrimSpace(opts.x402Asset)
+	}
+	if strings.TrimSpace(opts.x402PayTo) != "" {
+		cfg.X402.PayTo = strings.TrimSpace(opts.x402PayTo)
+	}
+	if opts.x402ToolsCallEnabledIsSet {
+		cfg.X402.ToolsCallEnabled = opts.x402ToolsCallEnabled
+	}
 	if opts.public {
 		cfg.Public = true
 
@@ -339,7 +436,12 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 		writeln(a.stderr, "CONFIG_INVALID: --mcp-path must start with '/'")
 		return exitConfigInvalid
 	}
-	_ = opts.x402ResourceBaseURL
+
+	strictX402 := strings.EqualFold(strings.TrimSpace(cfg.X402.Mode), "required")
+	if err := cfg.ValidateX402(strictX402); err != nil {
+		writef(a.stderr, "CONFIG_INVALID: %v\n", err)
+		return exitConfigInvalid
+	}
 
 	if err := ensureRootAccessible(cfg.RootDir); err != nil {
 		writef(a.stderr, "root inaccessible: %v\n", err)
@@ -348,6 +450,16 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 
 	if err := os.MkdirAll(cfg.StateDir, 0o755); err != nil {
 		writef(a.stderr, "create state dir: %v\n", err)
+		return exitRootInaccessible
+	}
+	// create payments subdirectory while x402 configuration has been
+	// validated above. creating the state directory first ensures the
+	// parent exists. the call is intentionally unconditional here: we ensure
+	// the directory exists regardless of mode, avoiding inconsistent state.
+	// because it's done after x402 validation, a valid config (including
+	// mode="off") won't leave an inconsistent state.
+	if err := os.MkdirAll(filepath.Join(cfg.StateDir, "payments"), 0o755); err != nil {
+		writef(a.stderr, "create payments dir: %v\n", err)
 		return exitRootInaccessible
 	}
 
@@ -442,6 +554,7 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	serverOptions := []mcp.ServerOption{
 		mcp.WithStore(st),
 		mcp.WithIndexingState(indexingState),
+		mcp.WithEventEmitter(emitter.Emit),
 	}
 	if strings.TrimSpace(cfg.ElevenLabsAPIKey) != "" {
 		ttsClient := elevenlabs.NewClient(cfg.ElevenLabsAPIKey, cfg.ElevenLabsTTSVoiceID)
@@ -1307,7 +1420,18 @@ func parseUpOptions(global globalOptions, args []string) (upOptions, error) {
 	fs.BoolVar(&opts.readOnly, "read-only", false, "run in read-only mode")
 	fs.BoolVar(&opts.public, "public", false, "bind to all interfaces for external access")
 	fs.BoolVar(&opts.forceInsecure, "force-insecure", false, "allow public mode without auth (unsafe)")
+	fs.StringVar(&opts.x402Mode, "x402", "", "x402 mode: off|on|required")
+	fs.StringVar(&opts.x402FacilitatorURL, "x402-facilitator-url", "", "x402 facilitator base URL")
+	fs.StringVar(&opts.x402FacilitatorToken, "x402-facilitator-token", "", "x402 facilitator bearer token (insecure; token may also be provided via env or file)")
+	fs.StringVar(&opts.x402FacilitatorTokenFile, "x402-facilitator-token-file", "", "path to file containing x402 facilitator bearer token")
 	fs.StringVar(&opts.x402ResourceBaseURL, "x402-resource-base-url", "", "x402 resource base URL")
+	fs.StringVar(&opts.x402Network, "x402-network", "", "x402 network (CAIP-2)")
+	fs.StringVar(&opts.x402Price, "x402-price", "", "x402 atomic price per call")
+	fs.StringVar(&opts.x402Scheme, "x402-scheme", "", "x402 payment scheme")
+	fs.StringVar(&opts.x402Asset, "x402-asset", "", "x402 asset identifier")
+	fs.StringVar(&opts.x402PayTo, "x402-pay-to", "", "x402 pay-to address")
+	toolsCallEnabledFlag := &optionalBoolFlag{}
+	fs.Var(toolsCallEnabledFlag, "x402-tools-call-enabled", "enable x402 gating for tools/call")
 	fs.StringVar(&opts.auth, "auth", "", "auth mode: auto|none|file:<path>")
 	fs.StringVar(&opts.listen, "listen", "", "listen address")
 	fs.StringVar(&opts.mcpPath, "mcp-path", "", "MCP route path")
@@ -1318,6 +1442,22 @@ func parseUpOptions(global globalOptions, args []string) (upOptions, error) {
 	if err := fs.Parse(args); err != nil {
 		return upOptions{}, err
 	}
+	if toolsCallEnabledFlag.set {
+		opts.x402ToolsCallEnabled = toolsCallEnabledFlag.value
+		opts.x402ToolsCallEnabledIsSet = true
+	}
+
+	// if both forms of the facilitator token are supplied, the file wins.  the
+	// CLI parsing layer clears the direct-token field when a file path is
+	// present so that callers (including tests) can rely on mutual
+	// exclusivity without re‑implementing precedence logic. preserve whether
+	// the direct flag was originally set so we can warn later in the CLI flow.
+	directSet := strings.TrimSpace(opts.x402FacilitatorToken) != ""
+	if opts.x402FacilitatorTokenFile != "" && directSet {
+		opts.x402FacilitatorTokenDirectSet = true
+		opts.x402FacilitatorToken = ""
+	}
+
 	if fs.NArg() > 0 {
 		return upOptions{}, fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))
 	}
