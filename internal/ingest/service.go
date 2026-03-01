@@ -3,6 +3,7 @@ package ingest
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -727,6 +728,74 @@ func (s *Service) GenerateTranscriptRepresentation(ctx context.Context, doc mode
 	return s.generateTranscriptRepresentation(ctx, doc, content)
 }
 
+// StoreAnnotationRepresentations persists a structured annotation JSON payload
+// for a document and optionally stores a flattened text representation to make
+// annotation fields retrievable through semantic search.
+func (s *Service) StoreAnnotationRepresentations(ctx context.Context, doc model.Document, annotation map[string]interface{}, indexFlattenedText bool) (string, error) {
+	if s.repGen == nil {
+		return "", errors.New("representation generator not configured")
+	}
+	if doc.DocID <= 0 {
+		return "", errors.New("document id is required")
+	}
+	if annotation == nil {
+		return "", errors.New("annotation json is required")
+	}
+
+	jsonBytes, err := json.Marshal(annotation)
+	if err != nil {
+		return "", fmt.Errorf("marshal annotation json: %w", err)
+	}
+	jsonText := string(jsonBytes)
+
+	flattened := flattenJSONForIndexing(annotation)
+	preview := flattened
+	if runes := []rune(preview); len(runes) > 240 {
+		preview = string(runes[:240]) + "..."
+	}
+
+	err = s.repGen.store.WithTx(ctx, func(tx model.RepresentationStore) error {
+		jsonRep := model.Representation{
+			DocID:       doc.DocID,
+			RepType:     RepTypeAnnotationJSON,
+			RepHash:     computeRepHash(jsonBytes),
+			CreatedUnix: time.Now().Unix(),
+			Deleted:     false,
+		}
+		jsonRepID, upsertErr := tx.UpsertRepresentation(ctx, jsonRep)
+		if upsertErr != nil {
+			return fmt.Errorf("upsert annotation json representation: %w", upsertErr)
+		}
+		if upsertErr := s.repGen.upsertChunksForRepresentationWithStore(ctx, tx, jsonRepID, "text", chunkTextByChars(jsonText, 1200, 200, 120)); upsertErr != nil {
+			return fmt.Errorf("persist annotation json chunks: %w", upsertErr)
+		}
+
+		if !indexFlattenedText {
+			return nil
+		}
+
+		textRep := model.Representation{
+			DocID:       doc.DocID,
+			RepType:     RepTypeAnnotationText,
+			RepHash:     computeRepHash([]byte(flattened)),
+			CreatedUnix: time.Now().Unix(),
+			Deleted:     false,
+		}
+		textRepID, upsertErr := tx.UpsertRepresentation(ctx, textRep)
+		if upsertErr != nil {
+			return fmt.Errorf("upsert annotation text representation: %w", upsertErr)
+		}
+		if upsertErr := s.repGen.upsertChunksForRepresentationWithStore(ctx, tx, textRepID, "text", chunkTextByChars(flattened, 1200, 200, 120)); upsertErr != nil {
+			return fmt.Errorf("persist annotation text chunks: %w", upsertErr)
+		}
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	return preview, nil
+}
+
 // enforceCachePolicy scans cacheDir and removes entries that violate
 // the configured size or age limits.  It's safe to call even if neither
 // policy is enabled; in that case it is a no-op.
@@ -932,4 +1001,55 @@ func (s *Service) readOrComputeTranscript(ctx context.Context, doc model.Documen
 // ReadOrComputeTranscript exposes transcript cache lookup/computation for tests.
 func (s *Service) ReadOrComputeTranscript(ctx context.Context, doc model.Document, content []byte) (string, error) {
 	return s.readOrComputeTranscript(ctx, doc, content)
+}
+
+func flattenJSONForIndexing(v interface{}) string {
+	var lines []string
+	var walk func(prefix string, value interface{})
+	walk = func(prefix string, value interface{}) {
+		switch typed := value.(type) {
+		case map[string]interface{}:
+			keys := make([]string, 0, len(typed))
+			for key := range typed {
+				keys = append(keys, key)
+			}
+			sort.Strings(keys)
+			for _, key := range keys {
+				next := key
+				if prefix != "" {
+					next = prefix + "." + key
+				}
+				walk(next, typed[key])
+			}
+		case []interface{}:
+			for i, item := range typed {
+				next := fmt.Sprintf("%s[%d]", prefix, i)
+				walk(next, item)
+			}
+		case string:
+			if text := strings.TrimSpace(typed); text != "" {
+				lines = append(lines, fmt.Sprintf("%s: %s", prefix, text))
+			}
+		default:
+			b, err := json.Marshal(typed)
+			if err != nil {
+				// log the marshaling failure with context but continue processing
+				// so that other entries aren't dropped. include prefix, the
+				// value being marshaled and a reference to json.Marshal in the
+				// message so the source is obvious when debugging.
+				log.Printf("flattenJSONForIndexing: json.Marshal failed for prefix=%q type=%T error=%v (lines so far=%d)",
+					prefix, typed, err, len(lines))
+				return
+			}
+			lines = append(lines, fmt.Sprintf("%s: %s", prefix, string(b)))
+		}
+	}
+
+	walk("", v)
+	out := strings.TrimSpace(strings.Join(lines, "\n"))
+	if out == "" {
+		raw, _ := json.Marshal(v)
+		return string(raw)
+	}
+	return out
 }

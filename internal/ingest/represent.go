@@ -203,6 +203,28 @@ func ShouldGenerateRawText(docType string) bool {
 	}
 }
 
+// Ingest package chunking parameters.  These constants are the values used
+// internally when breaking up transcripts and text into smaller pieces for
+// indexing.  They are exported so that tests (and potentially other packages)
+// can reason about the limits without duplicating magic numbers.
+const (
+	// TranscriptChunkMaxChars is the maximum number of runes that will appear in
+	// any single chunk produced by chunkTranscriptSegmentWithTiming.  The
+	// implementation enforces this bound before trimming whitespace, so the
+	// actual text length may be smaller but will never exceed this value.
+	TranscriptChunkMaxChars = 1200
+
+	// TranscriptChunkOverlapChars is the number of runes that overlap between
+	// adjacent chunks when a transcript segment is split.  Overlap helps ensure
+	// that context is preserved across chunk boundaries.
+	TranscriptChunkOverlapChars = 120
+
+	// TranscriptChunkMinChars is the minimum number of runes that a non-terminal
+	// chunk must contain.  Segments shorter than this threshold are merged with
+	// the next window unless they are the final one.
+	TranscriptChunkMinChars = 80
+)
+
 type chunkSegment struct {
 	Text string
 	Span model.Span
@@ -300,24 +322,62 @@ func chunkTranscriptByTime(content string) []chunkSegment {
 		if trimmed == "" {
 			return nil
 		}
-		return []chunkSegment{{
-			Text: trimmed,
-			Span: model.Span{Kind: "time", StartMS: 0, EndMS: 0},
-		}}
+		return splitTranscriptSegmentWithTiming(trimmed, 0, estimateTranscriptDurationMS(trimmed))
 	}
 
 	out := make([]chunkSegment, 0, len(segments))
 	for i := range segments {
-		endMS := segments[i].startMS + 1
+		endMS := segments[i].startMS + estimateTranscriptDurationMS(segments[i].text)
 		if i+1 < len(segments) && segments[i+1].startMS >= segments[i].startMS {
 			endMS = segments[i+1].startMS
 		}
+		out = append(out, splitTranscriptSegmentWithTiming(segments[i].text, segments[i].startMS, endMS)...)
+	}
+	return out
+}
+
+func estimateTranscriptDurationMS(text string) int {
+	words := len(strings.Fields(text))
+	// Rough speaking pace: ~200 words/min => 300ms per word.
+	estimated := words * 300
+	if estimated < 1000 {
+		return 1000
+	}
+	return estimated
+}
+
+func splitTranscriptSegmentWithTiming(text string, startMS, endMS int) []chunkSegment {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return nil
+	}
+	if endMS <= startMS {
+		endMS = startMS + 1
+	}
+
+	// use the exported constants so callers (including tests) can reason about
+	// the underlying configuration without duplicating numbers.  The constants
+	// are unrolled here rather than passing a struct to keep the original
+	// implementation simple.
+	parts := chunkTextByChars(text, TranscriptChunkMaxChars, TranscriptChunkOverlapChars, TranscriptChunkMinChars)
+	if len(parts) == 0 {
+		parts = []chunkSegment{{Text: text}}
+	}
+
+	duration := endMS - startMS
+	out := make([]chunkSegment, 0, len(parts))
+	for i, part := range parts {
+		partStart := startMS + (duration*i)/len(parts)
+		partEnd := startMS + (duration*(i+1))/len(parts)
+		if partEnd <= partStart {
+			partEnd = partStart + 1
+		}
 		out = append(out, chunkSegment{
-			Text: segments[i].text,
+			Text: strings.TrimSpace(part.Text),
 			Span: model.Span{
 				Kind:    "time",
-				StartMS: segments[i].startMS,
-				EndMS:   endMS,
+				StartMS: partStart,
+				EndMS:   partEnd,
 			},
 		})
 	}

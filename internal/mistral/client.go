@@ -86,6 +86,9 @@ type Client struct {
 	// DefaultTranscribeModel controls the model string sent with audio
 	// transcription requests.  Callers may override it on the client instance.
 	DefaultTranscribeModel string
+	// DefaultTranscribeLanguage optionally sets a language hint for
+	// transcription requests. Empty means provider auto-detection.
+	DefaultTranscribeLanguage string
 
 	// DefaultOCRModel will be sent to the OCR endpoint if the caller does not
 	// specify an explicit model.  It is initialized to DefaultOCRModel by
@@ -739,6 +742,16 @@ func (c *Client) transcribeOnce(ctx context.Context, relPath string, data []byte
 			Message:   "failed to write transcription model",
 			Retryable: false,
 			Cause:     err,
+		}
+	}
+	if language := strings.TrimSpace(c.DefaultTranscribeLanguage); language != "" {
+		if err := writer.WriteField("language", language); err != nil {
+			return "", &model.ProviderError{
+				Code:      "MISTRAL_FAILED",
+				Message:   "failed to write transcription language",
+				Retryable: false,
+				Cause:     err,
+			}
 		}
 	}
 	if err := writer.Close(); err != nil {
