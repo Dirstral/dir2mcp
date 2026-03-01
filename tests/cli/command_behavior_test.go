@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -616,7 +617,7 @@ func TestAskKAboveMaxFails(t *testing.T) {
 	})
 
 	errOut := stderr.String()
-	if !strings.Contains(errOut, "invalid ask flags") || !strings.Contains(errOut, "k must be <= 50") {
+	if !strings.Contains(errOut, "invalid ask flags") || !strings.Contains(errOut, fmt.Sprintf("k must be <= %d", mcp.MaxSearchK)) {
 		t.Fatalf("expected k upper-bound error, got: %s", errOut)
 	}
 }
