@@ -1465,7 +1465,17 @@ func (s *Server) ensureTranscriptForAudioDoc(ctx context.Context, doc model.Docu
 	// still share a cache file.
 	langSuffix := ""
 	if l := strings.TrimSpace(language); l != "" {
-		langSuffix = "-" + strings.ToLower(l)
+		// Sanitize to only allow safe characters in filename
+		safe := strings.Map(func(r rune) rune {
+			if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
+				return r
+			}
+			return -1
+		}, strings.ToLower(l))
+		if safe == "" {
+			safe = "unknown"
+		}
+		langSuffix = "-" + safe
 	}
 	cachePath := filepath.Join(s.cfg.StateDir, "cache", "transcribe", ingest.ComputeContentHash(content)+langSuffix+".txt")
 	// Determine whether we already have a usable cache file. We initially

@@ -373,7 +373,7 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	}
 	// precedence: file path > env var > flag
 	if opts.x402FacilitatorTokenFile != "" {
-		data, err := os.ReadFile(opts.x402FacilitatorTokenFile)
+		data, err := os.ReadFile(filepath.Clean(opts.x402FacilitatorTokenFile))
 		if err != nil {
 			writef(a.stderr, "failed to read x402 facilitator token file: %v\n", err)
 			return exitConfigInvalid

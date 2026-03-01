@@ -759,6 +759,7 @@ func (s *Service) StoreAnnotationRepresentations(ctx context.Context, doc model.
 	jsonText := string(jsonBytes)
 
 	flattened := s.flattenJSONForIndexing(annotation)
+	trimmed := strings.TrimSpace(flattened)
 	preview := flattened
 	if runes := []rune(preview); len(runes) > 240 {
 		preview = string(runes[:240]) + "..."
@@ -786,7 +787,7 @@ func (s *Service) StoreAnnotationRepresentations(ctx context.Context, doc model.
 
 		// don't index an empty or whitespace-only flattened string; it only
 		// creates useless representations/chunks.
-		if strings.TrimSpace(flattened) == "" {
+		if trimmed == "" {
 			return nil
 		}
 
@@ -811,7 +812,7 @@ func (s *Service) StoreAnnotationRepresentations(ctx context.Context, doc model.
 	}
 	// Count JSON representation; count text representation only if created.
 	s.addRepresentations(1)
-	if indexFlattenedText && strings.TrimSpace(flattened) != "" {
+	if indexFlattenedText && trimmed != "" {
 		s.addRepresentations(1)
 	}
 	return preview, nil
@@ -1087,7 +1088,8 @@ func (s *Service) flattenJSONForIndexing(v interface{}) string {
 		if err != nil {
 			// log marshal failure so that debugging can surface problematic
 			// values; returning early avoids converting a nil slice to string
-			s.getLogger().Printf("flattenJSONForIndexing: fallback json.Marshal failed error=%v value=%#v", err, v)
+			// avoid logging raw value contents in case they contain sensitive data.
+			s.getLogger().Printf("flattenJSONForIndexing: fallback json.Marshal failed error=%v type=%T", err, v)
 			return ""
 		}
 		return string(raw)

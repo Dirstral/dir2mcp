@@ -756,6 +756,10 @@ func (s *Server) Close() error {
 		s.paymentLogWriter = nil
 	}
 	if s.paymentLogFile != nil {
+		// ensure on-disk durability: sync before closing.
+		if err := s.paymentLogFile.Sync(); err != nil {
+			errs = append(errs, fmt.Errorf("payment log file sync: %w", err))
+		}
 		if err := s.paymentLogFile.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("payment log file close: %w", err))
 		}

@@ -847,6 +847,14 @@ func (c *Config) ValidateX402(strict bool) error {
 		if parsed.Scheme == "" || parsed.Host == "" {
 			return fmt.Errorf("invalid x402 facilitator URL: %q", rawURL)
 		}
+		// normalize: strip trailing slash from path so callers can safely
+		// append segments.  collapse a bare "/" path to empty.
+		if parsed.Path == "/" {
+			parsed.Path = ""
+		} else {
+			parsed.Path = strings.TrimRight(parsed.Path, "/")
+		}
+		c.X402.FacilitatorURL = parsed.String()
 	}
 	if rawURL := strings.TrimSpace(c.X402.ResourceBaseURL); rawURL != "" {
 		parsed, err := url.Parse(rawURL)
@@ -856,6 +864,13 @@ func (c *Config) ValidateX402(strict bool) error {
 		if parsed.Scheme == "" || parsed.Host == "" {
 			return fmt.Errorf("invalid x402 resource base URL: %q", rawURL)
 		}
+		// normalize as above
+		if parsed.Path == "/" {
+			parsed.Path = ""
+		} else {
+			parsed.Path = strings.TrimRight(parsed.Path, "/")
+		}
+		c.X402.ResourceBaseURL = parsed.String()
 	}
 
 	// network is validated later when strict mode is enabled; no need to duplicate

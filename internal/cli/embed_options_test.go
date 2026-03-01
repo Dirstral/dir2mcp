@@ -73,5 +73,4 @@ func TestParseUpOptions_X402TokenFlags(t *testing.T) {
 			}
 		})
 	}
-
 }

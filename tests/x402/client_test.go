@@ -254,7 +254,7 @@ func TestVerify_BodyRedactedOnError_Nested(t *testing.T) {
 	if !errors.As(err, &fe) {
 		t.Fatalf("expected FacilitatorError, got %v", err)
 	}
-	if strings.Contains(fe.Body, "pw") || strings.Contains(fe.Body, "abc") || strings.Contains(fe.Body, "token") {
+	if strings.Contains(fe.Body, "pw") || strings.Contains(fe.Body, "abc") || strings.Contains(fe.Body, "token") || strings.Contains(fe.Body, secret) {
 		t.Errorf("nested sensitive values leaked: %s", fe.Body)
 	}
 	count := strings.Count(fe.Body, "[REDACTED]")

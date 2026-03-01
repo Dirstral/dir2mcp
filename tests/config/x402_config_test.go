@@ -117,6 +117,31 @@ func TestValidateX402_NormalizesMode(t *testing.T) {
 	}
 }
 
+// trailing slashes in the configured URLs should be stripped by validation
+func TestValidateX402_StripsTrailingSlashes(t *testing.T) {
+	cfg := config.Default()
+	cfg.X402.Mode = "required"
+	cfg.X402.ToolsCallEnabled = true
+	cfg.X402.FacilitatorURL = "https://facilitator.example.com/"
+	cfg.X402.ResourceBaseURL = "https://resource.example.com//"
+	cfg.X402.FacilitatorToken = "token"
+	cfg.X402.PriceAtomic = "100"
+	cfg.X402.Scheme = "exact"
+	cfg.X402.Network = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"
+	cfg.X402.Asset = "asset"
+	cfg.X402.PayTo = "payto"
+
+	if err := cfg.ValidateX402(false); err != nil {
+		t.Fatalf("unexpected validation error: %v", err)
+	}
+	if cfg.X402.FacilitatorURL != "https://facilitator.example.com" {
+		t.Fatalf("facilitator URL not normalized, got %q", cfg.X402.FacilitatorURL)
+	}
+	if cfg.X402.ResourceBaseURL != "https://resource.example.com" {
+		t.Fatalf("resource base URL not normalized, got %q", cfg.X402.ResourceBaseURL)
+	}
+}
+
 func TestValidateX402_InvalidNetwork(t *testing.T) {
 	cfg := config.Default()
 	cfg.X402.Mode = "required" // enable validation path
@@ -140,16 +165,23 @@ func TestValidateX402_InvalidNetwork(t *testing.T) {
 }
 
 func TestValidateX402_PriceMustBePositiveInteger(t *testing.T) {
-	cfg := config.Default()
-	cfg.X402.Mode = "required"
-	cfg.X402.ToolsCallEnabled = true
-	cfg.X402.FacilitatorURL = "https://facilitator.example.com"
-	cfg.X402.ResourceBaseURL = "https://resource.example.com"
-	cfg.X402.FacilitatorToken = "token"
-	cfg.X402.Scheme = "exact"
-	cfg.X402.Network = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp" // valid CAIP-2
-	cfg.X402.Asset = "asset"
-	cfg.X402.PayTo = "payto"
+	// helper to build a fresh valid config with required fields set;
+	// subtests will add the price value they want to check.
+	makeBase := func() *config.Config {
+		c := config.Default()
+		// take address so callers can mutate without copying
+		cp := &c
+		cp.X402.Mode = "required"
+		cp.X402.ToolsCallEnabled = true
+		cp.X402.FacilitatorURL = "https://facilitator.example.com"
+		cp.X402.ResourceBaseURL = "https://resource.example.com"
+		cp.X402.FacilitatorToken = "token"
+		cp.X402.Scheme = "exact"
+		cp.X402.Network = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp" // valid CAIP-2
+		cp.X402.Asset = "asset"
+		cp.X402.PayTo = "payto"
+		return cp
+	}
 
 	// iterate through a few invalid price strings, running each in a subtest
 	for _, tc := range []struct {
@@ -161,8 +193,7 @@ func TestValidateX402_PriceMustBePositiveInteger(t *testing.T) {
 		{"negative", "-100"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			// copy config so subtests don't mutate shared state
-			localCfg := cfg
+			localCfg := makeBase()
 			localCfg.X402.PriceAtomic = tc.bad
 			err := localCfg.ValidateX402(true)
 			if err == nil {
@@ -182,14 +213,14 @@ func TestValidateX402_PriceMustBePositiveInteger(t *testing.T) {
 
 	// additional explicit price checks in subtests for consistent reporting
 	t.Run("price=0 rejects", func(t *testing.T) {
-		local := cfg
+		local := makeBase()
 		local.X402.PriceAtomic = "0"
 		if err := local.ValidateX402(true); err == nil {
 			t.Fatal("expected price 0 to be rejected")
 		}
 	})
 	t.Run("price=12345 accepts", func(t *testing.T) {
-		local := cfg
+		local := makeBase()
 		local.X402.PriceAtomic = "12345"
 		if err := local.ValidateX402(true); err != nil {
 			t.Fatalf("expected positive price to be valid, got %v", err)

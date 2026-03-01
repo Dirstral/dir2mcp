@@ -400,7 +400,14 @@ func cloneRPCError(err *rpcError) *rpcError {
 	// manual copy to avoid returning nil.
 	var cloned rpcError
 	if b, marshalErr := json.Marshal(err); marshalErr == nil {
-		_ = json.Unmarshal(b, &cloned)
+		if json.Unmarshal(b, &cloned) != nil {
+			// fallback on unmarshal failure
+			cloned = *err
+			if err.Data != nil {
+				data := *err.Data
+				cloned.Data = &data
+			}
+		}
 	} else {
 		// fallback to previous behaviour; copy top-level and data by value.
 		cloned = *err

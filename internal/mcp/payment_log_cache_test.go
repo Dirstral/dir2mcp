@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -58,13 +59,37 @@ func TestAppendPaymentLogCachingAndClose(t *testing.T) {
 	if len(lines) != 2 {
 		t.Fatalf("wrong number of log lines: got %d, want 2", len(lines))
 	}
+	// build expectations matching the two appended entries.
+	expectedEvents := []struct {
+		name    string
+		payload map[string]interface{}
+	}{
+		{"evt1", map[string]interface{}{"foo": "bar"}},
+		{"evt2", map[string]interface{}{"baz": float64(123)}},
+	}
+
 	for i, line := range lines {
 		var entry map[string]interface{}
 		if err := json.Unmarshal([]byte(line), &entry); err != nil {
 			t.Fatalf("line %d is not valid json: %v", i+1, err)
 		}
-		if entry["event"] == nil {
-			t.Fatalf("line %d missing event field", i+1)
+
+		// verify event name
+		evt, ok := entry["event"].(string)
+		if !ok {
+			t.Fatalf("line %d event field is not a string", i+1)
+		}
+		if evt != expectedEvents[i].name {
+			t.Fatalf("line %d has event %q, want %q", i+1, evt, expectedEvents[i].name)
+		}
+
+		// payload is stored under "data" in the log entry
+		payload, ok := entry["data"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("line %d data field has unexpected type", i+1)
+		}
+		if !reflect.DeepEqual(payload, expectedEvents[i].payload) {
+			t.Fatalf("line %d payload mismatch: got %#v, want %#v", i+1, payload, expectedEvents[i].payload)
 		}
 	}
 }
@@ -221,10 +246,12 @@ func TestCloseErrorsPropagated(t *testing.T) {
 		t.Fatalf("joined error did not contain file close error: %v", err)
 	}
 	// Verify that the returned error implements Unwrap() []error so we know it's
-	// actually a joined error and that there are two components.
+	// actually a joined error and that there are multiple components.  Prior to
+	// adding a Sync() call we only expected two errors (flush+close), but the
+	// sync step may also fail resulting in three entries.  Accept any count >=2.
 	if je, ok := err.(interface{ Unwrap() []error }); ok {
-		if len(je.Unwrap()) != 2 {
-			t.Fatalf("expected two errors from joined error, got %d", len(je.Unwrap()))
+		if len(je.Unwrap()) < 2 {
+			t.Fatalf("expected at least two errors from joined error, got %d", len(je.Unwrap()))
 		}
 	} else {
 		t.Fatalf("expected joined error type, got %T", err)
