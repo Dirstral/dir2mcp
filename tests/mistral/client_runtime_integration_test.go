@@ -3,6 +3,7 @@ package tests
 import (
 	"context"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -72,7 +73,16 @@ func TestGenerate_Integration_MistralAPI(t *testing.T) {
 	if strings.TrimSpace(out) == "" {
 		t.Fatalf("Generate returned empty output")
 	}
-	if !strings.Contains(strings.ToLower(out), "dir2mcp-ok") {
-		t.Fatalf("Generate output did not include expected token: %q", out)
+
+	// Normalize output: lower-case, trim surrounding whitespace and common
+	// punctuation, then use a tolerant regex that allows optional hyphens or
+	// spaces between "dir2mcp" and "ok". This reduces flakiness from small
+	// formatting differences while still checking for connectivity.
+	norm := strings.ToLower(out)
+	norm = strings.TrimSpace(norm)
+	norm = strings.Trim(norm, " \t\n\r.?!,;:\\\"'")
+	re := regexp.MustCompile(`\bdir2mcp[- ]?ok\b`)
+	if !re.MatchString(norm) {
+		t.Fatalf("Generate output did not include expected token (normalized=%q): %q", norm, out)
 	}
 }

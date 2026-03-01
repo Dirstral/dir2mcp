@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"dir2mcp/internal/mistral"
 )
 
 const DefaultProtocolVersion = "2025-11-25"
@@ -49,6 +51,11 @@ type Config struct {
 	// defaults if the upstream API changes or custom models are desired.
 	EmbedModelText string
 	EmbedModelCode string
+	// ChatModel specifies the Mistral chat/completion model used for
+	// RAG-style generation.  Operators can override the hardcoded default
+	// when upstream introduces a new alias or model.  Environment variable
+	// DIR2MCP_CHAT_MODEL also affects this value.
+	ChatModel string
 }
 
 func Default() Config {
@@ -96,6 +103,7 @@ func Default() Config {
 		// default embedding models
 		EmbedModelText: "mistral-embed",
 		EmbedModelCode: "codestral-embed",
+		ChatModel:      mistral.DefaultChatModel,
 	}
 }
 
@@ -141,6 +149,9 @@ func applyEnvOverrides(cfg *Config, overrideEnv map[string]string) {
 	}
 	if m, ok := envLookup("DIR2MCP_EMBED_MODEL_CODE", overrideEnv); ok && strings.TrimSpace(m) != "" {
 		cfg.EmbedModelCode = strings.TrimSpace(m)
+	}
+	if m, ok := envLookup("DIR2MCP_CHAT_MODEL", overrideEnv); ok && strings.TrimSpace(m) != "" {
+		cfg.ChatModel = strings.TrimSpace(m)
 	}
 	if apiKey, ok := envLookup("ELEVENLABS_API_KEY", overrideEnv); ok && strings.TrimSpace(apiKey) != "" {
 		cfg.ElevenLabsAPIKey = apiKey

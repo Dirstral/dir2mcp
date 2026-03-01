@@ -23,6 +23,7 @@ func TestUpEmbedModelFlags_IsAcceptedByCLI(t *testing.T) {
 			"up",
 			"--embed-model-text", "foo",
 			"--embed-model-code", "bar",
+			"--chat-model", "baz",
 		})
 		if code != 2 {
 			t.Fatalf("unexpected exit code: got=%d want=2 stderr=%s", code, stderr.String())

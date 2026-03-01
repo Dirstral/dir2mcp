@@ -22,9 +22,12 @@ const (
 	defaultBaseURL        = "https://api.mistral.ai"
 	defaultBatchSize      = 32
 	defaultRequestTimeout = 30 * time.Second
-	defaultMaxRetries     = 3
-	defaultInitialBackoff = 250 * time.Millisecond
-	defaultMaxBackoff     = 2 * time.Second
+	// defaultGenerationTimeout is the timeout used for /v1/chat/completions when
+	// no explicit GenerationTimeout is supplied by the caller.
+	defaultGenerationTimeout = 120 * time.Second
+	defaultMaxRetries        = 3
+	defaultInitialBackoff    = 250 * time.Millisecond
+	defaultMaxBackoff        = 2 * time.Second
 	// Bound OCR request payload size (data URL + base64) to avoid oversized
 	// requests that frequently fail upstream or time out in transit.
 	defaultMaxOCRPayloadBytes = 20 * 1024 * 1024
@@ -32,8 +35,14 @@ const (
 	// DefaultOCRModel is the default Mistral model used for OCR requests when
 	// no other model is specified.  Consumers may override the value on the
 	// Client struct if they need to target a different version in the future.
-	DefaultOCRModel  = "mistral-ocr-latest"
-	defaultChatModel = "mistral-small-2506"
+	DefaultOCRModel = "mistral-ocr-latest"
+	// DefaultChatModel is the default model name used for chat/completion
+	// requests.  It is intentionally not version-pinned so that operators may
+	// provide aliases (e.g. "mistral-small-latest") without editing code.
+	DefaultChatModel = "mistral-small-2506"
+	// DefaultTranscribeModel is the default model used for audio
+	// transcription requests.
+	DefaultTranscribeModel = "voxtral-mini-latest"
 )
 
 // Client provides Mistral API integrations.
@@ -61,6 +70,23 @@ type Client struct {
 	// issuing an OCR request. Values <= 0 fall back to defaultMaxOCRPayloadBytes.
 	MaxOCRPayloadBytes int
 
+	// GenerationTimeout is the HTTP client timeout used for the chat
+	// completions endpoint.  Generation requests can take longer than other
+	// API calls, so this field allows configuration without affecting the
+	// timeout used for embeds/ocr/transcribe.  If zero, the regular
+	// defaultRequestTimeout is used.
+	GenerationTimeout time.Duration
+
+	// DefaultChatModel controls which chat/completions model is used for
+	// Generate requests.  The package-level constant DefaultChatModel is used
+	// when this field is empty to preserve existing behaviour.  Tests and
+	// applications may override this to experiment with alternative models
+	// or aliases (e.g. "mistral-small-latest").
+	DefaultChatModel string
+	// DefaultTranscribeModel controls the model string sent with audio
+	// transcription requests.  Callers may override it on the client instance.
+	DefaultTranscribeModel string
+
 	// DefaultOCRModel will be sent to the OCR endpoint if the caller does not
 	// specify an explicit model.  It is initialized to DefaultOCRModel by
 	// NewClient and can be mutated by callers to customize behaviour.
@@ -76,14 +102,17 @@ func NewClient(baseURL, apiKey string) *Client {
 	}
 
 	return &Client{
-		BaseURL:            strings.TrimRight(baseURL, "/"),
-		APIKey:             apiKey,
-		HTTPClient:         &http.Client{Timeout: defaultRequestTimeout},
-		BatchSize:          defaultBatchSize,
-		MaxRetries:         defaultMaxRetries,
-		InitialBackoff:     defaultInitialBackoff,
-		MaxBackoff:         defaultMaxBackoff,
-		MaxOCRPayloadBytes: defaultMaxOCRPayloadBytes,
+		BaseURL:                strings.TrimRight(baseURL, "/"),
+		APIKey:                 apiKey,
+		HTTPClient:             &http.Client{Timeout: defaultRequestTimeout},
+		BatchSize:              defaultBatchSize,
+		MaxRetries:             defaultMaxRetries,
+		InitialBackoff:         defaultInitialBackoff,
+		MaxBackoff:             defaultMaxBackoff,
+		MaxOCRPayloadBytes:     defaultMaxOCRPayloadBytes,
+		GenerationTimeout:      defaultGenerationTimeout,
+		DefaultChatModel:       DefaultChatModel,
+		DefaultTranscribeModel: DefaultTranscribeModel,
 		// ensure we always have a sensible default even if callers forget to
 		// set a model explicitly later on.
 		DefaultOCRModel: DefaultOCRModel,
@@ -616,7 +645,8 @@ func (c *Client) Generate(ctx context.Context, prompt string) (string, error) {
 }
 
 func (c *Client) transcribeWithRetry(ctx context.Context, relPath string, data []byte) (string, error) {
-	maxAttempts := c.MaxRetries
+	// allow initial try plus MaxRetries retries, matching embedBatchWithRetry
+	maxAttempts := c.MaxRetries + 1
 	if maxAttempts <= 0 {
 		maxAttempts = 1
 	}
@@ -658,6 +688,20 @@ func (c *Client) transcribeOnce(ctx context.Context, relPath string, data []byte
 			Retryable: false,
 		}
 	}
+	// enforce a maximum payload size mirroring the OCR check so callers can
+	// avoid sending absurdly large audio blobs.  use the same configuration
+	// parameter for simplicity.
+	maxPayload := c.MaxOCRPayloadBytes
+	if maxPayload <= 0 {
+		maxPayload = defaultMaxOCRPayloadBytes
+	}
+	if len(data) > maxPayload {
+		return "", &model.ProviderError{
+			Code:      "MISTRAL_FAILED",
+			Message:   fmt.Sprintf("transcription input too large (%d bytes, limit %d)", len(data), maxPayload),
+			Retryable: false,
+		}
+	}
 
 	fileName := strings.TrimSpace(filepath.Base(relPath))
 	if fileName == "" || fileName == "." || fileName == string(filepath.Separator) {
@@ -683,7 +727,11 @@ func (c *Client) transcribeOnce(ctx context.Context, relPath string, data []byte
 			Cause:     err,
 		}
 	}
-	if err := writer.WriteField("model", "voxtral-mini-latest"); err != nil {
+	modelName := DefaultTranscribeModel
+	if strings.TrimSpace(c.DefaultTranscribeModel) != "" {
+		modelName = c.DefaultTranscribeModel
+	}
+	if err := writer.WriteField("model", modelName); err != nil {
 		return "", &model.ProviderError{
 			Code:      "MISTRAL_FAILED",
 			Message:   "failed to write transcription model",
@@ -837,8 +885,13 @@ func (c *Client) generateOnce(ctx context.Context, prompt string) (string, error
 		}
 	}
 
+	// choose the chat model; allow caller override via Client field
+	chatModel := DefaultChatModel
+	if strings.TrimSpace(c.DefaultChatModel) != "" {
+		chatModel = c.DefaultChatModel
+	}
 	reqPayload := generateRequest{
-		Model: defaultChatModel,
+		Model: chatModel,
 		Messages: []generateMessage{
 			{Role: "user", Content: prompt},
 		},
@@ -866,8 +919,16 @@ func (c *Client) generateOnce(ctx context.Context, prompt string) (string, error
 	req.Header.Set("Content-Type", "application/json")
 
 	client := c.HTTPClient
+	// generation requests may take longer than the standard default timeout.
+	// apply GenerationTimeout (when configured) even if HTTPClient is already set.
+	timeout := defaultRequestTimeout
+	if c.GenerationTimeout > 0 {
+		timeout = c.GenerationTimeout
+	}
 	if client == nil {
-		client = &http.Client{Timeout: defaultRequestTimeout}
+		client = &http.Client{Timeout: timeout}
+	} else {
+		client = cloneHTTPClientWithTimeout(client, timeout)
 	}
 
 	resp, err := client.Do(req)
@@ -924,6 +985,15 @@ func (c *Client) generateOnce(ctx context.Context, prompt string) (string, error
 		}
 	}
 	return text, nil
+}
+
+func cloneHTTPClientWithTimeout(base *http.Client, timeout time.Duration) *http.Client {
+	if base == nil {
+		return &http.Client{Timeout: timeout}
+	}
+	cloned := *base
+	cloned.Timeout = timeout
+	return &cloned
 }
 
 func contentToText(content interface{}) string {

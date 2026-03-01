@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -15,15 +16,30 @@ import (
 )
 
 func TestTranscribe_FormatsSegments(t *testing.T) {
+	var handlerErr error
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/audio/transcriptions" {
-			t.Fatalf("unexpected path: %s", r.URL.Path)
+			handlerErr = fmt.Errorf("unexpected path: %s", r.URL.Path)
+			http.Error(w, handlerErr.Error(), http.StatusNotFound)
+			return
 		}
 		if got := r.Header.Get("Authorization"); got != "Bearer test-key" {
-			t.Fatalf("unexpected auth header: %q", got)
+			handlerErr = fmt.Errorf("unexpected auth header: %q", got)
+			http.Error(w, handlerErr.Error(), http.StatusUnauthorized)
+			return
 		}
 		if got := r.Header.Get("x-api-key"); got != "test-key" {
-			t.Fatalf("unexpected x-api-key header: %q", got)
+			handlerErr = fmt.Errorf("unexpected x-api-key header: %q", got)
+			http.Error(w, handlerErr.Error(), http.StatusUnauthorized)
+			return
+		}
+		// ensure default transcription model is included
+		if err := r.ParseMultipartForm(10 << 20); err == nil {
+			if m := r.FormValue("model"); m != mistral.DefaultTranscribeModel {
+				handlerErr = fmt.Errorf("unexpected model: %s", m)
+				http.Error(w, handlerErr.Error(), http.StatusBadRequest)
+				return
+			}
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"segments": []map[string]any{
@@ -40,9 +56,41 @@ func TestTranscribe_FormatsSegments(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Transcribe failed: %v", err)
 	}
+	if handlerErr != nil {
+		t.Fatalf("handler error: %v", handlerErr)
+	}
 	want := "[00:00] hello\n[01:05] world"
 	if out != want {
 		t.Fatalf("unexpected transcript output: got %q want %q", out, want)
+	}
+}
+
+func TestTranscribe_CustomModel(t *testing.T) {
+	var handlerErr error
+	testModel := "custom-stt"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseMultipartForm(10 << 20); err == nil {
+			if m := r.FormValue("model"); m != testModel {
+				handlerErr = fmt.Errorf("expected model %q, got %q", testModel, m)
+				http.Error(w, handlerErr.Error(), http.StatusBadRequest)
+				return
+			}
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"text": "ok"})
+	}))
+	defer server.Close()
+
+	client := mistral.NewClient(server.URL, "test-key")
+	client.DefaultTranscribeModel = testModel
+	out, err := client.Transcribe(context.Background(), "clip.mp3", []byte("audio"))
+	if err != nil {
+		t.Fatalf("Transcribe failed: %v", err)
+	}
+	if handlerErr != nil {
+		t.Fatalf("handler error: %v", handlerErr)
+	}
+	if out != "ok" {
+		t.Fatalf("unexpected transcript: %q", out)
 	}
 }
 

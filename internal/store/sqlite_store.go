@@ -1063,7 +1063,7 @@ func bootstrapSettingsLocked(ctx context.Context, db *sql.DB) error {
 		"ocr_model":            mistral.DefaultOCRModel,
 		"stt_provider":         "mistral",
 		"stt_model":            "voxtral-mini-latest",
-		"chat_model":           "mistral-small-2506",
+		"chat_model":           mistral.DefaultChatModel,
 	}
 
 	for key, value := range defaults {

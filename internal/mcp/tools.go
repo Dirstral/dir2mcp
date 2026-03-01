@@ -30,7 +30,7 @@ const (
 	defaultOCRModel       = mistral.DefaultOCRModel
 	defaultSTTProvider    = "mistral"
 	defaultSTTModel       = "voxtral-mini-latest"
-	defaultChatModel      = "mistral-small-2506"
+	defaultChatModel      = mistral.DefaultChatModel
 )
 
 var toolOrder = []string{
@@ -263,7 +263,12 @@ func (s *Server) handleStatsTool(_ context.Context, args map[string]interface{})
 			"ocr":          defaultOCRModel,
 			"stt_provider": defaultSTTProvider,
 			"stt_model":    defaultSTTModel,
-			"chat":         defaultChatModel,
+			"chat": func() string {
+				if s.cfg.ChatModel != "" {
+					return s.cfg.ChatModel
+				}
+				return defaultChatModel
+			}(),
 		},
 	}
 
