@@ -13,6 +13,7 @@ import (
 	"dir2mcp/internal/mcp"
 )
 
+// TestCORS_PreflightReturns204 verifies allowed-origin preflight requests return 204 with CORS headers.
 func TestCORS_PreflightReturns204(t *testing.T) {
 	cfg := config.Default()
 	cfg.AuthMode = "none"
@@ -62,6 +63,7 @@ func TestCORS_PreflightReturns204(t *testing.T) {
 	}
 }
 
+// TestCORS_OptionsWithoutPreflightHeadersFallsThrough verifies non-preflight OPTIONS requests fall through to method handling.
 func TestCORS_OptionsWithoutPreflightHeadersFallsThrough(t *testing.T) {
 	cfg := config.Default()
 	cfg.AuthMode = "none"
@@ -93,6 +95,7 @@ func TestCORS_OptionsWithoutPreflightHeadersFallsThrough(t *testing.T) {
 	}
 }
 
+// TestCORS_PreflightDisallowedOriginNoCORSHeaders verifies disallowed-origin preflights do not receive allow-origin headers.
 func TestCORS_PreflightDisallowedOriginNoCORSHeaders(t *testing.T) {
 	cfg := config.Default()
 	cfg.AuthMode = "none"
@@ -124,6 +127,7 @@ func TestCORS_PreflightDisallowedOriginNoCORSHeaders(t *testing.T) {
 	}
 }
 
+// TestCORS_DisallowedOriginNoHeaders verifies disallowed origins are rejected without CORS allow-origin headers.
 func TestCORS_DisallowedOriginNoHeaders(t *testing.T) {
 	cfg := config.Default()
 	cfg.AuthMode = "none"
@@ -158,6 +162,7 @@ func TestCORS_DisallowedOriginNoHeaders(t *testing.T) {
 	}
 }
 
+// TestCORS_AllowedOriginSetsHeaders verifies allowed origins on POST requests receive CORS allow-origin headers.
 func TestCORS_AllowedOriginSetsHeaders(t *testing.T) {
 	cfg := config.Default()
 	cfg.AuthMode = "none"
@@ -190,6 +195,7 @@ func TestCORS_AllowedOriginSetsHeaders(t *testing.T) {
 	}
 }
 
+// TestPublicFlag_RejectsAuthNone verifies CLI guardrails reject --public when auth is explicitly disabled.
 func TestPublicFlag_RejectsAuthNone(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	app := cli.NewAppWithIO(&stdout, &stderr)
