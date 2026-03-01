@@ -2,6 +2,7 @@ package breeze
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -10,6 +11,8 @@ import (
 	"dir2mcp/internal/dirstral/ui"
 	"dir2mcp/internal/protocol"
 )
+
+var ErrNilMCPClient = errors.New("nil mcp.Client")
 
 type ParsedInput struct {
 	Quit  bool
@@ -135,6 +138,9 @@ func AskTopKForModel(model string) int {
 func ExecuteParsed(ctx context.Context, client *mcp.Client, parsed ParsedInput) (*ToolExecution, error) {
 	if parsed.Tool == "" {
 		return &ToolExecution{}, nil
+	}
+	if client == nil {
+		return nil, ErrNilMCPClient
 	}
 	res, err := client.CallTool(ctx, parsed.Tool, parsed.Args)
 	if err != nil {
