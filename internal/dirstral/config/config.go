@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	coreconfig "dir2mcp/internal/config"
@@ -113,9 +115,6 @@ func loadDotEnvPrecedence() error {
 	for _, name := range []string{".env", ".env.local"} {
 		values, err := godotenv.Read(name)
 		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				continue
-			}
 			continue
 		}
 		for k, v := range values {
@@ -308,10 +307,13 @@ func EffectiveFields(cfg Config) []FieldInfo {
 	dotEnv := readDotFile(".env")
 
 	// Load config.toml into a separate struct to check overrides.
-	fileCfg := Default()
-	_ = mergeUserConfig(&fileCfg)
-
 	def := Default()
+	fileCfg := def
+	if err := mergeUserConfig(&fileCfg); err != nil {
+		// EffectiveFields is an observability helper. If config.toml is malformed,
+		// continue with defaults/env provenance rather than failing the UI status view.
+		fileCfg = def
+	}
 	result := make([]FieldInfo, 0, len(fieldDefs))
 
 	for _, fd := range fieldDefs {
@@ -395,8 +397,19 @@ func ValidateField(key, value string) error {
 			return fmt.Errorf("verbose must be \"true\" or \"false\", got %q", value)
 		}
 	case "host.listen":
-		if !strings.Contains(value, ":") {
-			return fmt.Errorf("host.listen must contain \":\" (e.g. %q)", DefaultHostListen)
+		host, port, err := net.SplitHostPort(strings.TrimSpace(value))
+		if err != nil {
+			return fmt.Errorf("host.listen must be host:port (e.g. %q): %w", DefaultHostListen, err)
+		}
+		if strings.TrimSpace(host) == "" && strings.TrimSpace(port) == "" {
+			return fmt.Errorf("host.listen must include a port (e.g. %q)", DefaultHostListen)
+		}
+		portNumber, err := strconv.Atoi(port)
+		if err != nil || portNumber < 0 || portNumber > 65535 {
+			if err != nil {
+				return fmt.Errorf("host.listen must use a valid numeric port (e.g. %q): %w", DefaultHostListen, err)
+			}
+			return fmt.Errorf("host.listen port out of range in %q (e.g. %q)", value, DefaultHostListen)
 		}
 	case "host.mcp_path":
 		if !strings.HasPrefix(value, "/") {
