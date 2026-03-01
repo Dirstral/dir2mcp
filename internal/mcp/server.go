@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"dir2mcp/internal/appstate"
+	"dir2mcp/internal/buildinfo"
 	"dir2mcp/internal/config"
 	"dir2mcp/internal/model"
 	"dir2mcp/internal/protocol"
@@ -256,6 +257,19 @@ func (s *Server) Run(ctx context.Context) error {
 }
 
 func (s *Server) RunOnListener(ctx context.Context, ln net.Listener) error {
+	return s.runOnListener(ctx, ln, "", "")
+}
+
+func (s *Server) RunOnListenerTLS(ctx context.Context, ln net.Listener, certFile, keyFile string) error {
+	certFile = strings.TrimSpace(certFile)
+	keyFile = strings.TrimSpace(keyFile)
+	if certFile == "" || keyFile == "" {
+		return errors.New("tls requires both certFile and keyFile")
+	}
+	return s.runOnListener(ctx, ln, certFile, keyFile)
+}
+
+func (s *Server) runOnListener(ctx context.Context, ln net.Listener, certFile, keyFile string) error {
 	if ln == nil {
 		return errors.New("nil listener passed to RunOnListener")
 	}
@@ -289,7 +303,12 @@ func (s *Server) RunOnListener(ctx context.Context, ln net.Listener) error {
 
 	errCh := make(chan error, 1)
 	go func() {
-		err := server.Serve(ln)
+		var err error
+		if certFile != "" && keyFile != "" {
+			err = server.ServeTLS(ln, certFile, keyFile)
+		} else {
+			err = server.Serve(ln)
+		}
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 			return
@@ -433,7 +452,7 @@ func (s *Server) handleInitialize(w http.ResponseWriter, id interface{}, hasID b
 		"serverInfo": map[string]interface{}{
 			"name":    "dir2mcp",
 			"title":   "dir2mcp: Directory RAG MCP Server",
-			"version": "0.0.0-dev",
+			"version": buildinfo.Version,
 		},
 		"instructions": "Use tools/list then tools/call. Results include citations.",
 	})
