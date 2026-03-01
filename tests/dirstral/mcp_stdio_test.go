@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
 
@@ -15,7 +16,11 @@ import (
 )
 
 func TestMCPClientStdioInitializeAndCall(t *testing.T) {
-	endpoint := fmt.Sprintf("/usr/bin/env GO_WANT_HELPER_PROCESS=1 %s -test.run=TestHelperProcessMCPStdio --", os.Args[0])
+	envPath, err := exec.LookPath("env")
+	if err != nil {
+		envPath = "env"
+	}
+	endpoint := fmt.Sprintf("%s GO_WANT_HELPER_PROCESS=1 %s -test.run=TestHelperProcessMCPStdio --", envPath, os.Args[0])
 	client := mcp.NewWithTransport(endpoint, "stdio", false)
 	defer func() {
 		_ = client.Close()
