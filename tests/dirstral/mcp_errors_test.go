@@ -87,8 +87,8 @@ func TestMCPPaymentRequiredActionableMessageFromHTTP402(t *testing.T) {
 		case "notifications/initialized":
 			w.WriteHeader(http.StatusAccepted)
 		case "tools/call":
-			w.Header().Set("payment-required", `{"x402Version":2}`)
-			w.Header().Set("payment-response", `{"network":"base"}`)
+			w.Header().Set(x402.HeaderPaymentRequired, `{"x402Version":2}`)
+			w.Header().Set(x402.HeaderPaymentResponse, `{"network":"base"}`)
 			w.WriteHeader(http.StatusPaymentRequired)
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"jsonrpc": "2.0",

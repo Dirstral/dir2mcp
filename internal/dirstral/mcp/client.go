@@ -365,6 +365,7 @@ func (c *Client) call(ctx context.Context, method string, params map[string]any,
 	}
 
 	prVal := headerValueIgnoreCase(resp.Header, x402.HeaderPaymentRequired)
+	prRespVal := headerValueIgnoreCase(resp.Header, x402.HeaderPaymentResponse)
 	var prHeader *x402.X402Payload
 	if prVal != "" {
 		var parsed x402.X402Payload
@@ -374,13 +375,23 @@ func (c *Client) call(ctx context.Context, method string, params map[string]any,
 	}
 
 	if resp.StatusCode == http.StatusPaymentRequired {
+		code := -32000 // generic error
+		message := "payment required"
+		var envelope jsonRPCResponse
+		if len(bodyBytes) > 0 {
+			if err := json.Unmarshal(bodyBytes, &envelope); err == nil && envelope.Error != nil {
+				code = envelope.Error.Code
+				message = envelope.Error.Message
+			}
+		}
+
 		return nil, resp.StatusCode, resp.Header, &jsonRPCError{
-			Code:                   -32000, // generic error
-			Message:                "payment required",
+			Code:                   code,
+			Message:                message,
 			HTTPStatus:             resp.StatusCode,
 			Headers:                flattenHeaders(resp.Header),
 			PaymentRequiredHeader:  prHeader,
-			PaymentResponseHeader:  headerValueIgnoreCase(resp.Header, x402.HeaderPaymentResponse),
+			PaymentResponseHeader:  prRespVal,
 			PaymentRequiredPresent: prVal != "",
 		}
 	}
@@ -407,7 +418,7 @@ func (c *Client) call(ctx context.Context, method string, params map[string]any,
 			HTTPStatus:             resp.StatusCode,
 			Headers:                flattenHeaders(resp.Header),
 			PaymentRequiredHeader:  prHeader,
-			PaymentResponseHeader:  headerValueIgnoreCase(resp.Header, x402.HeaderPaymentResponse),
+			PaymentResponseHeader:  prRespVal,
 			PaymentRequiredPresent: prVal != "",
 		}
 	}

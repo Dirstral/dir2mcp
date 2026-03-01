@@ -369,7 +369,7 @@ func renderResultString(tool string, res *mcp.ToolCallResult) string {
 	case protocol.ToolNameOpenFile:
 		return renderOpenFileString(res.StructuredContent)
 	case protocol.ToolNameAsk, protocol.ToolNameTranscribeAndAsk:
-		return renderAskString(res.StructuredContent)
+		return renderAskString(tool, res.StructuredContent)
 	case protocol.ToolNameAnnotate:
 		return renderAnnotateString(res.StructuredContent)
 	case protocol.ToolNameTranscribe:
@@ -445,13 +445,13 @@ func renderOpenFileString(sc map[string]any) string {
 	return b.String()
 }
 
-func renderAskString(sc map[string]any) string {
+func renderAskString(toolName string, sc map[string]any) string {
 	var b strings.Builder
 	answer := strings.TrimSpace(asString(sc["answer"]))
 	if answer != "" {
 		b.WriteString(answer + "\n")
 	}
-	if ordered := citationsFor(protocol.ToolNameAsk, sc); len(ordered) > 0 {
+	if ordered := citationsFor(toolName, sc); len(ordered) > 0 {
 		styled := make([]string, len(ordered))
 		for i, c := range ordered {
 			styled[i] = ui.Citation(c)
@@ -468,7 +468,7 @@ func renderAnnotateString(sc map[string]any) string {
 	if text, ok := sc["annotation_text_preview"].(string); ok && text != "" {
 		b.WriteString(ui.Dim("Preview: "+text) + "\n")
 	}
-	if jsonObj, ok := sc["annotation_json"].(map[string]any); ok {
+	if jsonObj, ok := sc["annotation_json"]; ok && jsonObj != nil {
 		bytes, err := json.MarshalIndent(jsonObj, "", "  ")
 		if err == nil {
 			b.WriteString(string(bytes))
