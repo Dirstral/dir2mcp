@@ -61,6 +61,9 @@ func TestCORS_PreflightReturns204(t *testing.T) {
 	if !strings.Contains(aceh, "MCP-Session-Id") {
 		t.Fatalf("Access-Control-Expose-Headers=%q must contain MCP-Session-Id", aceh)
 	}
+	if !strings.Contains(aceh, "X-MCP-Session-Expired") {
+		t.Fatalf("Access-Control-Expose-Headers=%q must contain X-MCP-Session-Expired", aceh)
+	}
 }
 
 // TestCORS_OptionsWithoutPreflightHeadersFallsThrough verifies non-preflight OPTIONS requests fall through to method handling.

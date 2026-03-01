@@ -25,7 +25,10 @@ type embeddedChunkMetadataSource interface {
 	ListEmbeddedChunkMetadata(ctx context.Context, indexKind string, limit, offset int) ([]model.ChunkTask, error)
 }
 
-const defaultEngineAskTimeout = 120 * time.Second
+const (
+	defaultEngineAskTimeout     = 120 * time.Second
+	defaultEnginePreloadTimeout = 30 * time.Second
+)
 
 // Engine provides a convenience wrapper around retrieval.Service for callers
 // that still rely on the legacy Engine API.
@@ -91,7 +94,9 @@ func NewEngine(stateDir, rootDir string, cfg *config.Config) (*Engine, error) {
 	svc.SetProtocolVersion(effective.ProtocolVersion)
 
 	if source, ok := interface{}(metadataStore).(embeddedChunkMetadataSource); ok {
-		total, err := preloadEngineChunkMetadata(context.Background(), source, svc)
+		preloadCtx, cancel := context.WithTimeout(context.Background(), defaultEnginePreloadTimeout)
+		defer cancel()
+		total, err := preloadEngineChunkMetadata(preloadCtx, source, svc)
 		if err != nil {
 			_ = metadataStore.Close()
 			_ = textIndex.Close()

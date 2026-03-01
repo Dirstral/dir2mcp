@@ -47,6 +47,8 @@ var defaultSecretPatternLiterals = []string{
 	`sk_[a-z0-9]{32}|api_[A-Za-z0-9]{32}`,
 }
 
+const defaultProtocolVersion = "2025-11-25"
+
 // Service implements retrieval operations over embedded data.
 // It holds necessary components like store, index, embedder and
 // supports configurable overfetching during searches. OverfetchMultiplier
@@ -128,7 +130,7 @@ func NewService(store model.Store, index model.Index, embedder model.Embedder, g
 		// may still call SetStateDir to override, and SetStateDir itself does
 		// not substitute a default.
 		stateDir:        "",
-		protocolVersion: "2025-11-25",
+		protocolVersion: defaultProtocolVersion,
 		excludeRegexps:  make(map[string]*regexp.Regexp),
 		pathExcludes:    append([]string(nil), defaultPathExcludes...),
 		secretPatterns:  compiledPatterns,
@@ -252,7 +254,7 @@ func (s *Service) SetStateDir(stateDir string) {
 func (s *Service) SetProtocolVersion(protocolVersion string) {
 	protocolVersion = strings.TrimSpace(protocolVersion)
 	if protocolVersion == "" {
-		protocolVersion = "2025-11-25"
+		protocolVersion = defaultProtocolVersion
 	}
 	s.metaMu.Lock()
 	s.protocolVersion = protocolVersion
@@ -661,7 +663,7 @@ func (s *Service) Stats(ctx context.Context) (model.Stats, error) {
 		stateDir = filepath.Join(rootDir, ".dir2mcp")
 	}
 	if protocolVersion == "" {
-		protocolVersion = "2025-11-25"
+		protocolVersion = defaultProtocolVersion
 	}
 
 	out := model.Stats{

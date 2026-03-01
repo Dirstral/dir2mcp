@@ -227,7 +227,7 @@ func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
 			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, MCP-Protocol-Version, MCP-Session-Id, PAYMENT-SIGNATURE")
-			w.Header().Set("Access-Control-Expose-Headers", "MCP-Session-Id, PAYMENT-REQUIRED, PAYMENT-RESPONSE")
+			w.Header().Set("Access-Control-Expose-Headers", "MCP-Session-Id, PAYMENT-REQUIRED, PAYMENT-RESPONSE, X-MCP-Session-Expired")
 			w.Header().Set("Access-Control-Max-Age", "86400")
 			w.Header().Set("Vary", "Origin")
 		}
