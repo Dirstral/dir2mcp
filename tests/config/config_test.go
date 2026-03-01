@@ -192,12 +192,61 @@ func TestLoad_SessionTimeout_EnvAndYAML(t *testing.T) {
 
 		// now prefer new variable name when both are present
 		t.Setenv("DIR2MCP_SESSION_INACTIVITY_TIMEOUT", "5s")
+		// keep max lifetime >= inactivity timeout for validation
+		t.Setenv("DIR2MCP_SESSION_MAX_LIFETIME", "6s")
 		cfg3, err := config.Load(path)
 		if err != nil {
 			t.Fatalf("Load failed: %v", err)
 		}
 		if cfg3.SessionInactivityTimeout != 5*time.Second {
 			t.Fatalf("prefer new env var; got %v want=5s", cfg3.SessionInactivityTimeout)
+		}
+		if cfg3.SessionMaxLifetime != 6*time.Second {
+			t.Fatalf("env max lifetime=%v want=6s", cfg3.SessionMaxLifetime)
+		}
+	})
+}
+
+func TestLoad_SessionTimeout_EnvWhitespace(t *testing.T) {
+	tmp := t.TempDir()
+	testutil.WithWorkingDir(t, tmp, func() {
+		// whitespace around duration should be trimmed before parsing
+		t.Setenv("DIR2MCP_SESSION_INACTIVITY_TIMEOUT", " 7s ")
+		t.Setenv("DIR2MCP_SESSION_MAX_LIFETIME", " 8s ")
+		cfg, err := config.Load("")
+		if err != nil {
+			t.Fatalf("Load failed: %v", err)
+		}
+		if cfg.SessionInactivityTimeout != 7*time.Second {
+			t.Fatalf("expected 7s after trimming whitespace; got %v", cfg.SessionInactivityTimeout)
+		}
+		if cfg.SessionMaxLifetime != 8*time.Second {
+			t.Fatalf("expected 8s after trimming whitespace; got %v", cfg.SessionMaxLifetime)
+		}
+
+		// invalid value with whitespace should produce a warning mentioning the trimmed
+		// clear max lifetime so default inactivity fallback does not violate
+		// max>=inactivity validation when inactivity parsing fails.
+		if err := os.Unsetenv("DIR2MCP_SESSION_MAX_LIFETIME"); err != nil {
+			t.Fatalf("Unsetenv failed: %v", err)
+		}
+		t.Setenv("DIR2MCP_SESSION_INACTIVITY_TIMEOUT", "  notaduration  ")
+		cfg2, err := config.Load("")
+		if err != nil {
+			t.Fatalf("Load failed: %v", err)
+		}
+		if len(cfg2.Warnings) == 0 {
+			t.Fatal("expected warning for invalid duration")
+		}
+		found := false
+		for _, w := range cfg2.Warnings {
+			if strings.Contains(w.Error(), "notaduration") {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("warning did not mention trimmed value: %v", cfg2.Warnings)
 		}
 	})
 }
@@ -207,6 +256,7 @@ func TestLoad_SessionDurations_Validation(t *testing.T) {
 	tmp := t.TempDir()
 	path := filepath.Join(tmp, ".dir2mcp.yaml")
 
+	// inactivity checks (already present)
 	writeFile(t, path, "session_inactivity_timeout: -1s\n")
 	if _, err := config.LoadFile(path); err == nil {
 		t.Fatalf("expected error loading negative inactivity timeout")
@@ -221,11 +271,49 @@ func TestLoad_SessionDurations_Validation(t *testing.T) {
 		t.Fatalf("zero inactivity timeout did not default, got %v", cfg.SessionInactivityTimeout)
 	}
 
+	// now add symmetric checks for max lifetime
+	writeFile(t, path, "session_max_lifetime: -1s\n")
+	if _, err := config.LoadFile(path); err == nil {
+		t.Fatalf("expected error loading negative max lifetime")
+	}
+
+	writeFile(t, path, "session_max_lifetime: 0s\n")
+	cfg, err = config.LoadFile(path)
+	if err != nil {
+		t.Fatalf("load failed: %v", err)
+	}
+	if cfg.SessionMaxLifetime != config.Default().SessionMaxLifetime {
+		t.Fatalf("zero max lifetime did not default, got %v want %v", cfg.SessionMaxLifetime, config.Default().SessionMaxLifetime)
+	}
+
 	// env negative should also error when using Load
 	testutil.WithWorkingDir(t, tmp, func() {
 		t.Setenv("DIR2MCP_SESSION_INACTIVITY_TIMEOUT", "-5s")
 		if _, err := config.Load(""); err == nil {
 			t.Fatalf("expected error for negative inactivity via env")
+		}
+	})
+
+	// max lifetime env negative check in a fresh working-dir block so the
+	// inactivity timeout variable doesn't also trigger the failure.
+	testutil.WithWorkingDir(t, tmp, func() {
+		t.Setenv("DIR2MCP_SESSION_MAX_LIFETIME", "-5s")
+		if _, err := config.Load(""); err == nil {
+			t.Fatalf("expected error for negative max lifetime via env")
+		}
+	})
+
+	// max lifetime shorter than inactivity should be rejected
+	writeFile(t, path, "session_inactivity_timeout: 10s\nsession_max_lifetime: 5s\n")
+	if _, err := config.LoadFile(path); err == nil {
+		t.Fatalf("expected error when max lifetime < inactivity timeout")
+	}
+
+	testutil.WithWorkingDir(t, tmp, func() {
+		t.Setenv("DIR2MCP_SESSION_INACTIVITY_TIMEOUT", "10s")
+		t.Setenv("DIR2MCP_SESSION_MAX_LIFETIME", "5s")
+		if _, err := config.Load(""); err == nil {
+			t.Fatalf("expected error for env max lifetime < inactivity")
 		}
 	})
 }

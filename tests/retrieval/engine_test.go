@@ -111,6 +111,9 @@ func newFakeMistralEmbeddingServer() *httptest.Server {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": data})
+		if err := json.NewEncoder(w).Encode(map[string]interface{}{"data": data}); err != nil {
+			// panic so the test fails fast if encoding unexpectedly fails
+			panic(err)
+		}
 	}))
 }

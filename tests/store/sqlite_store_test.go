@@ -2,6 +2,7 @@ package tests
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"math"
 	"path/filepath"
@@ -635,6 +636,8 @@ func TestSQLiteStore_CorpusStats_Populated(t *testing.T) {
 		{RelPath: "src/main.go", DocType: "code", ContentHash: "h1", Status: "ok"},
 		{RelPath: "docs/readme.md", DocType: "md", ContentHash: "h2", Status: "skipped"},
 		{RelPath: "docs/errors.md", DocType: "md", ContentHash: "h3", Status: "error"},
+		// a document with no explicit type should be normalized to "unknown"
+		{RelPath: "misc/other", DocType: "", ContentHash: "h5", Status: "ok"},
 		{RelPath: "archive/old.txt", DocType: "text", ContentHash: "h4", Status: "ok", Deleted: true},
 	}
 	for _, doc := range docs {
@@ -642,6 +645,24 @@ func TestSQLiteStore_CorpusStats_Populated(t *testing.T) {
 		if err := st.UpsertDocument(ctx, d); err != nil {
 			t.Fatalf("UpsertDocument(%s) failed: %v", d.RelPath, err)
 		}
+	}
+
+	// artificially clear the doc_type for one record to make sure
+	// ActiveDocCounts/CorpusStats normalize it to "unknown". UpsertDocument
+	// normalizes empty values to "text", so we bypass it with raw SQL.
+	if dbh, err := st.EnsureDB(ctx); err == nil {
+		// the underlying implementation is *sql.DB; use ExecContext via type
+		// assertion since dbQueryHandle doesn't expose Exec.
+		if real, ok := dbh.(*sql.DB); ok {
+			if _, err := real.ExecContext(ctx, "UPDATE documents SET doc_type = '' WHERE rel_path = ?", "misc/other"); err != nil {
+				t.Fatalf("failed to clear doc_type via raw SQL: %v", err)
+			}
+		} else {
+			t.Fatalf("EnsureDB returned unexpected handle type %T", dbh)
+		}
+		st.ReleaseDB()
+	} else {
+		t.Fatalf("EnsureDB failed: %v", err)
 	}
 
 	mainDoc, err := st.GetDocumentByPath(ctx, "src/main.go")
@@ -687,10 +708,14 @@ func TestSQLiteStore_CorpusStats_Populated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CorpusStats failed: %v", err)
 	}
-	if stats.Scanned != 4 || stats.Indexed != 1 || stats.Skipped != 1 || stats.Deleted != 1 || stats.Errors != 1 {
+	// one extra active document increases scanned count by one but affects
+	// indexed/other counters accordingly.
+	if stats.Scanned != 5 || stats.Indexed != 2 || stats.Skipped != 1 || stats.Deleted != 1 || stats.Errors != 1 {
 		t.Fatalf("unexpected lifecycle counts: %+v", stats)
 	}
-	if stats.TotalDocs != 3 || stats.DocCounts["code"] != 1 || stats.DocCounts["md"] != 2 {
+	// we expect 3 active documents plus one with empty type normalized to "unknown"
+	// unknown field should show up here after our manual DB tampering
+	if stats.TotalDocs != 4 || stats.DocCounts["code"] != 1 || stats.DocCounts["md"] != 2 || stats.DocCounts["unknown"] != 1 {
 		t.Fatalf("unexpected doc counts: %+v", stats)
 	}
 	if stats.Representations != 2 || stats.ChunksTotal != 2 || stats.EmbeddedOK != 1 {

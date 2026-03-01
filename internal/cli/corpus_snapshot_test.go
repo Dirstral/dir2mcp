@@ -75,3 +75,45 @@ func TestBuildCorpusSnapshot_ComputesDocCountsAndCodeRatio(t *testing.T) {
 		t.Errorf("expected indexing.indexed=3, got %d", snap.Indexing.Indexed)
 	}
 }
+
+func TestBuildCorpusSnapshot_StatusCountsFallback(t *testing.T) {
+	store := &fakeCorpusStore{
+		docs: []model.Document{
+			{DocType: "code", Status: "indexed"},
+			{DocType: "md", Status: "skipped"},
+			{DocType: "txt", Status: "error"},
+			{DocType: "other", Status: "whatever"},
+			{DocType: "code", Deleted: true, Status: "indexed"},
+		},
+	}
+
+	snap, err := buildCorpusSnapshot(context.Background(), store, nil)
+	if err != nil {
+		t.Fatalf("buildCorpusSnapshot failed: %v", err)
+	}
+
+	// deleted doc should not count toward TotalDocs or DocCounts
+	if snap.TotalDocs != 4 {
+		t.Errorf("expected total_docs=4, got %d", snap.TotalDocs)
+	}
+	if snap.DocCounts["code"] != 1 {
+		t.Errorf("expected code count=1, got %d", snap.DocCounts["code"])
+	}
+
+	// status-derived indexing snapshot should reflect our test documents
+	if snap.Indexing.Scanned != 5 {
+		t.Errorf("expected scanned=5, got %d", snap.Indexing.Scanned)
+	}
+	if snap.Indexing.Indexed != 2 {
+		t.Errorf("expected indexed=2 (one active + one other), got %d", snap.Indexing.Indexed)
+	}
+	if snap.Indexing.Skipped != 1 {
+		t.Errorf("expected skipped=1, got %d", snap.Indexing.Skipped)
+	}
+	if snap.Indexing.Errors != 1 {
+		t.Errorf("expected errors=1, got %d", snap.Indexing.Errors)
+	}
+	if snap.Indexing.Deleted != 1 {
+		t.Errorf("expected deleted=1, got %d", snap.Indexing.Deleted)
+	}
+}

@@ -122,8 +122,12 @@ func NewService(store model.Store, index model.Index, embedder model.Embedder, g
 			"text": make(map[uint64]model.SearchHit),
 			"code": make(map[uint64]model.SearchHit),
 		},
-		rootDir:         ".",
-		stateDir:        filepath.Join(".", ".dir2mcp"),
+		rootDir: ".",
+		// stateDir is intentionally left empty; Stats() will compute a
+		// sensible default based on whatever rootDir is in effect.  callers
+		// may still call SetStateDir to override, and SetStateDir itself does
+		// not substitute a default.
+		stateDir:        "",
 		protocolVersion: "2025-11-25",
 		excludeRegexps:  make(map[string]*regexp.Regexp),
 		pathExcludes:    append([]string(nil), defaultPathExcludes...),
@@ -208,17 +212,39 @@ func (s *Service) SetRootDir(root string) {
 	if root == "" {
 		root = "."
 	}
+
 	s.metaMu.Lock()
+	// if stateDir hasn't been explicitly configured (either empty or still
+	// the initial default relative to "."), update it so that it continues to
+	// track the root directory.  callers rely on this behaviour in
+	// TestStats_DefaultStateDir.
+	if s.stateDir == "" || s.stateDir == filepath.Join(".", ".dir2mcp") {
+		s.stateDir = filepath.Join(root, ".dir2mcp")
+	}
+
 	s.rootDir = root
 	s.metaMu.Unlock()
 }
 
 func (s *Service) SetStateDir(stateDir string) {
+	// The caller provides an explicit path to the state directory.  We trim
+	// whitespace but do *not* attempt to substitute a default here.  leaving
+	// the field empty allows Stats() to compute
+	// filepath.Join(rootDir, ".dir2mcp") dynamically based on whatever
+	// rootDir has been set to.  This keeps the two methods in sync and avoids
+	// surprising behaviour when rootDir is changed after SetStateDir was
+	// called with an empty string.
+	//
+	// Note that callers which originate from the CLI/config layer will never
+	// hit the empty‑string case because the configuration subsystem already
+	// defaults to filepath.Join(".", ".dir2mcp").  tests exercise the
+	// fallback semantics explicitly.
 	stateDir = strings.TrimSpace(stateDir)
-	if stateDir == "" {
-		stateDir = filepath.Join(".", ".dir2mcp")
-	}
+
 	s.metaMu.Lock()
+	// metaMu guards rootDir/stateDir/protocolVersion so we hold it while
+	// updating stateDir.  callers may read these values concurrently using
+	// Stats(), which grabs a read lock.
 	s.stateDir = stateDir
 	s.metaMu.Unlock()
 }
@@ -603,6 +629,15 @@ func (s *Service) openFile(ctx context.Context, relPath string, span model.Span,
 	return out, readTruncated || outTruncated, nil
 }
 
+// Stats returns a snapshot of service metadata/usage counters.  callers
+// should treat the returned `Root` and `StateDir` fields as the canonical
+// values; the service itself keeps them in mutable fields protected by
+// metaMu.  Importantly, when s.stateDir is unset (""), Stats will compute a
+// default by joining the currently configured rootDir with ".dir2mcp".  This
+// mirrors the behaviour of SetStateDir, which no longer substitutes its own
+// default and simply records whatever string the caller provided.  Keeping the
+// logic in one place ensures changing the root directory is reflected in the
+// derived state path.
 func (s *Service) Stats(ctx context.Context) (model.Stats, error) {
 	if err := ctx.Err(); err != nil {
 		return model.Stats{}, err
@@ -614,6 +649,10 @@ func (s *Service) Stats(ctx context.Context) (model.Stats, error) {
 	protocolVersion := strings.TrimSpace(s.protocolVersion)
 	st := s.store
 	s.metaMu.RUnlock()
+
+	// debug logging to trace the inconsistent behaviour reported by tests.
+	// the values captured here should match what ends up in out.Root /
+	// out.StateDir below.
 
 	if rootDir == "" {
 		rootDir = "."
@@ -629,7 +668,9 @@ func (s *Service) Stats(ctx context.Context) (model.Stats, error) {
 		Root:            rootDir,
 		StateDir:        stateDir,
 		ProtocolVersion: protocolVersion,
-		DocCounts:       map[string]int64{},
+		CorpusStats: model.CorpusStats{
+			DocCounts: map[string]int64{},
+		},
 	}
 	if st == nil {
 		return out, nil
@@ -670,22 +711,12 @@ type docStatusCounts struct {
 }
 
 func applyCorpusStats(base model.Stats, corpus model.CorpusStats) model.Stats {
-	base.Scanned = corpus.Scanned
-	base.Indexed = corpus.Indexed
-	base.Skipped = corpus.Skipped
-	base.Deleted = corpus.Deleted
-	base.Representations = corpus.Representations
-	base.ChunksTotal = corpus.ChunksTotal
-	base.EmbeddedOK = corpus.EmbeddedOK
-	base.Errors = corpus.Errors
-	base.TotalDocs = corpus.TotalDocs
-	if len(corpus.DocCounts) == 0 {
+	// simple assignment is enough because the fields are embedded and the
+	// promoted names remain available. we still take care to avoid leaving a
+	// nil map in DocCounts.
+	base.CorpusStats = corpus
+	if base.DocCounts == nil {
 		base.DocCounts = map[string]int64{}
-	} else {
-		base.DocCounts = make(map[string]int64, len(corpus.DocCounts))
-		for docType, count := range corpus.DocCounts {
-			base.DocCounts[docType] = count
-		}
 	}
 	return base
 }

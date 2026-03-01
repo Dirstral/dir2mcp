@@ -105,11 +105,11 @@ func TestSessionExpiration_InactivityHeader(t *testing.T) {
 		t.Fatalf("do initialize: %v", err)
 	}
 	sessionID := resp.Header.Get("MCP-Session-Id")
-	if resp.StatusCode != http.StatusOK || strings.TrimSpace(sessionID) == "" {
-		if strings.TrimSpace(sessionID) == "" {
-			t.Fatalf("initialize failed: status=%d, missing MCP-Session-Id", resp.StatusCode)
-		}
+	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("initialize failed: status=%d, sessionID=%q", resp.StatusCode, sessionID)
+	}
+	if strings.TrimSpace(sessionID) == "" {
+		t.Fatalf("initialize failed: status=%d, missing MCP-Session-Id", resp.StatusCode)
 	}
 	_ = resp.Body.Close()
 
@@ -150,7 +150,7 @@ func TestSessionExpiration_MaxLifetimeHeader(t *testing.T) {
 	sessionID := resp.Header.Get("MCP-Session-Id")
 	if resp.StatusCode != http.StatusOK || strings.TrimSpace(sessionID) == "" {
 		if strings.TrimSpace(sessionID) == "" {
-			t.Fatalf("initialize failed: status=%d, missing MCP-Session-Id", resp.StatusCode)
+			t.Fatalf("initialize failed: missing MCP-Session-Id (status=%d)", resp.StatusCode)
 		}
 		t.Fatalf("initialize failed: status=%d, sessionID=%q", resp.StatusCode, sessionID)
 	}
@@ -159,12 +159,10 @@ func TestSessionExpiration_MaxLifetimeHeader(t *testing.T) {
 	resp2 := waitForSessionExpiry(t, server.URL, cfg.MCPPath, sessionID, "max-lifetime")
 	defer func() { _ = resp2.Body.Close() }()
 
-	if resp2.StatusCode != http.StatusNotFound {
-		t.Fatalf("expected 404 on expired session, got %d", resp2.StatusCode)
-	}
-	if resp2.Header.Get("X-MCP-Session-Expired") != "max-lifetime" {
-		t.Fatalf("expected max-lifetime header, got %q", resp2.Header.Get("X-MCP-Session-Expired"))
-	}
+	// waitForSessionExpiry already asserts a 404 response and the
+	// "max-lifetime" X-MCP-Session-Expired header, so additional
+	// checks here would be redundant. Keep the call above for its
+	// built-in validation.
 }
 
 func TestMCPInitialize_RejectsMissingJSONRPCVersion(t *testing.T) {

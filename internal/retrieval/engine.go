@@ -60,7 +60,10 @@ func NewEngine(stateDir, rootDir string, cfg *config.Config) (*Engine, error) {
 
 	textIndexPath := filepath.Join(effective.StateDir, "vectors_text.hnsw")
 	textIndex := index.NewHNSWIndex(textIndexPath)
-	if err := textIndex.Load(textIndexPath); err != nil && !errors.Is(err, model.ErrNotImplemented) && !errors.Is(err, os.ErrNotExist) {
+	// Load will default to the path supplied when the index was created,
+	// so we no longer need to pass the path explicitly.  Keeping the
+	// parameter here was redundant and confusing.
+	if err := textIndex.Load(""); err != nil && !errors.Is(err, model.ErrNotImplemented) && !errors.Is(err, os.ErrNotExist) {
 		_ = metadataStore.Close()
 		_ = textIndex.Close()
 		return nil, fmt.Errorf("load text index: %w", err)
@@ -68,7 +71,8 @@ func NewEngine(stateDir, rootDir string, cfg *config.Config) (*Engine, error) {
 
 	codeIndexPath := filepath.Join(effective.StateDir, "vectors_code.hnsw")
 	codeIndex := index.NewHNSWIndex(codeIndexPath)
-	if err := codeIndex.Load(codeIndexPath); err != nil && !errors.Is(err, model.ErrNotImplemented) && !errors.Is(err, os.ErrNotExist) {
+	// likewise for the code index.
+	if err := codeIndex.Load(""); err != nil && !errors.Is(err, model.ErrNotImplemented) && !errors.Is(err, os.ErrNotExist) {
 		_ = metadataStore.Close()
 		_ = textIndex.Close()
 		_ = codeIndex.Close()
@@ -129,9 +133,8 @@ func mergeEngineConfig(base config.Config, override *config.Config) config.Confi
 	if v := strings.TrimSpace(override.ProtocolVersion); v != "" {
 		merged.ProtocolVersion = v
 	}
-	if override.Public {
-		merged.Public = true
-	}
+	// Explicitly allow override to set Public to false
+	merged.Public = override.Public
 	if v := strings.TrimSpace(override.AuthMode); v != "" {
 		merged.AuthMode = v
 	}

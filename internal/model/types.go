@@ -155,30 +155,27 @@ type AskResult struct {
 }
 
 type CorpusStats struct {
-	DocCounts       map[string]int64
-	TotalDocs       int64
-	Scanned         int64
-	Indexed         int64
-	Skipped         int64
-	Deleted         int64
-	Representations int64
-	ChunksTotal     int64
-	EmbeddedOK      int64
-	Errors          int64
+	DocCounts       map[string]int64 `json:"doc_counts"`
+	TotalDocs       int64            `json:"total_docs"`
+	Scanned         int64            `json:"scanned"`
+	Indexed         int64            `json:"indexed"`
+	Skipped         int64            `json:"skipped"`
+	Deleted         int64            `json:"deleted"`
+	Representations int64            `json:"representations"`
+	ChunksTotal     int64            `json:"chunks_total"`
+	EmbeddedOK      int64            `json:"embedded_ok"`
+	Errors          int64            `json:"errors"`
 }
 
 type Stats struct {
-	Root            string
-	StateDir        string
-	ProtocolVersion string
-	DocCounts       map[string]int64
-	TotalDocs       int64
-	Scanned         int64
-	Indexed         int64
-	Skipped         int64
-	Deleted         int64
-	Representations int64
-	ChunksTotal     int64
-	EmbeddedOK      int64
-	Errors          int64
+	// metadata fields are kept explicitly so that they remain at the top
+	// level when encoded to JSON.
+	Root            string `json:"root"`
+	StateDir        string `json:"state_dir"`
+	ProtocolVersion string `json:"protocol_version"`
+
+	// embed corpus statistics so that the various lifecycle counters are
+	// promoted. JSON encoding will automatically flatten the fields from the
+	// embedded struct, preserving the previous behaviour.
+	CorpusStats
 }

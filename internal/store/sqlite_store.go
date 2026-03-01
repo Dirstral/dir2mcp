@@ -825,30 +825,17 @@ func (s *SQLiteStore) CorpusStats(ctx context.Context) (model.CorpusStats, error
 		DocCounts: make(map[string]int64),
 	}
 
-	rows, err := db.QueryContext(ctx, `SELECT doc_type, COUNT(*) FROM documents WHERE deleted = 0 GROUP BY doc_type`)
+	// active document counts are already covered by ActiveDocCounts; call it
+	// instead of duplicating the query/normalization logic.
+	counts, total, err := s.ActiveDocCounts(ctx)
 	if err != nil {
 		return model.CorpusStats{}, err
 	}
-	defer func() { _ = rows.Close() }()
-
-	for rows.Next() {
-		var (
-			docType string
-			count   int64
-		)
-		if err := rows.Scan(&docType, &count); err != nil {
-			return model.CorpusStats{}, err
-		}
-		docType = strings.TrimSpace(docType)
-		if docType == "" {
-			docType = "unknown"
-		}
-		stats.DocCounts[docType] += count
-		stats.TotalDocs += count
+	// ActiveDocCounts normalizes empty doc_type values to "unknown".
+	for k, v := range counts {
+		stats.DocCounts[k] = v
 	}
-	if err := rows.Err(); err != nil {
-		return model.CorpusStats{}, err
-	}
+	stats.TotalDocs = total
 
 	err = db.QueryRowContext(ctx, `
 		SELECT

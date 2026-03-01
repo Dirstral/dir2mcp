@@ -80,11 +80,6 @@ type contentHashResetter interface {
 type embeddedChunkLister interface {
 	ListEmbeddedChunkMetadata(ctx context.Context, indexKind string, limit, offset int) ([]model.ChunkTask, error)
 }
-
-type activeDocCountStore interface {
-	ActiveDocCounts(ctx context.Context) (map[string]int64, int64, error)
-}
-
 type corpusStatsStore interface {
 	CorpusStats(ctx context.Context) (model.CorpusStats, error)
 }
@@ -498,7 +493,8 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	defer func() {
 		_ = textIx.Close()
 	}()
-	if err := textIx.Load(textIndexPath); err != nil &&
+	// Load will default to the initial path, so we avoid passing it again.
+	if err := textIx.Load(""); err != nil &&
 		!errors.Is(err, model.ErrNotImplemented) &&
 		!errors.Is(err, os.ErrNotExist) {
 		writef(a.stderr, "load text index: %v\n", err)
@@ -509,7 +505,8 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	defer func() {
 		_ = codeIx.Close()
 	}()
-	if err := codeIx.Load(codeIndexPath); err != nil &&
+	// redundant path argument avoided
+	if err := codeIx.Load(""); err != nil &&
 		!errors.Is(err, model.ErrNotImplemented) &&
 		!errors.Is(err, os.ErrNotExist) {
 		writef(a.stderr, "load code index: %v\n", err)
@@ -1201,7 +1198,8 @@ func (a *App) buildRetrieverForAsk(ctx context.Context, cfg config.Config, st mo
 	codeIndexPath := filepath.Join(cfg.StateDir, "vectors_code.hnsw")
 
 	textIx := index.NewHNSWIndex(textIndexPath)
-	if err := textIx.Load(textIndexPath); err != nil &&
+	// don't pass the path again to Load; the object already has it.
+	if err := textIx.Load(""); err != nil &&
 		!errors.Is(err, model.ErrNotImplemented) &&
 		!errors.Is(err, os.ErrNotExist) {
 		_ = textIx.Close()
@@ -1209,7 +1207,7 @@ func (a *App) buildRetrieverForAsk(ctx context.Context, cfg config.Config, st mo
 	}
 
 	codeIx := index.NewHNSWIndex(codeIndexPath)
-	if err := codeIx.Load(codeIndexPath); err != nil &&
+	if err := codeIx.Load(""); err != nil &&
 		!errors.Is(err, model.ErrNotImplemented) &&
 		!errors.Is(err, os.ErrNotExist) {
 		_ = textIx.Close()
@@ -1850,12 +1848,12 @@ func collectCorpusStats(ctx context.Context, st model.Store) (model.CorpusStats,
 		}
 	}
 
-	docCounts, totalDocs, err := collectActiveDocCounts(ctx, st)
-	if err != nil {
-		return model.CorpusStats{}, err
-	}
-
-	statusCounts, err := collectDocumentStatusCounts(ctx, st)
+	// Fallback to paginating through ListFiles once and collecting all the
+	// values we need.  Previously we iterated twice via
+	// collectActiveDocCounts/collectDocumentStatusCounts, which duplicated the
+	// ListFiles work.  collectDocumentStats performs a single pass and returns
+	// both sets of counters.
+	docCounts, totalDocs, statusCounts, err := collectDocumentStats(ctx, st)
 	if err != nil {
 		return model.CorpusStats{}, err
 	}
@@ -1871,50 +1869,6 @@ func collectCorpusStats(ctx context.Context, st model.Store) (model.CorpusStats,
 	}, nil
 }
 
-func collectActiveDocCounts(ctx context.Context, st model.Store) (map[string]int64, int64, error) {
-	if st == nil {
-		return map[string]int64{}, 0, nil
-	}
-	if agg, ok := st.(activeDocCountStore); ok {
-		counts, total, err := agg.ActiveDocCounts(ctx)
-		if err == nil {
-			return counts, total, nil
-		}
-		if !errors.Is(err, model.ErrNotImplemented) {
-			return nil, 0, fmt.Errorf("active doc counts: %w", err)
-		}
-	}
-
-	const pageSize = 500
-	offset := 0
-	counts := make(map[string]int64)
-	var totalActive int64
-
-	for {
-		docs, total, err := st.ListFiles(ctx, "", "", pageSize, offset)
-		if err != nil {
-			return nil, 0, fmt.Errorf("list files: %w", err)
-		}
-		for _, doc := range docs {
-			if doc.Deleted {
-				continue
-			}
-			docType := strings.TrimSpace(doc.DocType)
-			if docType == "" {
-				docType = "unknown"
-			}
-			counts[docType]++
-			totalActive++
-		}
-		offset += len(docs)
-		if len(docs) == 0 || int64(offset) >= total {
-			break
-		}
-	}
-
-	return counts, totalActive, nil
-}
-
 type documentStatusCounts struct {
 	Scanned int64
 	Indexed int64
@@ -1923,34 +1877,48 @@ type documentStatusCounts struct {
 	Errors  int64
 }
 
-func collectDocumentStatusCounts(ctx context.Context, st model.Store) (documentStatusCounts, error) {
+// collectDocumentStats walks the store via ListFiles once and gathers the
+// document counts by type along with overall status counters.  This replaces
+// the previous dual-iteration helpers which caused ListFiles to be invoked
+// twice.  The logic mirrors the one found in retrieval.collectStoreStatsFallback
+// so the results stay consistent across packages.
+func collectDocumentStats(ctx context.Context, st model.Store) (map[string]int64, int64, documentStatusCounts, error) {
 	if st == nil {
-		return documentStatusCounts{}, nil
+		return map[string]int64{}, 0, documentStatusCounts{}, nil
 	}
 
 	const pageSize = 500
 	offset := 0
-	counts := documentStatusCounts{}
+	counts := make(map[string]int64)
+	var totalActive int64
+	status := documentStatusCounts{}
 
 	for {
 		docs, total, err := st.ListFiles(ctx, "", "", pageSize, offset)
 		if err != nil {
-			return documentStatusCounts{}, fmt.Errorf("list files: %w", err)
+			return nil, 0, documentStatusCounts{}, fmt.Errorf("list files: %w", err)
 		}
 		for _, doc := range docs {
-			counts.Scanned++
+			status.Scanned++
 			if doc.Deleted {
-				counts.Deleted++
+				status.Deleted++
 				continue
 			}
 
+			docType := strings.TrimSpace(doc.DocType)
+			if docType == "" {
+				docType = "unknown"
+			}
+			counts[docType]++
+			totalActive++
+
 			switch strings.ToLower(strings.TrimSpace(doc.Status)) {
 			case "skipped":
-				counts.Skipped++
+				status.Skipped++
 			case "error":
-				counts.Errors++
+				status.Errors++
 			default:
-				counts.Indexed++
+				status.Indexed++
 			}
 		}
 
@@ -1960,7 +1928,7 @@ func collectDocumentStatusCounts(ctx context.Context, st model.Store) (documentS
 		}
 	}
 
-	return counts, nil
+	return counts, totalActive, status, nil
 }
 
 func (e *ndjsonEmitter) Emit(level, event string, data interface{}) {
