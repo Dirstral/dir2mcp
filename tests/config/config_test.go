@@ -358,6 +358,27 @@ func TestLoad_EnvOverridesEmbedModels(t *testing.T) {
 	})
 }
 
+func TestDefault_ChatModel(t *testing.T) {
+	cfg := config.Default()
+	if cfg.ChatModel != "mistral-small-2506" {
+		t.Fatalf("unexpected default chat model: %q", cfg.ChatModel)
+	}
+}
+
+func TestLoad_EnvOverridesChatModel(t *testing.T) {
+	tmp := t.TempDir()
+	testutil.WithWorkingDir(t, tmp, func() {
+		t.Setenv("DIR2MCP_CHAT_MODEL", "new-chat")
+		cfg, err := config.Load("")
+		if err != nil {
+			t.Fatalf("Load failed: %v", err)
+		}
+		if cfg.ChatModel != "new-chat" {
+			t.Fatalf("unexpected chat model: %q", cfg.ChatModel)
+		}
+	})
+}
+
 func TestLoad_RateLimitEnvOverrides(t *testing.T) {
 	tmp := t.TempDir()
 

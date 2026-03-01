@@ -8,8 +8,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -20,9 +22,12 @@ const (
 	defaultBaseURL        = "https://api.mistral.ai"
 	defaultBatchSize      = 32
 	defaultRequestTimeout = 30 * time.Second
-	defaultMaxRetries     = 3
-	defaultInitialBackoff = 250 * time.Millisecond
-	defaultMaxBackoff     = 2 * time.Second
+	// defaultGenerationTimeout is the timeout used for /v1/chat/completions when
+	// no explicit GenerationTimeout is supplied by the caller.
+	defaultGenerationTimeout = 120 * time.Second
+	defaultMaxRetries        = 3
+	defaultInitialBackoff    = 250 * time.Millisecond
+	defaultMaxBackoff        = 2 * time.Second
 	// Bound OCR request payload size (data URL + base64) to avoid oversized
 	// requests that frequently fail upstream or time out in transit.
 	defaultMaxOCRPayloadBytes = 20 * 1024 * 1024
@@ -31,6 +36,13 @@ const (
 	// no other model is specified.  Consumers may override the value on the
 	// Client struct if they need to target a different version in the future.
 	DefaultOCRModel = "mistral-ocr-latest"
+	// DefaultChatModel is the default model name used for chat/completion
+	// requests.  Operators may override this via Client.DefaultChatModel to use
+	// aliases (e.g. "mistral-small-latest") without editing code.
+	DefaultChatModel = "mistral-small-2506"
+	// DefaultTranscribeModel is the default model used for audio
+	// transcription requests.
+	DefaultTranscribeModel = "voxtral-mini-latest"
 )
 
 // Client provides Mistral API integrations.
@@ -58,6 +70,23 @@ type Client struct {
 	// issuing an OCR request. Values <= 0 fall back to defaultMaxOCRPayloadBytes.
 	MaxOCRPayloadBytes int
 
+	// GenerationTimeout is the HTTP client timeout used for the chat
+	// completions endpoint.  Generation requests can take longer than other
+	// API calls, so this field allows configuration without affecting the
+	// timeout used for embeds/ocr/transcribe.  If zero, the regular
+	// defaultRequestTimeout is used.
+	GenerationTimeout time.Duration
+
+	// DefaultChatModel controls which chat/completions model is used for
+	// Generate requests.  The package-level constant DefaultChatModel is used
+	// when this field is empty to preserve existing behaviour.  Tests and
+	// applications may override this to experiment with alternative models
+	// or aliases (e.g. "mistral-small-latest").
+	DefaultChatModel string
+	// DefaultTranscribeModel controls the model string sent with audio
+	// transcription requests.  Callers may override it on the client instance.
+	DefaultTranscribeModel string
+
 	// DefaultOCRModel will be sent to the OCR endpoint if the caller does not
 	// specify an explicit model.  It is initialized to DefaultOCRModel by
 	// NewClient and can be mutated by callers to customize behaviour.
@@ -73,14 +102,17 @@ func NewClient(baseURL, apiKey string) *Client {
 	}
 
 	return &Client{
-		BaseURL:            strings.TrimRight(baseURL, "/"),
-		APIKey:             apiKey,
-		HTTPClient:         &http.Client{Timeout: defaultRequestTimeout},
-		BatchSize:          defaultBatchSize,
-		MaxRetries:         defaultMaxRetries,
-		InitialBackoff:     defaultInitialBackoff,
-		MaxBackoff:         defaultMaxBackoff,
-		MaxOCRPayloadBytes: defaultMaxOCRPayloadBytes,
+		BaseURL:                strings.TrimRight(baseURL, "/"),
+		APIKey:                 apiKey,
+		HTTPClient:             &http.Client{Timeout: defaultRequestTimeout},
+		BatchSize:              defaultBatchSize,
+		MaxRetries:             defaultMaxRetries,
+		InitialBackoff:         defaultInitialBackoff,
+		MaxBackoff:             defaultMaxBackoff,
+		MaxOCRPayloadBytes:     defaultMaxOCRPayloadBytes,
+		GenerationTimeout:      defaultGenerationTimeout,
+		DefaultChatModel:       DefaultChatModel,
+		DefaultTranscribeModel: DefaultTranscribeModel,
 		// ensure we always have a sensible default even if callers forget to
 		// set a model explicitly later on.
 		DefaultOCRModel: DefaultOCRModel,
@@ -159,6 +191,35 @@ type ocrResponse struct {
 	} `json:"pages"`
 	Text     string `json:"text"`
 	Markdown string `json:"markdown"`
+}
+
+type transcribeResponse struct {
+	Text     string `json:"text"`
+	Language string `json:"language,omitempty"`
+	Model    string `json:"model,omitempty"`
+	Segments []struct {
+		Start float64 `json:"start"`
+		End   float64 `json:"end"`
+		Text  string  `json:"text"`
+	} `json:"segments"`
+}
+
+type generateRequest struct {
+	Model    string            `json:"model"`
+	Messages []generateMessage `json:"messages"`
+}
+
+type generateMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+type generateResponse struct {
+	Choices []struct {
+		Message struct {
+			Content interface{} `json:"content"`
+		} `json:"message"`
+	} `json:"choices"`
 }
 
 func (c *Client) embedBatchWithRetry(ctx context.Context, modelName string, inputs []string) ([][]float32, error) {
@@ -576,14 +637,386 @@ func (c *Client) extractOnce(ctx context.Context, relPath string, data []byte) (
 }
 
 func (c *Client) Transcribe(ctx context.Context, relPath string, data []byte) (string, error) {
-	_ = ctx
-	_ = relPath
-	_ = data
-	return "", model.ErrNotImplemented
+	return c.transcribeWithRetry(ctx, relPath, data)
 }
 
 func (c *Client) Generate(ctx context.Context, prompt string) (string, error) {
-	_ = ctx
-	_ = prompt
-	return "", model.ErrNotImplemented
+	return c.generateWithRetry(ctx, prompt)
+}
+
+func (c *Client) transcribeWithRetry(ctx context.Context, relPath string, data []byte) (string, error) {
+	// allow initial try plus MaxRetries retries, matching embedBatchWithRetry
+	maxAttempts := c.MaxRetries + 1
+	if maxAttempts <= 0 {
+		maxAttempts = 1
+	}
+
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		out, err := c.transcribeOnce(ctx, relPath, data)
+		if err == nil {
+			return out, nil
+		}
+		lastErr = err
+
+		var providerErr *model.ProviderError
+		if !errors.As(err, &providerErr) || !providerErr.Retryable || attempt == maxAttempts-1 {
+			return "", err
+		}
+
+		backoff := c.backoffForAttempt(attempt)
+		if waitErr := c.wait(ctx, backoff); waitErr != nil {
+			return "", waitErr
+		}
+	}
+
+	return "", lastErr
+}
+
+func (c *Client) transcribeOnce(ctx context.Context, relPath string, data []byte) (string, error) {
+	if strings.TrimSpace(c.APIKey) == "" {
+		return "", &model.ProviderError{
+			Code:      "MISTRAL_AUTH",
+			Message:   "missing Mistral API key",
+			Retryable: false,
+		}
+	}
+	if len(data) == 0 {
+		return "", &model.ProviderError{
+			Code:      "MISTRAL_FAILED",
+			Message:   "transcription input is empty",
+			Retryable: false,
+		}
+	}
+	// enforce a maximum payload size mirroring the OCR check so callers can
+	// avoid sending absurdly large audio blobs.  use the same configuration
+	// parameter for simplicity.
+	maxPayload := c.MaxOCRPayloadBytes
+	if maxPayload <= 0 {
+		maxPayload = defaultMaxOCRPayloadBytes
+	}
+	if len(data) > maxPayload {
+		return "", &model.ProviderError{
+			Code:      "MISTRAL_FAILED",
+			Message:   fmt.Sprintf("transcription input too large (%d bytes, limit %d)", len(data), maxPayload),
+			Retryable: false,
+		}
+	}
+
+	fileName := strings.TrimSpace(filepath.Base(relPath))
+	if fileName == "" || fileName == "." || fileName == string(filepath.Separator) {
+		fileName = "audio.wav"
+	}
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	fileField, err := writer.CreateFormFile("file", fileName)
+	if err != nil {
+		return "", &model.ProviderError{
+			Code:      "MISTRAL_FAILED",
+			Message:   "failed to build transcription request body",
+			Retryable: false,
+			Cause:     err,
+		}
+	}
+	if _, err := fileField.Write(data); err != nil {
+		return "", &model.ProviderError{
+			Code:      "MISTRAL_FAILED",
+			Message:   "failed to write transcription input",
+			Retryable: false,
+			Cause:     err,
+		}
+	}
+	// model selection mirrors OCR logic: prefer the client-configured value
+	// and only fall back to the package constant if the field is empty.
+	modelName := strings.TrimSpace(c.DefaultTranscribeModel)
+	if modelName == "" {
+		modelName = DefaultTranscribeModel
+	}
+	if err := writer.WriteField("model", modelName); err != nil {
+		return "", &model.ProviderError{
+			Code:      "MISTRAL_FAILED",
+			Message:   "failed to write transcription model",
+			Retryable: false,
+			Cause:     err,
+		}
+	}
+	if err := writer.Close(); err != nil {
+		return "", &model.ProviderError{
+			Code:      "MISTRAL_FAILED",
+			Message:   "failed to finalize transcription request body",
+			Retryable: false,
+			Cause:     err,
+		}
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/v1/audio/transcriptions", bytes.NewReader(body.Bytes()))
+	if err != nil {
+		return "", &model.ProviderError{
+			Code:      "MISTRAL_FAILED",
+			Message:   "failed to build transcription request",
+			Retryable: false,
+			Cause:     err,
+		}
+	}
+	req.Header.Set("Authorization", "Bearer "+c.APIKey)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	client := c.HTTPClient
+	if client == nil {
+		client = &http.Client{Timeout: defaultRequestTimeout}
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", &model.ProviderError{
+			Code:      "MISTRAL_FAILED",
+			Message:   "transcription request failed",
+			Retryable: true,
+			Cause:     err,
+		}
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		errMsg := strings.TrimSpace(string(bodyBytes))
+		if errMsg == "" {
+			errMsg = "upstream returned non-200 response"
+		}
+		switch {
+		case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
+			return "", &model.ProviderError{Code: "MISTRAL_AUTH", Message: errMsg, Retryable: false, StatusCode: resp.StatusCode}
+		case resp.StatusCode == http.StatusTooManyRequests:
+			return "", &model.ProviderError{Code: "MISTRAL_RATE_LIMIT", Message: errMsg, Retryable: true, StatusCode: resp.StatusCode}
+		case resp.StatusCode >= http.StatusInternalServerError:
+			return "", &model.ProviderError{Code: "MISTRAL_FAILED", Message: errMsg, Retryable: true, StatusCode: resp.StatusCode}
+		default:
+			return "", &model.ProviderError{Code: "MISTRAL_FAILED", Message: errMsg, Retryable: false, StatusCode: resp.StatusCode}
+		}
+	}
+
+	var parsed transcribeResponse
+	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+		return "", &model.ProviderError{
+			Code:      "MISTRAL_FAILED",
+			Message:   "failed to decode transcription response",
+			Retryable: false,
+			Cause:     err,
+		}
+	}
+
+	if len(parsed.Segments) > 0 {
+		lines := make([]string, 0, len(parsed.Segments))
+		for _, seg := range parsed.Segments {
+			text := strings.TrimSpace(seg.Text)
+			if text == "" {
+				continue
+			}
+			startSec := int(seg.Start)
+			mm := startSec / 60
+			ss := startSec % 60
+			lines = append(lines, "["+pad2(mm)+":"+pad2(ss)+"] "+text)
+		}
+		if len(lines) > 0 {
+			return strings.Join(lines, "\n"), nil
+		}
+	}
+
+	text := strings.TrimSpace(parsed.Text)
+	if text == "" {
+		return "", &model.ProviderError{
+			Code:      "MISTRAL_FAILED",
+			Message:   "transcription response had no text content",
+			Retryable: false,
+		}
+	}
+	return text, nil
+}
+
+func pad2(n int) string {
+	if n < 10 {
+		return "0" + strconv.Itoa(n)
+	}
+	return strconv.Itoa(n)
+}
+
+func (c *Client) generateWithRetry(ctx context.Context, prompt string) (string, error) {
+	maxAttempts := c.MaxRetries + 1
+	if maxAttempts <= 0 {
+		maxAttempts = 1
+	}
+
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		out, err := c.generateOnce(ctx, prompt)
+		if err == nil {
+			return out, nil
+		}
+		lastErr = err
+
+		var providerErr *model.ProviderError
+		if !errors.As(err, &providerErr) || !providerErr.Retryable || attempt == maxAttempts-1 {
+			return "", err
+		}
+
+		backoff := c.backoffForAttempt(attempt)
+		if waitErr := c.wait(ctx, backoff); waitErr != nil {
+			return "", waitErr
+		}
+	}
+
+	return "", lastErr
+}
+
+func (c *Client) generateOnce(ctx context.Context, prompt string) (string, error) {
+	if strings.TrimSpace(c.APIKey) == "" {
+		return "", &model.ProviderError{
+			Code:      "MISTRAL_AUTH",
+			Message:   "missing Mistral API key",
+			Retryable: false,
+		}
+	}
+	prompt = strings.TrimSpace(prompt)
+	if prompt == "" {
+		return "", &model.ProviderError{
+			Code:      "MISTRAL_FAILED",
+			Message:   "prompt is required",
+			Retryable: false,
+		}
+	}
+
+	// choose the chat model; allow caller override via Client field
+	chatModel := DefaultChatModel
+	if strings.TrimSpace(c.DefaultChatModel) != "" {
+		chatModel = c.DefaultChatModel
+	}
+	reqPayload := generateRequest{
+		Model: chatModel,
+		Messages: []generateMessage{
+			{Role: "user", Content: prompt},
+		},
+	}
+	body, err := json.Marshal(reqPayload)
+	if err != nil {
+		return "", &model.ProviderError{
+			Code:      "MISTRAL_FAILED",
+			Message:   "failed to marshal generation request",
+			Retryable: false,
+			Cause:     err,
+		}
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/v1/chat/completions", bytes.NewReader(body))
+	if err != nil {
+		return "", &model.ProviderError{
+			Code:      "MISTRAL_FAILED",
+			Message:   "failed to build generation request",
+			Retryable: false,
+			Cause:     err,
+		}
+	}
+	req.Header.Set("Authorization", "Bearer "+c.APIKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	client := c.HTTPClient
+	// generation requests may take longer than the standard default timeout.
+	// apply GenerationTimeout (when configured) even if HTTPClient is already set.
+	timeout := defaultRequestTimeout
+	if c.GenerationTimeout > 0 {
+		timeout = c.GenerationTimeout
+	}
+	if client == nil {
+		client = &http.Client{Timeout: timeout}
+	} else {
+		client = cloneHTTPClientWithTimeout(client, timeout)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", &model.ProviderError{
+			Code:      "MISTRAL_FAILED",
+			Message:   "generation request failed",
+			Retryable: true,
+			Cause:     err,
+		}
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		errMsg := strings.TrimSpace(string(bodyBytes))
+		if errMsg == "" {
+			errMsg = "upstream returned non-200 response"
+		}
+		switch {
+		case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
+			return "", &model.ProviderError{Code: "MISTRAL_AUTH", Message: errMsg, Retryable: false, StatusCode: resp.StatusCode}
+		case resp.StatusCode == http.StatusTooManyRequests:
+			return "", &model.ProviderError{Code: "MISTRAL_RATE_LIMIT", Message: errMsg, Retryable: true, StatusCode: resp.StatusCode}
+		case resp.StatusCode >= http.StatusInternalServerError:
+			return "", &model.ProviderError{Code: "MISTRAL_FAILED", Message: errMsg, Retryable: true, StatusCode: resp.StatusCode}
+		default:
+			return "", &model.ProviderError{Code: "MISTRAL_FAILED", Message: errMsg, Retryable: false, StatusCode: resp.StatusCode}
+		}
+	}
+
+	var parsed generateResponse
+	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+		return "", &model.ProviderError{
+			Code:      "MISTRAL_FAILED",
+			Message:   "failed to decode generation response",
+			Retryable: false,
+			Cause:     err,
+		}
+	}
+	if len(parsed.Choices) == 0 {
+		return "", &model.ProviderError{
+			Code:      "MISTRAL_FAILED",
+			Message:   "generation response had no choices",
+			Retryable: false,
+		}
+	}
+	text := strings.TrimSpace(contentToText(parsed.Choices[0].Message.Content))
+	if text == "" {
+		return "", &model.ProviderError{
+			Code:      "MISTRAL_FAILED",
+			Message:   "generation response had empty content",
+			Retryable: false,
+		}
+	}
+	return text, nil
+}
+
+func cloneHTTPClientWithTimeout(base *http.Client, timeout time.Duration) *http.Client {
+	if base == nil {
+		return &http.Client{Timeout: timeout}
+	}
+	cloned := *base
+	cloned.Timeout = timeout
+	return &cloned
+}
+
+func contentToText(content interface{}) string {
+	switch v := content.(type) {
+	case string:
+		return v
+	case []interface{}:
+		parts := make([]string, 0, len(v))
+		for _, item := range v {
+			switch typed := item.(type) {
+			case map[string]interface{}:
+				if text, ok := typed["text"].(string); ok && strings.TrimSpace(text) != "" {
+					parts = append(parts, text)
+				}
+			case string:
+				if strings.TrimSpace(typed) != "" {
+					parts = append(parts, typed)
+				}
+			}
+		}
+		return strings.Join(parts, "\n")
+	default:
+		return ""
+	}
 }

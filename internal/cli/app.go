@@ -99,9 +99,10 @@ type upOptions struct {
 	listen              string
 	mcpPath             string
 	allowedOrigins      string
-	// embed model overrides, set via flags or env/config
+	// overrideable models, set via flags or env/config
 	embedModelText string
 	embedModelCode string
+	chatModel      string
 }
 
 type authMaterial struct {
@@ -263,7 +264,7 @@ func (a *App) printUsage() {
 	writeln(a.stdout, "dir2mcp skeleton")
 	writeln(a.stdout, "usage: dir2mcp [--json] [--non-interactive] <command>")
 	writeln(a.stdout, "commands: up, status, ask, reindex, config, version")
-	writeln(a.stdout, "for 'up' the following flags are available: --listen, --mcp-path, --public, --read-only, --auth, --allowed-origins, --embed-model-text, --embed-model-code, ...")
+	writeln(a.stdout, "for 'up' the following flags are available: --listen, --mcp-path, --public, --read-only, --auth, --allowed-origins, --embed-model-text, --embed-model-code, --chat-model, ...")
 }
 
 func (a *App) runUp(ctx context.Context, opts upOptions) int {
@@ -290,6 +291,9 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	}
 	if opts.embedModelCode != "" {
 		cfg.EmbedModelCode = opts.embedModelCode
+	}
+	if strings.TrimSpace(opts.chatModel) != "" {
+		cfg.ChatModel = strings.TrimSpace(opts.chatModel)
 	}
 	if opts.public {
 		cfg.Public = true
@@ -379,6 +383,9 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	}
 
 	client := mistral.NewClient(cfg.MistralBaseURL, cfg.MistralAPIKey)
+	if strings.TrimSpace(cfg.ChatModel) != "" {
+		client.DefaultChatModel = strings.TrimSpace(cfg.ChatModel)
+	}
 	ret := retrieval.NewService(st, textIx, client, client)
 	ret.SetCodeIndex(codeIx)
 	ret.SetRootDir(cfg.RootDir)
@@ -829,6 +836,7 @@ func parseUpOptions(global globalOptions, args []string) (upOptions, error) {
 	fs.StringVar(&opts.allowedOrigins, "allowed-origins", "", "comma-separated origins to append to the allowlist")
 	fs.StringVar(&opts.embedModelText, "embed-model-text", "", "override embedding model used for text chunks")
 	fs.StringVar(&opts.embedModelCode, "embed-model-code", "", "override embedding model used for code chunks")
+	fs.StringVar(&opts.chatModel, "chat-model", "", "override model used for chat/completions")
 	if err := fs.Parse(args); err != nil {
 		return upOptions{}, err
 	}
