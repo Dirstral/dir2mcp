@@ -1578,7 +1578,6 @@ func (s *Server) readDocumentContent(relPath string) ([]byte, error) {
 	}
 	return os.ReadFile(targetReal)
 }
-
 func escapeGlobLiteral(input string) string {
 	var b strings.Builder
 	for _, r := range input {
