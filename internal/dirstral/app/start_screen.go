@@ -39,7 +39,7 @@ func StartMenuConfig() MenuConfig {
 			{Label: string(ChoiceTempest), Description: "Voice-powered agent loop", Value: string(ChoiceTempest)},
 			{Label: string(ChoiceLighthouse), Description: "Manage local host and probe remote MCP", Value: string(ChoiceLighthouse)},
 			{Label: string(ChoiceSettings), Description: "Edit config and API settings", Value: string(ChoiceSettings)},
-			{Label: "Exit", Description: "Exit Dirstral", Value: string(ChoiceQuit)},
+			{Label: string(ChoiceQuit), Description: "Exit Dirstral", Value: string(ChoiceQuit)},
 		},
 		ShowLogo: true,
 		Controls: "up/down or j/k move · enter select · esc/q quit",
