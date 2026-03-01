@@ -851,12 +851,20 @@ func (a *App) runAsk(ctx context.Context, global globalOptions, args []string) i
 			return exitGeneric
 		}
 		if global.jsonOutput {
+			// JSON output now uses a dedicated accessor instead of running Ask
+			// again.  this avoids the extra search/generation work while still
+			// providing the same boolean value returned by AskResult.IndexingComplete.
+			indexingComplete := true
+			if ic, err := retriever.IndexingComplete(ctx); err == nil {
+				indexingComplete = ic
+			}
+
 			payload := map[string]interface{}{
 				"question":          opts.question,
 				"answer":            "",
 				"citations":         []interface{}{},
 				"hits":              serializeHits(hits),
-				"indexing_complete": false,
+				"indexing_complete": indexingComplete,
 			}
 			if err := emitJSON(a.stdout, payload); err != nil {
 				writef(a.stderr, "encode ask json: %v\n", err)

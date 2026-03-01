@@ -594,7 +594,10 @@ func TestMCPToolsCallAsk_SearchOnly(t *testing.T) {
 	cfg.AuthMode = "none"
 
 	hits := []model.SearchHit{{ChunkID: 99, RelPath: "foo/bar.go", Snippet: "snippet"}}
-	retriever := &askAudioRetrieverStub{searchHits: hits}
+	retriever := &askAudioRetrieverStub{
+		searchHits:       hits,
+		indexingComplete: true,
+	}
 	server := httptest.NewServer(mcp.NewServer(cfg, retriever).Handler())
 	defer server.Close()
 
@@ -635,6 +638,15 @@ func TestMCPToolsCallAsk_SearchOnly(t *testing.T) {
 	}
 	if envelope.Result.StructuredContent["question"] != "q?" {
 		t.Fatalf("question field passed through: %#v", envelope.Result.StructuredContent["question"])
+	}
+	if got, ok := envelope.Result.StructuredContent["indexing_complete"].(bool); !ok || !got {
+		t.Fatalf("expected indexing_complete=true, got %#v", envelope.Result.StructuredContent["indexing_complete"])
+	}
+	if !retriever.searchCalled {
+		t.Fatal("expected Search to be called")
+	}
+	if retriever.askCalled {
+		t.Fatal("did not expect Ask to be called after optimization")
 	}
 }
 
@@ -762,9 +774,17 @@ type askAudioRetrieverStub struct {
 	// callback to compute a custom question string.
 	EchoQuestion bool
 	OnAsk        func(question string) string
+
+	// tracking for assertions
+	searchCalled bool
+	askCalled    bool
+
+	// indexing state for the new accessor
+	indexingComplete bool
 }
 
 func (s *askAudioRetrieverStub) Search(_ context.Context, q model.SearchQuery) ([]model.SearchHit, error) {
+	s.searchCalled = true
 	if s.OnSearch != nil {
 		return s.OnSearch(q)
 	}
@@ -778,6 +798,7 @@ func (s *askAudioRetrieverStub) Search(_ context.Context, q model.SearchQuery) (
 }
 
 func (s *askAudioRetrieverStub) Ask(_ context.Context, question string, _ model.SearchQuery) (model.AskResult, error) {
+	s.askCalled = true
 	if s.askErr != nil {
 		return model.AskResult{}, s.askErr
 	}
@@ -797,6 +818,10 @@ func (s *askAudioRetrieverStub) OpenFile(_ context.Context, _ string, _ model.Sp
 
 func (s *askAudioRetrieverStub) Stats(_ context.Context) (model.Stats, error) {
 	return model.Stats{}, model.ErrNotImplemented
+}
+
+func (s *askAudioRetrieverStub) IndexingComplete(_ context.Context) (bool, error) {
+	return s.indexingComplete, nil
 }
 
 type fakeTTSSynthesizer struct {

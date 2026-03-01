@@ -606,12 +606,20 @@ func (s *Server) handleAskTool(ctx context.Context, args map[string]interface{})
 		for _, h := range hits {
 			hitMaps = append(hitMaps, serializeHit(h))
 		}
+
+		// obtain the indexing_complete flag via the new accessor.  avoids the
+		// extra work that Ask would perform while still exposing the same state.
+		indexingComplete := true
+		if ic, err := s.retriever.IndexingComplete(ctx); err == nil {
+			indexingComplete = ic
+		}
+
 		structured := map[string]interface{}{
 			"question":          question,
 			"answer":            "",
 			"citations":         []interface{}{},
 			"hits":              hitMaps,
-			"indexing_complete": false,
+			"indexing_complete": indexingComplete,
 		}
 		return toolCallResult{
 			Content:           []toolContentItem{{Type: "text", Text: fmt.Sprintf("found %d supporting result(s)", len(hits))}},

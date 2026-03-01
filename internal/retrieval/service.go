@@ -402,6 +402,20 @@ func (s *Service) OpenFile(ctx context.Context, relPath string, span model.Span,
 	return content, err
 }
 
+// IndexingComplete returns the current indexing state using the callback
+// previously registered via SetIndexingCompleteProvider.  If no callback is
+// available we conservatively report true (i.e. indexing complete) so that
+// callers do not stall waiting for an event that cannot be delivered.
+func (s *Service) IndexingComplete(ctx context.Context) (bool, error) {
+	s.metaMu.RLock()
+	indexingFn := s.indexingStateFn
+	s.metaMu.RUnlock()
+	if indexingFn == nil {
+		return true, nil
+	}
+	return indexingFn(), nil
+}
+
 func (s *Service) OpenFileWithMeta(ctx context.Context, relPath string, span model.Span, maxChars int) (string, bool, error) {
 	return s.openFile(ctx, relPath, span, maxChars)
 }

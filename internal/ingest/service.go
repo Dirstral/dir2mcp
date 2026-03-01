@@ -740,7 +740,7 @@ func (s *Service) enforceCachePolicy(cacheDir string) error {
 		if os.IsNotExist(err) {
 			return nil
 		}
-		return fmt.Errorf("read ocr cache dir: %w", err)
+		return fmt.Errorf("read cache dir %s: %w", cacheDir, err)
 	}
 
 	type fileInfo struct {
@@ -792,7 +792,7 @@ func (s *Service) enforceCachePolicy(cacheDir string) error {
 		for _, f := range files {
 			if f.info.ModTime().Before(cutoff) {
 				if err := os.Remove(f.path); err != nil && !os.IsNotExist(err) {
-					return fmt.Errorf("prune ocr cache ttl remove %s: %w", f.path, err)
+					return fmt.Errorf("prune cache ttl: remove %s in %s: %w", f.path, cacheDir, err)
 				}
 				total -= f.info.Size()
 				continue
@@ -812,7 +812,7 @@ func (s *Service) enforceCachePolicy(cacheDir string) error {
 				break
 			}
 			if err := os.Remove(f.path); err != nil && !os.IsNotExist(err) {
-				return fmt.Errorf("prune ocr cache size remove %s: %w", f.path, err)
+				return fmt.Errorf("prune cache size: remove %s in %s: %w", f.path, cacheDir, err)
 			}
 			total -= f.info.Size()
 		}
