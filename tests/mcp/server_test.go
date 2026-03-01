@@ -98,7 +98,10 @@ func TestSessionExpiration_InactivityHeader(t *testing.T) {
 
 	// initialize to obtain a session id
 	body := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`
-	req, _ := http.NewRequest(http.MethodPost, server.URL+cfg.MCPPath, strings.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, server.URL+cfg.MCPPath, strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("create request: %v", err)
+	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -141,18 +144,21 @@ func TestSessionExpiration_MaxLifetimeHeader(t *testing.T) {
 	defer server.Close()
 
 	body := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`
-	req, _ := http.NewRequest(http.MethodPost, server.URL+cfg.MCPPath, strings.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, server.URL+cfg.MCPPath, strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("create request: %v", err)
+	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("do initialize: %v", err)
 	}
 	sessionID := resp.Header.Get("MCP-Session-Id")
-	if resp.StatusCode != http.StatusOK || strings.TrimSpace(sessionID) == "" {
-		if strings.TrimSpace(sessionID) == "" {
-			t.Fatalf("initialize failed: missing MCP-Session-Id (status=%d)", resp.StatusCode)
-		}
-		t.Fatalf("initialize failed: status=%d, sessionID=%q", resp.StatusCode, sessionID)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("initialize failed: status=%d", resp.StatusCode)
+	}
+	if strings.TrimSpace(sessionID) == "" {
+		t.Fatalf("initialize failed: missing MCP-Session-Id")
 	}
 	_ = resp.Body.Close()
 

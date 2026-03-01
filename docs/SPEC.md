@@ -48,6 +48,7 @@ Status tags used in this spec:
 
 - **Implemented:** available in current repository/runtime behavior.
 - **Partially implemented:** interface exists, but not all target behavior is complete.
+- **In progress:** work underway but not yet complete (may overlap with "partially implemented").
 - **Planned:** target behavior not yet fully implemented.
 
 Current high-level status:
@@ -454,7 +455,7 @@ Indices are treated as append-only:
 
   * AWS Access Key ID: `AKIA[0-9A-Z]{16}`
   * AWS Secret Access Key (heuristic): `(?i)aws(.{0,20})?secret` or `([0-9a-zA-Z/+=]{40})`
-  * JWTs: `(?i)(?:authorization\s*[:=]\s*bearer\s+|(?:access|id|refresh)_token\s*[:=]\s*)[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}` (context-anchored)
+  * JWTs: `(?i)(?:authorization\s*[:=]\s*bearer\s+|(?:access|id|refresh)_token\s*[:=]\s*)[A-Za-z0-9_.-]{8,}\.[A-Za-z0-9_.-]{8,}\.[A-Za-z0-9_.-]{8,}` (context-anchored)
   * Generic bearer token: `(?i)token\s*[:=]\s*[A-Za-z0-9_.-]{20,}`
   * Common API key formats (e.g. `sk_[a-z0-9]{32}`, `api_[A-Za-z0-9]{32}`)
 
@@ -464,8 +465,8 @@ Indices are treated as append-only:
 
   * **AWS Access Key ID** (`AKIA[0-9A-Z]{16}`): may match synthetic examples in docs/tests or random uppercase identifiers of the same shape.
   * **AWS Secret Access Key (heuristic)** (`(?i)aws(.{0,20})?secret` or `([0-9a-zA-Z/+=]{40})`): the 40-char branch can match benign hashes/base64-like strings; the keyword branch can match prose or comments discussing secrets.
-  * **JWTs** (`(?i)(?:authorization\s*[:=]\s*bearer\s+|(?:access|id|refresh)_token\s*[:=]\s*)[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}`): reduced false positives via auth/key context and minimum segment lengths; can still match synthetic token-like test strings with those contexts.
-  * **Generic bearer token** (`(?i)token\s*[:=]\s*[A-Za-z0-9\-._]{20,}`): can match innocuous config values named `token` (feature tokens, cache tokens) that are not credentials.
+  * **JWTs** (`(?i)(?:authorization\s*[:=]\s*bearer\s+|(?:access|id|refresh)_token\s*[:=]\s*)[A-Za-z0-9_.-]{8,}\.[A-Za-z0-9_.-]{8,}\.[A-Za-z0-9_.-]{8,}`): reduced false positives via auth/key context and minimum segment lengths; can still match synthetic token-like test strings with those contexts.
+  * **Generic bearer token** (`(?i)token\s*[:=]\s*[A-Za-z0-9_.-]{20,}`): can match innocuous config values named `token` (feature tokens, cache tokens) that are not credentials.
   * **Common API key formats** (`sk_[a-z0-9]{32}`, `api_[A-Za-z0-9]{32}`): can match placeholders, test fixtures, or generated IDs that happen to share the prefix/length.
 
   Refinement guidance via `security.secret_patterns`:
@@ -1244,6 +1245,9 @@ filters is impossible.
     "root": { "type": "string" },
     "state_dir": { "type": "string" },
     "protocol_version": { "type": "string" },
+    "doc_counts": { "type": "object", "additionalProperties": { "type": "integer" } },
+    "total_docs": { "type": "integer" },
+    "doc_counts_available": { "type": "boolean" },
     "indexing": {
       "type": "object",
       "additionalProperties": false,
@@ -1276,7 +1280,7 @@ filters is impossible.
       "required": ["embed_text", "embed_code", "ocr", "stt_provider", "stt_model", "chat"]
     }
   },
-  "required": ["root", "state_dir", "protocol_version", "indexing", "models"]
+  "required": ["root", "state_dir", "protocol_version", "doc_counts", "total_docs", "doc_counts_available", "indexing", "models"]
 }
 ```
 
@@ -1560,7 +1564,7 @@ security:
   secret_patterns:
     - 'AKIA[0-9A-Z]{16}'
     - '(?i)aws(.{0,20})?secret|([0-9a-zA-Z/+=]{40})'
-    - '(?i)(?:authorization\s*[:=]\s*bearer\s+|(?:access|id|refresh)_token\s*[:=]\s*)[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}'
+    - '(?i)(?:authorization\s*[:=]\s*bearer\s+|(?:access|id|refresh)_token\s*[:=]\s*)[A-Za-z0-9_.-]{8,}\.[A-Za-z0-9_.-]{8,}\.[A-Za-z0-9_.-]{8,}'
     - '(?i)token\s*[:=]\s*[A-Za-z0-9_.-]{20,}'
     - 'sk_[a-z0-9]{32}|api_[A-Za-z0-9]{32}'
 ```

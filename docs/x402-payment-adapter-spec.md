@@ -2,6 +2,8 @@
 
 This document defines the **x402 payment adapter** contract referenced from `VISION.md`. The adapter sits between a dir2mcp node and a third-party facilitator to enable optional HTTP 402 gating on selected MCP routes while keeping retrieval internals payment-agnostic.
 
+> **x402 request gating** is a lightweight HTTP standard (originating from Coinbase's x402 project) that lets a server require clients to present payment proofs before processing certain requests. dir2mcp uses this mechanism to optionally throttle or monetize access to sensitive MCP endpoints without hard‑coding any particular payment network.
+
 ## Purpose
 
 Provide a clear, versioned contract so that:
@@ -10,6 +12,20 @@ Provide a clear, versioned contract so that:
 * Facilitator providers can be swapped via configuration.
 * Discovery and billing layers can interoperate with any compliant adapter.
 
+## Usage in dir2mcp
+
+When x402 gating is enabled (`--x402-mode` flag in the CLI or `x402.mode` in config), dir2mcp will invoke the adapter on inbound requests for routes like `/v1/ask` or `/v1/retrieve`. Depending on the facilitator's response, the server either allows the request to proceed or returns a `402 Payment Required` response with `PAYMENT-REQUIRED` header data. Clients must then obtain and attach a `PAYMENT-SIGNATURE` before retrying.
+
+### Example configuration snippet
+
+```yaml
+# config.yaml
+x402:
+  mode: required            # off, on, required
+  adapter: "coinbase"      # named adapter from internal/x402
+  facilitator:
+    api_key: "..."         # credentials for the external service
+```
 ## Normative baseline
 
 The adapter MUST align with x402 v2 concepts and headers:
@@ -35,7 +51,7 @@ The contract defines, at a minimum, the following elements:
 * **Authentication** – adapter-to-facilitator auth must be explicit (for example API key auth for hosted facilitator, mTLS or signed requests for self-managed deployments).  
 * **Payment state model** – canonical states `required -> verified -> settled` with failure branches (`invalid`, `rejected`, `expired`, `failed`). dir2mcp does not persist custodial payment state; facilitator is source of truth for verify/settle outcomes.  
 * **Error codes and retries** – standard HTTP handling (`402`, `4xx`, `5xx`), idempotent settle calls, bounded retry/backoff for transient failures, and explicit non-retryable classes for invalid signatures/requirements mismatch.  
-* **Network normalization** – CAIP-2 network identifiers are required at adapter boundaries (for example `eip155:8453`, `eip155:84532`, Solana CAIP-2 IDs).  
+* **Network normalization** – CAIP-2 network identifiers are required at adapter boundaries (for example `eip155:8453`, `eip155:84532`, and Solana examples like `solana:mainnet`, `solana:devnet`, `solana:testnet`).  
 * **Discovery passthrough (optional)** – if Bazaar is enabled, expose extension metadata to facilitator discovery ingestion rather than implementing a custom discovery protocol in dir2mcp.  
 
 ## Out of scope
@@ -49,4 +65,16 @@ This adapter does not define:
 
 ---
 
-When protocol behavior changes, update this file and `SPEC.md` together.
+> **Note:** this document is paired with the global MCP [SPEC.md](../SPEC.md). whenever the
+> protocol version, message formats, field definitions, or error codes evolve you must keep
+> both documents in sync. reviewers should use the following checklist when making changes:
+>
+> 1. bump the protocol version in **both** specs
+> 2. reconcile any example request/response messages and payload schemas
+> 3. update compatibility/upgrade notes or migration guidance in both places
+> 4. verify field definitions (names, types, required/optional semantics) match
+> 5. refresh error code tables and retry logic descriptions
+>
+> Failing to update either doc can lead to incompatible implementations, so include a
+> comment in your PR pointing to the related edits.
+

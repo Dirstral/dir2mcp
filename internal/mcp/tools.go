@@ -341,6 +341,11 @@ func (s *Server) handleStatsTool(ctx context.Context, args map[string]interface{
 		"protocol_version": retrievedStats.ProtocolVersion,
 		"doc_counts":       retrievedStats.DocCounts,
 		"total_docs":       retrievedStats.TotalDocs,
+		// indicates whether the above counts originate from the underlying
+		// retriever.  when false the map will be zero-valued (not nil) and
+		// total_docs will be 0, so consumers must not assume those values
+		// represent an empty corpus without this flag.
+		"doc_counts_available": statsFromRetriever,
 		"indexing": map[string]interface{}{
 			"job_id":          snapshot.JobID,
 			"running":         snapshot.Running,
@@ -2328,7 +2333,8 @@ func statsOutputSchema() map[string]interface{} {
 				"type":                 "object",
 				"additionalProperties": map[string]interface{}{"type": "integer"},
 			},
-			"total_docs": map[string]interface{}{"type": "integer"},
+			"total_docs":           map[string]interface{}{"type": "integer"},
+			"doc_counts_available": map[string]interface{}{"type": "boolean"},
 			"indexing": map[string]interface{}{
 				"type":                 "object",
 				"additionalProperties": false,
@@ -2361,6 +2367,6 @@ func statsOutputSchema() map[string]interface{} {
 				"required": []string{"embed_text", "embed_code", "ocr", "stt_provider", "stt_model", "chat"},
 			},
 		},
-		"required": []string{"root", "state_dir", "protocol_version", "doc_counts", "total_docs", "indexing", "models"},
+		"required": []string{"root", "state_dir", "protocol_version", "doc_counts", "total_docs", "doc_counts_available", "indexing", "models"},
 	}
 }

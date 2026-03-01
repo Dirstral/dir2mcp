@@ -690,6 +690,12 @@ func TestMCPToolsCallStats_ReturnsStructuredContent(t *testing.T) {
 		t.Fatalf("unexpected protocol_version: %#v", envelope.Result.StructuredContent["protocol_version"])
 	}
 
+	if got, ok := envelope.Result.StructuredContent["doc_counts_available"].(bool); !ok {
+		t.Fatalf("expected doc_counts_available boolean, got %#v", envelope.Result.StructuredContent["doc_counts_available"])
+	} else if got {
+		t.Fatalf("expected doc_counts_available=false when retriever missing, got true")
+	}
+
 	indexingRaw, ok := envelope.Result.StructuredContent["indexing"].(map[string]interface{})
 	if !ok {
 		t.Fatalf("expected indexing object, got %#v", envelope.Result.StructuredContent["indexing"])
@@ -772,6 +778,9 @@ func TestMCPToolsCallStats_UsesRetrieverStats(t *testing.T) {
 	}
 	if docCounts["code"] != float64(2) || docCounts["md"] != float64(1) {
 		t.Fatalf("unexpected doc_counts payload: %#v", docCounts)
+	}
+	if envelope.Result.StructuredContent["doc_counts_available"] != true {
+		t.Fatalf("expected doc_counts_available=true when retriever provided stats, got %#v", envelope.Result.StructuredContent["doc_counts_available"])
 	}
 
 	indexingRaw, ok := envelope.Result.StructuredContent["indexing"].(map[string]interface{})

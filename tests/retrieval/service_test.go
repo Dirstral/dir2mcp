@@ -33,6 +33,22 @@ func (g *fakeGenerator) Generate(_ context.Context, _ string) (string, error) {
 	return g.out, nil
 }
 
+// paginateDocs returns a slice of documents based on the provided limit/offset
+// along with the total number of documents.  It makes a copy of the returned slice
+// so callers can mutate safely.  Logic is intentionally identical to the real store
+// implementations exercised elsewhere in tests.
+func paginateDocs(docs []model.Document, limit, offset int) ([]model.Document, int64) {
+	total := int64(len(docs))
+	if offset >= len(docs) {
+		return []model.Document{}, total
+	}
+	end := offset + limit
+	if end > len(docs) {
+		end = len(docs)
+	}
+	return append([]model.Document(nil), docs[offset:end]...), total
+}
+
 type fakeStatsStore struct {
 	docs      []model.Document
 	corpus    model.CorpusStats
@@ -47,14 +63,8 @@ func (f *fakeStatsStore) GetDocumentByPath(context.Context, string) (model.Docum
 	return model.Document{}, model.ErrNotImplemented
 }
 func (f *fakeStatsStore) ListFiles(_ context.Context, _ string, _ string, limit, offset int) ([]model.Document, int64, error) {
-	if offset >= len(f.docs) {
-		return []model.Document{}, int64(len(f.docs)), nil
-	}
-	end := offset + limit
-	if end > len(f.docs) {
-		end = len(f.docs)
-	}
-	return append([]model.Document(nil), f.docs[offset:end]...), int64(len(f.docs)), nil
+	docs, total := paginateDocs(f.docs, limit, offset)
+	return docs, total, nil
 }
 func (f *fakeStatsStore) Close() error { return nil }
 
@@ -83,14 +93,8 @@ func (f *fakeListOnlyStore) GetDocumentByPath(context.Context, string) (model.Do
 	return model.Document{}, model.ErrNotImplemented
 }
 func (f *fakeListOnlyStore) ListFiles(_ context.Context, _ string, _ string, limit, offset int) ([]model.Document, int64, error) {
-	if offset >= len(f.docs) {
-		return []model.Document{}, int64(len(f.docs)), nil
-	}
-	end := offset + limit
-	if end > len(f.docs) {
-		end = len(f.docs)
-	}
-	return append([]model.Document(nil), f.docs[offset:end]...), int64(len(f.docs)), nil
+	docs, total := paginateDocs(f.docs, limit, offset)
+	return docs, total, nil
 }
 func (f *fakeListOnlyStore) Close() error { return nil }
 

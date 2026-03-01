@@ -105,6 +105,21 @@ func NewService(cfg config.Config, store model.Store) *Service {
 	return svc
 }
 
+// healthCheckInterval returns the configured base poll interval for connector
+// health probes.  It mirrors the behaviour described in VISION.md: a default
+// of 5s is returned when the configuration value is zero.  Actual polling
+// routines should call this method to obtain a duration rather than hardcoding
+// any fixed interval.
+func (s *Service) healthCheckInterval() time.Duration {
+	if s == nil {
+		return config.Default().HealthCheckInterval
+	}
+	if s.cfg.HealthCheckInterval > 0 {
+		return s.cfg.HealthCheckInterval
+	}
+	return config.Default().HealthCheckInterval
+}
+
 // SetLogger sets a custom logger on the service. Passing nil restores the
 // default logger.
 func (s *Service) SetLogger(l *log.Logger) {

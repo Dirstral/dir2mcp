@@ -3,6 +3,9 @@ package ingest
 import (
 	"strings"
 	"testing"
+	"time"
+
+	"dir2mcp/internal/config"
 )
 
 func TestFlattenJSONForIndexing_MapAndArray(t *testing.T) {
@@ -61,5 +64,25 @@ func TestFlattenJSONForIndexing_TopLevelScalar(t *testing.T) {
 				t.Fatalf("expected %q, got %q", tc.want, out)
 			}
 		})
+	}
+}
+
+func TestHealthCheckIntervalHelper(t *testing.T) {
+	// verify default value when config is empty or zero
+	s := &Service{cfg: config.Default()}
+	if got := s.healthCheckInterval(); got != 5*time.Second {
+		t.Fatalf("default health interval = %v; want 5s", got)
+	}
+
+	// explicit config override
+	s.cfg.HealthCheckInterval = 8 * time.Second
+	if got := s.healthCheckInterval(); got != 8*time.Second {
+		t.Fatalf("override health interval = %v; want 8s", got)
+	}
+
+	// nil receiver should also return default
+	var nilSvc *Service
+	if got := nilSvc.healthCheckInterval(); got != 5*time.Second {
+		t.Fatalf("nil service health interval = %v; want default 5s", got)
 	}
 }

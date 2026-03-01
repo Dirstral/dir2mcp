@@ -1,6 +1,9 @@
 package model
 
-import "fmt"
+import (
+	"encoding/json"
+	"fmt"
+)
 
 type Document struct {
 	DocID       int64
@@ -167,6 +170,24 @@ type CorpusStats struct {
 	Errors          int64            `json:"errors"`
 }
 
+// MarshalJSON ensures that a nil DocCounts map is encoded as an empty object
+// rather than null. This protects clients that expect an object and simplifies
+// callers by avoiding repeated nil-checking before marshaling.
+//
+// Both value and pointer receivers will use this method, so callers may pass
+// either form to json.Marshal. Stats defines its own MarshalJSON below which
+// takes precedence over the promoted method, so embedding does not interfere
+// with the outer struct's metadata fields.
+func (c CorpusStats) MarshalJSON() ([]byte, error) {
+	// Use an alias to avoid infinite recursion when calling json.Marshal.
+	type alias CorpusStats
+	if c.DocCounts == nil {
+		// make a non-nil map so encoding/json treats it as {} instead of null
+		c.DocCounts = make(map[string]int64)
+	}
+	return json.Marshal(alias(c))
+}
+
 type Stats struct {
 	// metadata fields are kept explicitly so that they remain at the top
 	// level when encoded to JSON.
@@ -178,4 +199,53 @@ type Stats struct {
 	// promoted. JSON encoding will automatically flatten the fields from the
 	// embedded struct, preserving the previous behaviour.
 	CorpusStats
+}
+
+// MarshalJSON ensures that the metadata fields (root, state_dir,
+// protocol_version) are serialized along with the flattened corpus
+// statistics. It also guards against a nil DocCounts map so callers needn't
+// worry about preinitializing the map prior to encoding.
+//
+// We cannot rely on the generic alias trick here because the embedded
+// CorpusStats type has its own MarshalJSON method.  An alias type would
+// still carry that method, causing json.Marshal to invoke CorpusStats's
+// encoder and drop the metadata fields.  Instead we build a temporary struct
+// that mirrors the exported JSON representation without any method set.
+func (s Stats) MarshalJSON() ([]byte, error) {
+	// ensure a non-nil map for the usual reason
+	if s.DocCounts == nil {
+		s.DocCounts = make(map[string]int64)
+	}
+	// define a stripped-down copy struct
+	type plain struct {
+		Root            string           `json:"root"`
+		StateDir        string           `json:"state_dir"`
+		ProtocolVersion string           `json:"protocol_version"`
+		DocCounts       map[string]int64 `json:"doc_counts"`
+		TotalDocs       int64            `json:"total_docs"`
+		Scanned         int64            `json:"scanned"`
+		Indexed         int64            `json:"indexed"`
+		Skipped         int64            `json:"skipped"`
+		Deleted         int64            `json:"deleted"`
+		Representations int64            `json:"representations"`
+		ChunksTotal     int64            `json:"chunks_total"`
+		EmbeddedOK      int64            `json:"embedded_ok"`
+		Errors          int64            `json:"errors"`
+	}
+	a := plain{
+		Root:            s.Root,
+		StateDir:        s.StateDir,
+		ProtocolVersion: s.ProtocolVersion,
+		DocCounts:       s.DocCounts,
+		TotalDocs:       s.TotalDocs,
+		Scanned:         s.Scanned,
+		Indexed:         s.Indexed,
+		Skipped:         s.Skipped,
+		Deleted:         s.Deleted,
+		Representations: s.Representations,
+		ChunksTotal:     s.ChunksTotal,
+		EmbeddedOK:      s.EmbeddedOK,
+		Errors:          s.Errors,
+	}
+	return json.Marshal(a)
 }

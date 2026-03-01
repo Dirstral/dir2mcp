@@ -303,6 +303,46 @@ func TestLoad_SessionDurations_Validation(t *testing.T) {
 		}
 	})
 
+	// health check interval YAML and env overrides
+	// clear any session env vars left over from earlier subtests
+	t.Setenv("DIR2MCP_SESSION_INACTIVITY_TIMEOUT", "")
+	t.Setenv("DIR2MCP_SESSION_MAX_LIFETIME", "")
+	path2 := filepath.Join(tmp, ".dir2mcp.yaml")
+	writeFile(t, path2, "health_check_interval: 10s\n")
+	var cfg2 config.Config
+	cfg2, err = config.LoadFile(path2)
+	if err != nil {
+		t.Fatalf("LoadFile failed: %v", err)
+	}
+	if cfg2.HealthCheckInterval != 10*time.Second {
+		t.Fatalf("unexpected health interval from YAML: %v", cfg2.HealthCheckInterval)
+	}
+
+	testutil.WithWorkingDir(t, tmp, func() {
+		t.Setenv("DIR2MCP_HEALTH_CHECK_INTERVAL", "15s")
+		cfg2, err := config.Load(path2)
+		if err != nil {
+			t.Fatalf("Load failed: %v", err)
+		}
+		if cfg2.HealthCheckInterval != 15*time.Second {
+			t.Fatalf("env override health interval=%v want=15s", cfg2.HealthCheckInterval)
+		}
+	})
+
+	// negative health via YAML should error
+	writeFile(t, path2, "health_check_interval: -1s\n")
+	if _, err := config.LoadFile(path2); err == nil {
+		t.Fatalf("expected error loading negative health interval")
+	}
+
+	// negative health via env should also error
+	testutil.WithWorkingDir(t, tmp, func() {
+		t.Setenv("DIR2MCP_HEALTH_CHECK_INTERVAL", "-5s")
+		if _, err := config.Load(""); err == nil {
+			t.Fatalf("expected error for negative health interval via env")
+		}
+	})
+
 	// max lifetime shorter than inactivity should be rejected
 	writeFile(t, path, "session_inactivity_timeout: 10s\nsession_max_lifetime: 5s\n")
 	if _, err := config.LoadFile(path); err == nil {

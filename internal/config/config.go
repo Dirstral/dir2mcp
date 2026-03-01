@@ -94,6 +94,11 @@ type Config struct {
 	// SessionMaxLifetime sets an optional absolute upper bound on a session's
 	// lifespan regardless of activity.  Zero disables this limit.
 	SessionMaxLifetime time.Duration
+	// HealthCheckInterval controls how frequently the runtime polls connector
+	// health endpoints when checking for availability.  A zero value means the
+	// default (5s).  The interval is used as the base fixed delay; failures
+	// trigger bounded exponential backoff independent of this setting.
+	HealthCheckInterval time.Duration
 
 	X402 X402Config
 }
@@ -118,9 +123,13 @@ type fileConfig struct {
 	AllowedOrigins       []string
 	EmbedModelText       *string
 	EmbedModelCode       *string
-	// session timings expressed as YAML duration strings
-	SessionInactivityTimeout *time.Duration `yaml:"session_inactivity_timeout"`
-	SessionMaxLifetime       *time.Duration `yaml:"session_max_lifetime"`
+	// session timings expressed as YAML duration strings.  populated by
+	// parseConfigYAML's custom parser via setFileScalarValue rather than the
+	// standard yaml.Unmarshal machinery.  struct tags are therefore omitted
+	// elsewhere and would be purely documentation if added here.
+	SessionInactivityTimeout *time.Duration
+	SessionMaxLifetime       *time.Duration
+	HealthCheckInterval      *time.Duration
 	X402Mode                 *string
 	X402FacilitatorURL       *string
 	X402FacilitatorToken     *string
@@ -150,6 +159,7 @@ type persistedConfig struct {
 	// optional session timeouts expressed as YAML duration strings
 	SessionInactivityTimeout time.Duration `yaml:"session_inactivity_timeout"`
 	SessionMaxLifetime       time.Duration `yaml:"session_max_lifetime"`
+	HealthCheckInterval      time.Duration `yaml:"health_check_interval"`
 
 	ElevenLabsBaseURL    string   `yaml:"elevenlabs_base_url"`
 	ElevenLabsTTSVoiceID string   `yaml:"elevenlabs_tts_voice_id"`
@@ -191,6 +201,7 @@ func Default() Config {
 		// default session inactivity matches previous hardcoded sessionTTL (24h)
 		SessionInactivityTimeout: 24 * time.Hour,
 		SessionMaxLifetime:       0,
+		HealthCheckInterval:      5 * time.Second,
 		TrustedProxies: []string{
 			"127.0.0.1/32",
 			"::1/128",
@@ -414,6 +425,9 @@ func applyFileOverrides(cfg *Config, path string) error {
 	if fileCfg.SessionMaxLifetime != nil {
 		cfg.SessionMaxLifetime = *fileCfg.SessionMaxLifetime
 	}
+	if fileCfg.HealthCheckInterval != nil {
+		cfg.HealthCheckInterval = *fileCfg.HealthCheckInterval
+	}
 	if fileCfg.ElevenLabsBaseURL != nil {
 		cfg.ElevenLabsBaseURL = *fileCfg.ElevenLabsBaseURL
 	}
@@ -610,6 +624,12 @@ func setFileScalarValue(cfg *fileConfig, key, value string) error {
 			return fmt.Errorf("invalid duration for %s", key)
 		}
 		cfg.SessionMaxLifetime = &d
+	case "health_check_interval":
+		d, err := time.ParseDuration(value)
+		if err != nil {
+			return fmt.Errorf("invalid duration for %s", key)
+		}
+		cfg.HealthCheckInterval = &d
 	case "x402_mode":
 		cfg.X402Mode = strPtr(value)
 	case "x402_facilitator_url":
@@ -716,6 +736,7 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeScalar("mistral_base_url", cfg.MistralBaseURL)
 	writeScalar("session_inactivity_timeout", cfg.SessionInactivityTimeout.String())
 	writeScalar("session_max_lifetime", cfg.SessionMaxLifetime.String())
+	writeScalar("health_check_interval", cfg.HealthCheckInterval.String())
 	writeScalar("elevenlabs_base_url", cfg.ElevenLabsBaseURL)
 	writeScalar("elevenlabs_tts_voice_id", cfg.ElevenLabsTTSVoiceID)
 	writeList("allowed_origins", cfg.AllowedOrigins)
@@ -841,6 +862,18 @@ func applyEnvOverrides(cfg *Config, overrideEnv map[string]string) {
 			}
 		}
 	}
+	// health check interval env; zero duration interpreted as default later
+	if raw, ok := envLookup("DIR2MCP_HEALTH_CHECK_INTERVAL", overrideEnv); ok {
+		trimmed := strings.TrimSpace(raw)
+		if trimmed != "" {
+			d, err := time.ParseDuration(trimmed)
+			if err != nil {
+				cfg.Warnings = append(cfg.Warnings, fmt.Errorf("invalid duration for DIR2MCP_HEALTH_CHECK_INTERVAL: %q (%v)", trimmed, err))
+			} else {
+				cfg.HealthCheckInterval = d
+			}
+		}
+	}
 	if raw, ok := envLookup("DIR2MCP_X402_MODE", overrideEnv); ok && strings.TrimSpace(raw) != "" {
 		cfg.X402.Mode = strings.TrimSpace(raw)
 	}
@@ -904,9 +937,15 @@ func (c *Config) Validate() error {
 	if c.SessionMaxLifetime < 0 {
 		return fmt.Errorf("session_max_lifetime must be non-negative: %v", c.SessionMaxLifetime)
 	}
+	if c.HealthCheckInterval < 0 {
+		return fmt.Errorf("health_check_interval must be non-negative: %v", c.HealthCheckInterval)
+	}
 	if c.SessionInactivityTimeout == 0 {
 		// zero is shorthand for the default
 		c.SessionInactivityTimeout = Default().SessionInactivityTimeout
+	}
+	if c.HealthCheckInterval == 0 {
+		c.HealthCheckInterval = Default().HealthCheckInterval
 	}
 	// if both timeouts are set, the max lifetime must not be shorter than
 	// the inactivity timeout; otherwise the session would expire before

@@ -33,7 +33,7 @@ make build
 ```
 
 The server prints its MCP endpoint URL on startup. Point your MCP client at that URL.
-If a variable is set both in `.env` and your shell, the shell value takes precedence.
+Precedence (highest to lowest): shell environment variables > `.env.local` > `.env`.
 
 ### Local development environment
 
@@ -51,7 +51,7 @@ If a variable is set both in `.env` and your shell, the shell value takes preced
 | `config print` | Print effective config |
 | `version` | Print version |
 
-Running `dir2mcp` with no arguments prints usage. There is no `help` subcommand; use `dir2mcp <command> --help` for per-command flags.
+Running `dir2mcp` with no arguments prints usage. There is no `help` subcommand.
 
 ## MCP Tools
 
@@ -76,6 +76,9 @@ Primary config file: `.dir2mcp.yaml` (created by `dir2mcp config init`).
 | `MISTRAL_API_KEY` | Yes | Mistral API key for embeddings, OCR, and generation |
 | `MISTRAL_BASE_URL` | No | Mistral base URL (default: `https://api.mistral.ai`) |
 | `DIR2MCP_AUTH_TOKEN` | No | Auth token override |
+| `DIR2MCP_SESSION_INACTIVITY_TIMEOUT` (`DIR2MCP_SESSION_TIMEOUT`) | No | Session inactivity timeout (default: `24h`) |
+| `DIR2MCP_SESSION_MAX_LIFETIME` | No | Maximum session lifetime |
+| `DIR2MCP_HEALTH_CHECK_INTERVAL` | No | Connector health poll interval (default: `5s`) |
 | `DIR2MCP_ALLOWED_ORIGINS` | No | Comma-separated additional browser origins |
 | `DIR2MCP_X402_FACILITATOR_TOKEN` | No | x402 facilitator bearer token |
 | `ELEVENLABS_API_KEY` | No | ElevenLabs key for TTS/STT |
@@ -119,8 +122,11 @@ make build        # build binary
 make benchmark    # run retrieval benchmarks
 ```
 
-API note: `retrieval.NewEngine` now requires a context as its first parameter:
-`retrieval.NewEngine(ctx, stateDir, rootDir, cfg)`.
+API notes:
+- `retrieval.NewEngine` now requires a context as its first parameter:
+  `retrieval.NewEngine(ctx, stateDir, rootDir, cfg)`.
+- `Engine.Ask` gained a context-aware variant `AskWithContext`; the
+  original `Ask` continues to exist as a thin wrapper for compatibility.
 
 `make check` includes `make lint`, which requires [`golangci-lint`](https://golangci-lint.run/welcome/install/) installed locally.
 

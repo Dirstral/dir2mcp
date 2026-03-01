@@ -46,7 +46,7 @@ func TestBuildCorpusSnapshot_ComputesDocCountsAndCodeRatio(t *testing.T) {
 	state.SetRunning(true)
 	state.AddIndexed(3)
 
-	snap, err := buildCorpusSnapshot(context.Background(), store, state)
+	snap, err := buildCorpusSnapshot(context.Background(), store, state, nil)
 	if err != nil {
 		t.Fatalf("buildCorpusSnapshot failed: %v", err)
 	}
@@ -87,7 +87,7 @@ func TestBuildCorpusSnapshot_StatusCountsFallback(t *testing.T) {
 		},
 	}
 
-	snap, err := buildCorpusSnapshot(context.Background(), store, nil)
+	snap, err := buildCorpusSnapshot(context.Background(), store, nil, nil)
 	if err != nil {
 		t.Fatalf("buildCorpusSnapshot failed: %v", err)
 	}
@@ -105,7 +105,7 @@ func TestBuildCorpusSnapshot_StatusCountsFallback(t *testing.T) {
 		t.Errorf("expected scanned=5, got %d", snap.Indexing.Scanned)
 	}
 	if snap.Indexing.Indexed != 1 {
-		t.Errorf("expected indexed=1 (only explicit indexed/ok statuses count), got %d", snap.Indexing.Indexed)
+		t.Errorf("expected indexed=1 (deleted docs excluded even if status 'indexed'; only explicit 'indexed' or 'ok' statuses count), got %d", snap.Indexing.Indexed)
 	}
 	if snap.Indexing.Skipped != 1 {
 		t.Errorf("expected skipped=1, got %d", snap.Indexing.Skipped)

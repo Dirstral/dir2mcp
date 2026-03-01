@@ -25,7 +25,10 @@ type embeddedChunkMetadataSource interface {
 	ListEmbeddedChunkMetadata(ctx context.Context, indexKind string, limit, offset int) ([]model.ChunkTask, error)
 }
 
-const defaultEngineAskTimeout = 120 * time.Second
+const (
+	defaultEngineAskTimeout     = 120 * time.Second
+	defaultEnginePreloadTimeout = 30 * time.Second
+)
 
 // Engine provides a convenience wrapper around retrieval.Service for callers
 // that still rely on the legacy Engine API.
@@ -37,7 +40,11 @@ type Engine struct {
 }
 
 // NewEngine creates a retrieval engine backed by the on-disk state.
-func NewEngine(stateDir, rootDir string, cfg *config.Config) (*Engine, error) {
+func NewEngine(ctx context.Context, stateDir, rootDir string, cfg *config.Config) (*Engine, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	effective := mergeEngineConfig(config.Default(), cfg)
 	if trimmed := strings.TrimSpace(stateDir); trimmed != "" {
 		effective.StateDir = trimmed
@@ -53,7 +60,7 @@ func NewEngine(stateDir, rootDir string, cfg *config.Config) (*Engine, error) {
 	}
 
 	metadataStore := store.NewSQLiteStore(filepath.Join(effective.StateDir, "meta.sqlite"))
-	if err := metadataStore.Init(context.Background()); err != nil && !errors.Is(err, model.ErrNotImplemented) {
+	if err := metadataStore.Init(ctx); err != nil && !errors.Is(err, model.ErrNotImplemented) {
 		_ = metadataStore.Close()
 		return nil, fmt.Errorf("initialize metadata store: %w", err)
 	}
@@ -87,7 +94,9 @@ func NewEngine(stateDir, rootDir string, cfg *config.Config) (*Engine, error) {
 	svc.SetProtocolVersion(effective.ProtocolVersion)
 
 	if source, ok := interface{}(metadataStore).(embeddedChunkMetadataSource); ok {
-		total, err := preloadEngineChunkMetadata(context.Background(), source, svc)
+		preloadCtx, cancel := context.WithTimeout(ctx, defaultEnginePreloadTimeout)
+		defer cancel()
+		total, err := preloadEngineChunkMetadata(preloadCtx, source, svc)
 		if err != nil {
 			_ = metadataStore.Close()
 			_ = textIndex.Close()
@@ -190,8 +199,11 @@ func (e *Engine) Close() {
 		return
 	}
 	e.closeOnce.Do(func() {
-		for _, closeFn := range e.closeFns {
-			if closeFn != nil {
+		// execute in reverse order (LIFO) so resources are torn down
+		// opposite the order in which they were added. nil checks are
+		// retained from earlier implementation.
+		for i := len(e.closeFns) - 1; i >= 0; i-- {
+			if closeFn := e.closeFns[i]; closeFn != nil {
 				closeFn()
 			}
 		}
@@ -215,10 +227,16 @@ type Citation struct {
 	Span    model.Span
 }
 
-// Ask runs retrieval + generation and returns answer/citations.
-func (e *Engine) Ask(question string, opts AskOptions) (*AskResult, error) {
+// AskWithContext runs retrieval + generation and returns answer/citations using a caller-provided
+// context. The context is wrapped with the engine's configured timeout so callers may also
+// cancel early. This method replaces the old `Ask` which created its own background context
+// and therefore ignored client cancellation.
+func (e *Engine) AskWithContext(ctx context.Context, question string, opts AskOptions) (*AskResult, error) {
 	if e == nil || e.retriever == nil {
 		return nil, fmt.Errorf("retrieval engine not initialized")
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 	question = strings.TrimSpace(question)
 	if question == "" {
@@ -229,11 +247,12 @@ func (e *Engine) Ask(question string, opts AskOptions) (*AskResult, error) {
 	if k <= 0 {
 		k = 10
 	}
+
 	timeout := e.askTimeout
 	if timeout <= 0 {
 		timeout = defaultEngineAskTimeout
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	res, err := e.retriever.Ask(ctx, question, model.SearchQuery{
@@ -259,6 +278,13 @@ func (e *Engine) Ask(question string, opts AskOptions) (*AskResult, error) {
 		Answer:    res.Answer,
 		Citations: citations,
 	}, nil
+}
+
+// Ask is maintained for backwards compatibility. It simply invokes
+// AskWithContext with a background context so behaviour remains identical to
+// previous versions (timeout-only semantics).
+func (e *Engine) Ask(question string, opts AskOptions) (*AskResult, error) {
+	return e.AskWithContext(context.Background(), question, opts)
 }
 
 func preloadEngineChunkMetadata(ctx context.Context, source embeddedChunkMetadataSource, ret *Service) (int, error) {

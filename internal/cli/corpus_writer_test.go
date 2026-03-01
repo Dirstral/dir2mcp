@@ -129,7 +129,7 @@ func TestWriteCorpusSnapshot_ConcurrentWriters(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < writesPerWriter; j++ {
-				if err := writeCorpusSnapshot(context.Background(), stateDir, store, idxState); err != nil {
+				if err := writeCorpusSnapshot(context.Background(), stateDir, store, idxState, nil); err != nil {
 					errCh <- err
 					return
 				}

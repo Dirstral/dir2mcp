@@ -813,7 +813,14 @@ func (s *SQLiteStore) ActiveDocCounts(ctx context.Context) (map[string]int64, in
 }
 
 // CorpusStats returns aggregate corpus/indexing counters derived from SQLite.
-// These values are used by retrieval stats and CLI status fallbacks.
+// It performs several independent SQL queries (counting documents by type,
+// scanning/indexed/skipped/etc., representations, chunks, etc.) outside of a
+// single transaction or snapshot. Under concurrent writes the results may be
+// slightly inconsistent – for example TotalDocs (which comes from
+// ActiveDocCounts) might not exactly equal Indexed+Skipped+Errors from the
+// lifecycle query. That's acceptable since these stats are intended for
+// monitoring and CLI status fallbacks. Callers requiring strict consistency
+// would need to run the queries in one transaction or acquire a snapshot/lock.
 func (s *SQLiteStore) CorpusStats(ctx context.Context) (model.CorpusStats, error) {
 	db, err := s.ensureDB(ctx)
 	if err != nil {
@@ -825,30 +832,16 @@ func (s *SQLiteStore) CorpusStats(ctx context.Context) (model.CorpusStats, error
 		DocCounts: make(map[string]int64),
 	}
 
-	rows, err := db.QueryContext(ctx, `SELECT doc_type, COUNT(*) FROM documents WHERE deleted = 0 GROUP BY doc_type`)
+	// reuse ActiveDocCounts for per-type and total document counts so
+	// that only one SQL traversal lives in that helper method.
+	counts, total, err := s.ActiveDocCounts(ctx)
 	if err != nil {
 		return model.CorpusStats{}, err
 	}
-	defer func() { _ = rows.Close() }()
-
-	for rows.Next() {
-		var (
-			docType string
-			count   int64
-		)
-		if err := rows.Scan(&docType, &count); err != nil {
-			return model.CorpusStats{}, err
-		}
-		docType = strings.TrimSpace(docType)
-		if docType == "" {
-			docType = "unknown"
-		}
-		stats.DocCounts[docType] += count
-		stats.TotalDocs += count
+	for k, v := range counts {
+		stats.DocCounts[k] += v
 	}
-	if err := rows.Err(); err != nil {
-		return model.CorpusStats{}, err
-	}
+	stats.TotalDocs += total
 
 	err = db.QueryRowContext(ctx, `
 		SELECT

@@ -2,7 +2,7 @@
 
 ## Project
 
-dir2mcp is a Go monorepo for deploying a directory as an MCP knowledge server (indexing, retrieval, citations, optional x402 request gating).
+dir2mcp is a Go monorepo for deploying a directory as an MCP knowledge server (indexing, retrieval, citations, optional x402 request gating – an HTTP 402‑based payment challenge system; see [x402 request gating docs](docs/x402-payment-adapter-spec.md) for details).
 
 ## Repository layout
 
@@ -71,3 +71,4 @@ claude mcp add --transport stdio context7 -- npx -y @upstash/context7-mcp
   - `off`: disabled
   - `on`: fail-open on incomplete config
   - `required`: strict config validation/gating
+

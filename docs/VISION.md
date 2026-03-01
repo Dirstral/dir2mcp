@@ -147,7 +147,7 @@ Connector discovery and configuration:
 
 Health-check and recovery protocol:
 - connectors must expose health probes (`/health` for HTTP or gRPC HealthCheck equivalent) that return deterministic status/error codes
-- runtime polls health at a fixed interval (initial: `5s`) and on failure switches to bounded exponential backoff (max: `300s`) until a successful probe resets to the fixed interval
+- runtime polls health at a configurable interval (`health_check_interval` in config, default `5s`) and on failure switches to bounded exponential backoff (max: `300s`) until a successful probe resets to the fixed interval
 - on unhealthy state, disable affected ingestion paths and enter text-first retrieval/citation mode as needed
 - on healthy restoration, re-enable ingestion paths and trigger re-validation of `derived` artifacts created during degraded operation
 
@@ -210,13 +210,11 @@ Canonical example:
 }
 ```
 
-Fractional `latency_ms` values are valid (for example sub-millisecond precision).
-
 Parser requirements:
-- connectors must return valid JSON for metadata envelopes; malformed JSON must produce structured connector errors (recommended: `ENVELOPE_MALFORMED_JSON (2003)`)
-- missing required fields (`provider`, `model`, `version`, `latency_ms`, `trace_or_request_id`) must produce `CONFIG_MISSING (2002)` or a dedicated required-field code (recommended: `ENVELOPE_REQUIRED_FIELD_MISSING (2004)`)
-- required-field type mismatches (for example `latency_ms` not numeric, `provider` not string) must produce a structured connector error (recommended: `ENVELOPE_REQUIRED_FIELD_TYPE_INVALID (2005)`)
-- numeric constraint violations (for example negative `latency_ms`, negative values in `token_or_compute_usage`) must produce validation errors (recommended: `ENVELOPE_CONSTRAINT_VIOLATION (2006)`)
+- connectors must return valid JSON for metadata envelopes; malformed JSON must produce structured connector errors (recommended: `ENVELOPE_MALFORMED_JSON (2003)`; see §"Envelope-specific error codes" below)
+- missing required fields (`provider`, `model`, `version`, `latency_ms`, `trace_or_request_id`) must produce `CONFIG_MISSING (2002)` or a dedicated required-field code (recommended: `ENVELOPE_REQUIRED_FIELD_MISSING (2004)`; see §"Envelope-specific error codes" below)
+- required-field type mismatches (for example `latency_ms` not numeric, `provider` not string) must produce a structured connector error (recommended: `ENVELOPE_REQUIRED_FIELD_TYPE_INVALID (2005)`; see §"Envelope-specific error codes" below)
+- numeric constraint violations (for example negative `latency_ms`, negative values in `token_or_compute_usage`) must produce validation errors (recommended: `ENVELOPE_CONSTRAINT_VIOLATION (2006)`; see §"Envelope-specific error codes" below)
 - unexpected additional fields must be ignored for forward compatibility and must not fail parsing
 
 ### Connector error taxonomy (deterministic, machine-parseable)
@@ -243,6 +241,17 @@ Reserved code ranges:
 - `2000-2999`: auth/config failures
 	- `AUTH_INVALID_CREDENTIALS (2001)`
 	- `CONFIG_MISSING (2002)`
+
+### Envelope-specific error codes
+
+Codes specifically used by metadata envelope parsers; refer to parser
+requirements earlier in this section for usage context.
+
+- `ENVELOPE_MALFORMED_JSON (2003)` – JSON syntax error in metadata envelope.
+- `ENVELOPE_REQUIRED_FIELD_MISSING (2004)` – required field absent.
+- `ENVELOPE_REQUIRED_FIELD_TYPE_INVALID (2005)` – field present but wrong type.
+- `ENVELOPE_CONSTRAINT_VIOLATION (2006)` – numeric constraint violation.
+
 - `3000-3999`: capability unavailable failures
 	- `CAPABILITY_NOT_SUPPORTED (3001)`
 	- `MODEL_NOT_AVAILABLE (3002)`
