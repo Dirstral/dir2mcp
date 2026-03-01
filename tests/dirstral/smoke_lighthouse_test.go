@@ -176,9 +176,6 @@ func runFakeDir2MCPBinary() error {
 	mux := http.NewServeMux()
 	const sessionID = "sess-smoke-host"
 	mux.HandleFunc(mcpPath, func(w http.ResponseWriter, r *http.Request) {
-		defer func() {
-			_ = r.Body.Close()
-		}()
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
