@@ -74,6 +74,10 @@ type Service struct {
 	ocrCachePruneEvery int
 }
 
+// ErrTranscriptProviderFailure marks failures originating from the transcript
+// provider call itself (as opposed to persistence/cache write failures).
+var ErrTranscriptProviderFailure = errors.New("transcript provider failure")
+
 type documentDeleteMarker interface {
 	MarkDocumentDeleted(ctx context.Context, relPath string) error
 }
@@ -604,11 +608,14 @@ func (s *Service) generateRepresentations(ctx context.Context, doc model.Documen
 	}
 	if doc.DocType == "audio" && s.transcriber != nil {
 		if err := s.generateTranscriptRepresentation(ctx, doc, content); err != nil {
-			// Transcription failures should not fail the entire ingest run for a
-			// document. Keep ingesting other files and record an indexing error.
-			s.getLogger().Printf("transcription skipped for %s: %v", doc.RelPath, err)
-			s.addErrors(1)
-			return nil
+			// Provider/transient failures should not fail the entire ingest run.
+			// Persistence/cache failures should still propagate.
+			if errors.Is(err, ErrTranscriptProviderFailure) {
+				s.getLogger().Printf("transcription skipped for %s: %v", doc.RelPath, err)
+				s.addErrors(1)
+				return nil
+			}
+			return err
 		}
 		s.addRepresentations(1)
 	}
@@ -879,6 +886,10 @@ func (s *Service) ReadOrComputeOCR(ctx context.Context, doc model.Document, cont
 }
 
 func (s *Service) readOrComputeTranscript(ctx context.Context, doc model.Document, content []byte) (string, error) {
+	if s.transcriber == nil {
+		return "", errors.New("transcriber not configured")
+	}
+
 	cacheDir := filepath.Join(s.cfg.StateDir, "cache", "transcribe")
 	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
 		return "", fmt.Errorf("create transcript cache dir: %w", err)
@@ -891,7 +902,7 @@ func (s *Service) readOrComputeTranscript(ctx context.Context, doc model.Documen
 
 	transcript, err := s.transcriber.Transcribe(ctx, doc.RelPath, content)
 	if err != nil {
-		return "", fmt.Errorf("transcribe %s: %w", doc.RelPath, err)
+		return "", fmt.Errorf("%w: transcribe %s: %w", ErrTranscriptProviderFailure, doc.RelPath, err)
 	}
 
 	transcriptBytes := []byte(strings.ReplaceAll(strings.ReplaceAll(transcript, "\r\n", "\n"), "\r", "\n"))
