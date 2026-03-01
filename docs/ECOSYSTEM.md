@@ -142,7 +142,20 @@ For concreteness, the Bazaar/CDP discovery metadata specification (https://docs.
       "properties": {
         "tools": {
           "type": "array",
-          "items": {"type":"object","properties":{"name":{"type":"string"},"schema":{"type":"object"}}}
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "The unique name of the MCP tool"
+              },
+              "schema": {
+                "type": "object",
+                "description": "JSON Schema describing the tool's input parameters"
+              }
+            },
+            "required": ["name", "schema"]
+          }
         },
         "source_types": {"type": "array","items": {"type":"string"}},
         "citation_formats": {"type": "array","items": {"type":"string"}}

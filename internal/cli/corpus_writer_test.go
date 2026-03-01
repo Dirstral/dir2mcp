@@ -65,7 +65,7 @@ func TestRunCorpusWriterWithInterval_UpdatesSnapshotWhileRunning(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		runCorpusWriterWithInterval(ctx, stateDir, store, idxState, io.Discard, 20*time.Millisecond)
+		runCorpusWriterWithInterval(ctx, stateDir, store, idxState, io.Discard, nil, 20*time.Millisecond)
 	}()
 	defer func() {
 		cancel()
@@ -130,7 +130,7 @@ func TestWriteCorpusSnapshot_ConcurrentWriters(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < writesPerWriter; j++ {
-				if err := writeCorpusSnapshot(context.Background(), stateDir, store, idxState, nil); err != nil {
+				if err := writeCorpusSnapshot(context.Background(), stateDir, store, idxState, io.Discard, nil); err != nil {
 					errCh <- err
 					return
 				}
@@ -158,7 +158,12 @@ func TestWriteCorpusSnapshot_ConcurrentWriters(t *testing.T) {
 func parseEvents(t *testing.T, buf *bytes.Buffer) []ndjsonEvent {
 	t.Helper()
 	var events []ndjsonEvent
-	lines := bytes.Split(bytes.TrimSpace(buf.Bytes()), []byte("\n"))
+	trimmed := bytes.TrimSpace(buf.Bytes())
+	if len(trimmed) == 0 {
+		// nothing was written
+		return events
+	}
+	lines := bytes.Split(trimmed, []byte("\n"))
 	for _, line := range lines {
 		var ev ndjsonEvent
 		if err := json.Unmarshal(line, &ev); err != nil {
@@ -180,7 +185,7 @@ func TestWriteCorpusSnapshot_WithEmitter(t *testing.T) {
 
 	var buf bytes.Buffer
 	emitter := newNDJSONEmitter(&buf, true)
-	if err := writeCorpusSnapshot(context.Background(), stateDir, store, idxState, emitter); err != nil {
+	if err := writeCorpusSnapshot(context.Background(), stateDir, store, idxState, io.Discard, emitter); err != nil {
 		t.Fatalf("writeCorpusSnapshot failed: %v", err)
 	}
 
@@ -216,11 +221,16 @@ func TestWriteCorpusSnapshot_EmitterDisabled(t *testing.T) {
 
 	var buf bytes.Buffer
 	emitter := newNDJSONEmitter(&buf, false)
-	if err := writeCorpusSnapshot(context.Background(), stateDir, store, idxState, emitter); err != nil {
+	if err := writeCorpusSnapshot(context.Background(), stateDir, store, idxState, io.Discard, emitter); err != nil {
 		t.Fatalf("writeCorpusSnapshot failed: %v", err)
 	}
 	if buf.Len() != 0 {
 		t.Fatalf("expected no output when emitter.disabled, got %q", buf.String())
+	}
+	// also ensure parseEvents handles the empty buffer gracefully
+	events := parseEvents(t, &buf)
+	if len(events) != 0 {
+		t.Fatalf("expected no events from empty buffer, got %+v", events)
 	}
 }
 

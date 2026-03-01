@@ -25,10 +25,9 @@ func TestPreloadEngineChunkMetadata_ContextTimeout(t *testing.T) {
 	// service with nil dependencies. this keeps the test focused and avoids
 	// needing to wire anything up.
 	//
-	// See TestPreloadEngineChunkMetadata_ContextTimeout, preloadEngineChunkMetadata,
-	// and blockingMetadataSource{} for the relevant logic.
+	// See preloadEngineChunkMetadata and blockingMetadataSource{} for the relevant logic.
 	svc := NewService(nil, nil, nil, nil)
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 
 	total, err := preloadEngineChunkMetadata(ctx, blockingMetadataSource{}, svc)

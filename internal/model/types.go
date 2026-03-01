@@ -225,36 +225,20 @@ func (s Stats) MarshalJSON() ([]byte, error) {
 	if s.DocCounts == nil {
 		s.DocCounts = make(map[string]int64)
 	}
-	// define a stripped-down copy struct
+	// Use an alias to strip methods from CorpusStats, then anonymously embed it
+	// so json encoding flattens all corpus fields automatically.
+	type corpusStatsFields CorpusStats
 	type plain struct {
-		Root            string           `json:"root"`
-		StateDir        string           `json:"state_dir"`
-		ProtocolVersion string           `json:"protocol_version"`
-		DocCounts       map[string]int64 `json:"doc_counts"`
-		TotalDocs       int64            `json:"total_docs"`
-		Scanned         int64            `json:"scanned"`
-		Indexed         int64            `json:"indexed"`
-		Skipped         int64            `json:"skipped"`
-		Deleted         int64            `json:"deleted"`
-		Representations int64            `json:"representations"`
-		ChunksTotal     int64            `json:"chunks_total"`
-		EmbeddedOK      int64            `json:"embedded_ok"`
-		Errors          int64            `json:"errors"`
+		Root            string `json:"root"`
+		StateDir        string `json:"state_dir"`
+		ProtocolVersion string `json:"protocol_version"`
+		corpusStatsFields
 	}
 	a := plain{
-		Root:            s.Root,
-		StateDir:        s.StateDir,
-		ProtocolVersion: s.ProtocolVersion,
-		DocCounts:       s.DocCounts,
-		TotalDocs:       s.TotalDocs,
-		Scanned:         s.Scanned,
-		Indexed:         s.Indexed,
-		Skipped:         s.Skipped,
-		Deleted:         s.Deleted,
-		Representations: s.Representations,
-		ChunksTotal:     s.ChunksTotal,
-		EmbeddedOK:      s.EmbeddedOK,
-		Errors:          s.Errors,
+		Root:              s.Root,
+		StateDir:          s.StateDir,
+		ProtocolVersion:   s.ProtocolVersion,
+		corpusStatsFields: corpusStatsFields(s.CorpusStats),
 	}
 	return json.Marshal(a)
 }

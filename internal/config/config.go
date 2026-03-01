@@ -842,6 +842,7 @@ func applyEnvOverrides(cfg *Config, overrideEnv map[string]string) {
 		// fallback to old name
 		trimmed := strings.TrimSpace(raw)
 		if trimmed != "" {
+			cfg.Warnings = append(cfg.Warnings, fmt.Errorf("DIR2MCP_SESSION_TIMEOUT is deprecated; use DIR2MCP_SESSION_INACTIVITY_TIMEOUT instead (current value: %q)", trimmed))
 			d, err := time.ParseDuration(trimmed)
 			if err != nil {
 				cfg.Warnings = append(cfg.Warnings, fmt.Errorf("invalid duration for DIR2MCP_SESSION_TIMEOUT: %q (%v)", trimmed, err))
@@ -851,10 +852,7 @@ func applyEnvOverrides(cfg *Config, overrideEnv map[string]string) {
 		}
 	}
 	if raw, ok := envLookup("DIR2MCP_SESSION_MAX_LIFETIME", overrideEnv); ok {
-		trimmed := strings.TrimSpace(raw)
-		if trimmed == "" {
-			// ignore empty values
-		} else {
+		if trimmed := strings.TrimSpace(raw); trimmed != "" {
 			d, err := time.ParseDuration(trimmed)
 			if err != nil {
 				cfg.Warnings = append(cfg.Warnings, fmt.Errorf("invalid duration for DIR2MCP_SESSION_MAX_LIFETIME: %q (%v)", trimmed, err))
@@ -951,7 +949,7 @@ func (c *Config) Validate() error {
 	// if both timeouts are set, the max lifetime must not be shorter than
 	// the inactivity timeout; otherwise the session would expire before
 	// inactivity checks could ever trigger.
-	if c.SessionMaxLifetime > 0 && c.SessionInactivityTimeout > 0 && c.SessionMaxLifetime < c.SessionInactivityTimeout {
+	if c.SessionMaxLifetime > 0 && c.SessionMaxLifetime < c.SessionInactivityTimeout {
 		return fmt.Errorf("session_max_lifetime (%v) must be >= session_inactivity_timeout (%v)",
 			c.SessionMaxLifetime, c.SessionInactivityTimeout)
 	}

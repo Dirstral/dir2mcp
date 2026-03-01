@@ -31,6 +31,19 @@ func TestSessionSweepInterval_UsesSmallerConfiguredTimeout(t *testing.T) {
 	}
 }
 
+func TestSessionSweepInterval_MaxLifetimeSmallerThanInactivity(t *testing.T) {
+	cfg := config.Default()
+	cfg.SessionInactivityTimeout = 1 * time.Hour
+	cfg.SessionMaxLifetime = 10 * time.Minute
+	s := NewServer(cfg, nil)
+
+	got := s.sessionSweepInterval()
+	want := 5 * time.Minute // min(inactivity, maxLifetime)/2 = maxLifetime/2
+	if got != want {
+		t.Fatalf("sessionSweepInterval()=%v want=%v", got, want)
+	}
+}
+
 func TestSessionSweepInterval_UsesSmallestWindowWithFloor(t *testing.T) {
 	cfg := config.Default()
 	cfg.SessionInactivityTimeout = 1500 * time.Millisecond

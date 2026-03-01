@@ -40,6 +40,8 @@ RUN_INTEGRATION_TESTS=1 MISTRAL_API_KEY=... MISTRAL_STT_SAMPLE=/path/to/file.mp3
 
 ## MCP dev servers (Claude Code)
 
+These are optional local development and testing servers for Claude Code integration. Register them when you want richer tooling (web browsing, sequential reasoning, GitHub access, up-to-date library docs) available to Claude Code during development sessions.
+
 ```bash
 claude mcp add --transport stdio everything -- npx -y @modelcontextprotocol/server-everything
 claude mcp add --transport stdio sequential-thinking -- npx -y @modelcontextprotocol/server-sequential-thinking

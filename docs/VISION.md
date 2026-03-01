@@ -212,7 +212,7 @@ Canonical example:
 
 Parser requirements:
 - connectors must return valid JSON for metadata envelopes; malformed JSON must produce structured connector errors (recommended: `ENVELOPE_MALFORMED_JSON (2003)`; see §"Envelope-specific error codes" below)
-- missing required fields (`provider`, `model`, `version`, `latency_ms`, `trace_or_request_id`) must produce `CONFIG_MISSING (2002)` or a dedicated required-field code (recommended: `ENVELOPE_REQUIRED_FIELD_MISSING (2004)`; see §"Envelope-specific error codes" below)
+- missing required fields (`provider`, `model`, `version`, `latency_ms`, `trace_or_request_id`) must produce `ENVELOPE_REQUIRED_FIELD_MISSING (2004)` (see §"Envelope-specific error codes" below); `CONFIG_MISSING (2002)` is reserved for global connector configuration errors, not per-envelope missing fields
 - required-field type mismatches (for example `latency_ms` not numeric, `provider` not string) must produce a structured connector error (recommended: `ENVELOPE_REQUIRED_FIELD_TYPE_INVALID (2005)`; see §"Envelope-specific error codes" below)
 - numeric constraint violations (for example negative `latency_ms`, negative values in `token_or_compute_usage`) must produce validation errors (recommended: `ENVELOPE_CONSTRAINT_VIOLATION (2006)`; see §"Envelope-specific error codes" below)
 - unexpected additional fields must be ignored for forward compatibility and must not fail parsing
@@ -278,7 +278,7 @@ introduced.
 | NETWORK_TIMEOUT           | 1001 | 503         | retryable/temporary |
 | UPSTREAM_UNAVAILABLE      | 1002 | 502         | bad‑gateway connector fault |
 | AUTH_INVALID_CREDENTIALS  | 2001 | 401         | invalid or missing authentication |
-| CONFIG_MISSING            | 2002 | 403         | authenticated but forbidden/config error |
+| CONFIG_MISSING            | 2002 | 503         | server-side config absent; service unavailable until corrected |
 | CAPABILITY_NOT_SUPPORTED  | 3001 | 501         | unimplemented capability |
 | MODEL_NOT_AVAILABLE       | 3002 | 422         | semantically unprocessable request |
 | INVALID_REQUEST           | 4001 | 400         | malformed or invalid client input |
@@ -292,8 +292,9 @@ Generalized range guidelines (for new or unspecified codes):
 - transient/retryable (`1000-1999`) → `503` for temporary overload/idempotent
   retry‑later conditions, `502` for upstream/bad‑gateway connector failures
 - auth/config (`2000-2999`) → `401` for missing/invalid authentication, `403`
-  for authenticated but forbidden/insufficient permissions or policy/config
-  denial
+  for authenticated but forbidden/insufficient permissions or explicit policy
+  denial, `503` for missing server-side configuration that makes the service
+  unavailable (e.g. `CONFIG_MISSING`)
 - capability unavailable (`3000-3999`) → `422` for semantically unprocessable
   requests, `501` for unimplemented/nonexistent capabilities
 - client/input (`4000-4999`) → `400` for malformed/invalid client request, `422`

@@ -28,7 +28,7 @@ x402:
 ```
 
 > **Security note:** never commit API keys or sensitive credentials (such as
-> `x402.facilitator.api_key` or `x402.adapter` settings) to version control.
+> `x402.facilitator.api_key`) to version control.
 > Store them securely using environment variables, a secret manager (e.g.
 > HashiCorp Vault, AWS Secrets Manager), or encrypted configuration files.
 ## Normative baseline
@@ -52,7 +52,7 @@ Reference materials:
 
 The contract defines, at a minimum, the following elements:  
 
-* **Facilitator operations** – call facilitator verify/settle endpoints (CDP reference: `POST /v2/x402/verify`, `POST /v2/x402/settle`) and map their responses into dir2mcp transport behavior.  
+* **Facilitator operations** – call facilitator verify and settle endpoints and map their responses into dir2mcp transport behavior. Adapters must implement verify (to validate payment proofs) and settle (to finalize payments) operations according to their facilitator's API specification.
 * **Authentication** – adapter-to-facilitator auth must be explicit (for example API key auth for hosted facilitator, mTLS or signed requests for self-managed deployments).  
 * **Payment state model** – canonical states `required -> verified -> settled` with failure branches (`invalid`, `rejected`, `expired`, `failed`). dir2mcp does not persist custodial payment state; facilitator is source of truth for verify/settle outcomes.  
 * **Error codes and retries** – standard HTTP handling (`402`, `4xx`, `5xx`), idempotent settle calls, bounded retry/backoff for transient failures, and explicit non-retryable classes for invalid signatures/requirements mismatch.  

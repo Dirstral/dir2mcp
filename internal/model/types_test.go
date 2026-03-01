@@ -3,6 +3,7 @@ package model
 import (
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -75,7 +76,7 @@ func TestStatsJSONFlattening(t *testing.T) {
 		if tag == "" {
 			continue
 		}
-		csTags[tag] = struct{}{}
+		csTags[strings.SplitN(tag, ",", 2)[0]] = struct{}{}
 	}
 	for tag := range csTags {
 		found := false

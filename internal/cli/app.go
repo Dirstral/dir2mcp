@@ -668,7 +668,7 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	}
 
 	ingestErrCh := make(chan error, 1)
-	go runCorpusWriter(runCtx, cfg.StateDir, st, indexingState, a.stderr)
+	go runCorpusWriter(runCtx, cfg.StateDir, st, indexingState, a.stderr, emitter)
 
 	if opts.readOnly {
 		close(ingestErrCh)
@@ -704,11 +704,11 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 		case ingestErr, ok := <-ingestErrCh:
 			if !ok {
 				ingestErrCh = nil
-				_ = writeCorpusSnapshot(runCtx, cfg.StateDir, st, indexingState, emitter)
+				_ = writeCorpusSnapshot(runCtx, cfg.StateDir, st, indexingState, a.stderr, emitter)
 				continue
 			}
 			if ingestErr == nil {
-				_ = writeCorpusSnapshot(runCtx, cfg.StateDir, st, indexingState, emitter)
+				_ = writeCorpusSnapshot(runCtx, cfg.StateDir, st, indexingState, a.stderr, emitter)
 				continue
 			}
 			writef(a.stderr, "ingestion failed: %v\n", ingestErr)
@@ -864,7 +864,7 @@ func (a *App) runStatus(ctx context.Context, global globalOptions, args []string
 			return exitIndexLoadFailure
 		}
 		emitter := newNDJSONEmitter(a.stdout, global.jsonOutput)
-		snapshot, err = buildCorpusSnapshot(ctx, st, nil, emitter)
+		snapshot, err = buildCorpusSnapshot(ctx, st, nil, a.stderr, emitter)
 		if err != nil {
 			writef(a.stderr, "build status snapshot: %v\n", err)
 			return exitGeneric
@@ -1714,16 +1714,16 @@ func newNDJSONEmitter(out io.Writer, enabled bool) *ndjsonEmitter {
 	return &ndjsonEmitter{enabled: enabled, out: out}
 }
 
-func runCorpusWriter(ctx context.Context, stateDir string, st model.Store, indexingState *appstate.IndexingState, stderr io.Writer) {
-	runCorpusWriterWithInterval(ctx, stateDir, st, indexingState, stderr, 5*time.Second)
+func runCorpusWriter(ctx context.Context, stateDir string, st model.Store, indexingState *appstate.IndexingState, stderr io.Writer, emitter *ndjsonEmitter) {
+	runCorpusWriterWithInterval(ctx, stateDir, st, indexingState, stderr, emitter, 5*time.Second)
 }
 
-func runCorpusWriterWithInterval(ctx context.Context, stateDir string, st model.Store, indexingState *appstate.IndexingState, stderr io.Writer, interval time.Duration) {
+func runCorpusWriterWithInterval(ctx context.Context, stateDir string, st model.Store, indexingState *appstate.IndexingState, stderr io.Writer, emitter *ndjsonEmitter, interval time.Duration) {
 	if interval <= 0 {
 		interval = 5 * time.Second
 	}
 	// Emit an initial snapshot immediately, then refresh while indexing runs.
-	if err := writeCorpusSnapshot(ctx, stateDir, st, indexingState, nil); err != nil {
+	if err := writeCorpusSnapshot(ctx, stateDir, st, indexingState, stderr, emitter); err != nil {
 		writef(stderr, "write corpus snapshot: %v\n", err)
 	}
 
@@ -1737,15 +1737,15 @@ func runCorpusWriterWithInterval(ctx context.Context, stateDir string, st model.
 			if indexingState != nil && !indexingState.Snapshot().Running {
 				continue
 			}
-			if err := writeCorpusSnapshot(ctx, stateDir, st, indexingState, nil); err != nil {
+			if err := writeCorpusSnapshot(ctx, stateDir, st, indexingState, stderr, emitter); err != nil {
 				writef(stderr, "write corpus snapshot: %v\n", err)
 			}
 		}
 	}
 }
 
-func writeCorpusSnapshot(ctx context.Context, stateDir string, st model.Store, indexingState *appstate.IndexingState, emitter *ndjsonEmitter) error {
-	snapshot, err := buildCorpusSnapshot(ctx, st, indexingState, emitter)
+func writeCorpusSnapshot(ctx context.Context, stateDir string, st model.Store, indexingState *appstate.IndexingState, stderr io.Writer, emitter *ndjsonEmitter) error {
+	snapshot, err := buildCorpusSnapshot(ctx, st, indexingState, stderr, emitter)
 	if err != nil {
 		return err
 	}
@@ -1792,8 +1792,8 @@ func writeCorpusSnapshot(ctx context.Context, stateDir string, st model.Store, i
 	return nil
 }
 
-func buildCorpusSnapshot(ctx context.Context, st model.Store, indexingState *appstate.IndexingState, emitter *ndjsonEmitter) (corpusSnapshot, error) {
-	corpusStats, err := collectCorpusStats(ctx, st, emitter)
+func buildCorpusSnapshot(ctx context.Context, st model.Store, indexingState *appstate.IndexingState, stderr io.Writer, emitter *ndjsonEmitter) (corpusSnapshot, error) {
+	corpusStats, err := collectCorpusStats(ctx, st, stderr, emitter)
 	if err != nil {
 		return corpusSnapshot{}, err
 	}
@@ -1840,7 +1840,7 @@ func buildCorpusSnapshot(ctx context.Context, st model.Store, indexingState *app
 	}, nil
 }
 
-func collectCorpusStats(ctx context.Context, st model.Store, emitter *ndjsonEmitter) (model.CorpusStats, error) {
+func collectCorpusStats(ctx context.Context, st model.Store, stderr io.Writer, emitter *ndjsonEmitter) (model.CorpusStats, error) {
 	if st == nil {
 		return model.CorpusStats{DocCounts: map[string]int64{}}, nil
 	}
@@ -1863,7 +1863,7 @@ func collectCorpusStats(ctx context.Context, st model.Store, emitter *ndjsonEmit
 		return model.CorpusStats{}, err
 	}
 
-	statusCounts, err := collectDocumentStatusCounts(ctx, st, emitter)
+	statusCounts, err := collectDocumentStatusCounts(ctx, st, stderr, emitter)
 	if err != nil {
 		return model.CorpusStats{}, err
 	}
@@ -1935,7 +1935,7 @@ type documentStatusCounts struct {
 	Errors  int64
 }
 
-func collectDocumentStatusCounts(ctx context.Context, st model.Store, emitter *ndjsonEmitter) (documentStatusCounts, error) {
+func collectDocumentStatusCounts(ctx context.Context, st model.Store, stderr io.Writer, emitter *ndjsonEmitter) (documentStatusCounts, error) {
 	if st == nil {
 		return documentStatusCounts{}, nil
 	}
@@ -1998,7 +1998,7 @@ func collectDocumentStatusCounts(ctx context.Context, st model.Store, emitter *n
 				"examples": unexpectedStatusExample,
 			})
 		} else {
-			log.Print(msg)
+			writef(stderr, "warning: %s\n", msg)
 		}
 	}
 

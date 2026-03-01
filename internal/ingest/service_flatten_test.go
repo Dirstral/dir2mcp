@@ -68,10 +68,10 @@ func TestFlattenJSONForIndexing_TopLevelScalar(t *testing.T) {
 }
 
 func TestHealthCheckIntervalHelper(t *testing.T) {
-	// verify default value when config is empty or zero
-	s := &Service{cfg: config.Default()}
+	// zero-value config triggers the fallback branch in healthCheckInterval
+	s := &Service{cfg: config.Config{HealthCheckInterval: 0}}
 	if got := s.healthCheckInterval(); got != 5*time.Second {
-		t.Fatalf("default health interval = %v; want 5s", got)
+		t.Fatalf("zero-value health interval = %v; want 5s", got)
 	}
 
 	// explicit config override
