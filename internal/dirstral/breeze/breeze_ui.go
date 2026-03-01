@@ -38,8 +38,7 @@ type breezeModel struct {
 	showHelp  bool
 
 	// For confirmation
-	confirmingTool string
-	confirmArgs    map[string]any
+	confirmingPlan TurnPlan
 }
 
 func initialModel(ctx context.Context, client *mcp.Client, opts Options) breezeModel {
@@ -77,7 +76,6 @@ func (m breezeModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		spCmd tea.Cmd
 	)
 
-	m.textInput, tiCmd = m.textInput.Update(msg)
 	m.spinner, spCmd = m.spinner.Update(msg)
 
 	switch msg := msg.(type) {
@@ -85,48 +83,50 @@ func (m breezeModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.String() == "?" || msg.String() == "ctrl+k" {
 			m.showHelp = !m.showHelp
 			m.applyWindowSize(m.width, m.height)
-			return m, nil
+			return m, spCmd
 		}
 		if m.showHelp {
 			switch msg.String() {
 			case "esc", "q", "?", "ctrl+k":
 				m.showHelp = false
+				m.applyWindowSize(m.width, m.height)
 			}
-			return m, nil
+			return m, spCmd
 		}
 		switch msg.Type {
 		case tea.KeyCtrlC, tea.KeyEsc:
 			return m, tea.Quit
 		case tea.KeyEnter:
 			if m.isLoading {
-				return m, nil
+				return m, spCmd
 			}
 
 			input := strings.TrimSpace(m.textInput.Value())
 			if input == "" {
-				return m, nil
+				return m, spCmd
 			}
 			m.textInput.SetValue("")
 
-			if m.confirmingTool != "" {
+			if len(m.confirmingPlan.Steps) > 0 {
 				inputLower := strings.ToLower(input)
+				approvalTool := firstApprovalTool(m.confirmingPlan)
+				if approvalTool == "" {
+					approvalTool = "pending plan"
+				}
 				if inputLower == "y" || inputLower == "yes" {
-					m.messages = append(m.messages, ui.Brand.Render("Approving "+m.confirmingTool+"..."))
+					m.messages = append(m.messages, ui.Brand.Render("Approving "+approvalTool+"..."))
 					m.isLoading = true
-					tool := m.confirmingTool
-					args := m.confirmArgs
-					m.confirmingTool = ""
-					m.confirmArgs = nil
+					plan := m.confirmingPlan
+					m.confirmingPlan = TurnPlan{}
 					m.viewport.SetContent(strings.Join(m.messages, "\n\n"))
 					m.viewport.GotoBottom()
-					return m, tea.Batch(m.runToolCmd(tool, args), m.spinner.Tick)
+					return m, tea.Batch(m.runPlanCmd(plan), m.spinner.Tick)
 				} else {
-					m.messages = append(m.messages, ui.Dim("Cancelled "+m.confirmingTool+"."))
-					m.confirmingTool = ""
-					m.confirmArgs = nil
+					m.messages = append(m.messages, ui.Dim("Cancelled "+approvalTool+"."))
+					m.confirmingPlan = TurnPlan{}
 					m.viewport.SetContent(strings.Join(m.messages, "\n\n"))
 					m.viewport.GotoBottom()
-					return m, nil
+					return m, spCmd
 				}
 			}
 
@@ -168,14 +168,18 @@ func (m breezeModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case approvalReqMsg:
 		m.isLoading = false
-		m.confirmingTool = msg.tool
-		m.confirmArgs = msg.args
-		m.messages = append(m.messages, ui.Yellow.Render("Approval required for ")+ui.Brand.Render(msg.tool))
+		m.confirmingPlan = msg.plan
+		approvalTool := firstApprovalTool(msg.plan)
+		if approvalTool == "" {
+			approvalTool = "pending plan"
+		}
+		m.messages = append(m.messages, ui.Yellow.Render("Approval required for ")+ui.Brand.Render(approvalTool))
 		m.viewport.SetContent(strings.Join(m.messages, "\n\n"))
 		m.viewport.GotoBottom()
 		return m, nil
 	}
 
+	m.textInput, tiCmd = m.textInput.Update(msg)
 	m.viewport, vpCmd = m.viewport.Update(msg)
 
 	return m, tea.Batch(tiCmd, vpCmd, spCmd)
@@ -196,8 +200,12 @@ func (m breezeModel) View() string {
 		b.WriteString("\n")
 	}
 
-	if m.confirmingTool != "" {
-		prompt := fmt.Sprintf("%s %s %s", ui.Yellow.Render("Run tool"), ui.Brand.Render(m.confirmingTool+"?"), ui.Dim("[y/N]: "))
+	if len(m.confirmingPlan.Steps) > 0 {
+		approvalTool := firstApprovalTool(m.confirmingPlan)
+		if approvalTool == "" {
+			approvalTool = "pending plan"
+		}
+		prompt := fmt.Sprintf("%s %s %s", ui.Yellow.Render("Run tool"), ui.Brand.Render(approvalTool+"?"), ui.Dim("[y/N]: "))
 		b.WriteString(lipgloss.NewStyle().MaxWidth(maxInt(m.width-2, 20)).Render(prompt))
 		b.WriteString(m.textInput.View())
 	} else {
@@ -289,7 +297,7 @@ func (m *breezeModel) processInputCmd(input string) tea.Cmd {
 func (m *breezeModel) checkApprovalAndRunPlan(plan TurnPlan) tea.Msg {
 	for _, step := range plan.Steps {
 		if needsApproval(step.Tool) {
-			return approvalReqMsg{tool: step.Tool, args: step.Args}
+			return approvalReqMsg{plan: plan}
 		}
 	}
 	execRes, err := ExecutePlan(m.ctx, m.client, plan)
@@ -299,9 +307,9 @@ func (m *breezeModel) checkApprovalAndRunPlan(plan TurnPlan) tea.Msg {
 	return mcpResponseMsg{output: execRes.Output}
 }
 
-func (m *breezeModel) runToolCmd(tool string, args map[string]any) tea.Cmd {
+func (m *breezeModel) runPlanCmd(plan TurnPlan) tea.Cmd {
 	return func() tea.Msg {
-		execRes, err := ExecuteParsed(m.ctx, m.client, ParsedInput{Tool: tool, Args: args})
+		execRes, err := ExecutePlan(m.ctx, m.client, plan)
 		if err != nil {
 			return mcpResponseMsg{err: err}
 		}
@@ -310,8 +318,19 @@ func (m *breezeModel) runToolCmd(tool string, args map[string]any) tea.Cmd {
 }
 
 type approvalReqMsg struct {
-	tool string
-	args map[string]any
+	plan TurnPlan
+}
+
+func firstApprovalTool(plan TurnPlan) string {
+	for _, step := range plan.Steps {
+		if needsApproval(step.Tool) {
+			return step.Tool
+		}
+	}
+	if len(plan.Steps) == 0 {
+		return ""
+	}
+	return plan.Steps[0].Tool
 }
 
 func formatHelp() string {
