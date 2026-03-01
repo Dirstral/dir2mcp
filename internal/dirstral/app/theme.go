@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 
+	"dir2mcp/internal/dirstral/ui"
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -28,10 +29,10 @@ const (
 
 // Lipgloss color palette.
 var (
-	clrBrandStrong = lipgloss.Color("214")
-	clrMuted       = lipgloss.Color("245")
-	clrSubtle      = lipgloss.Color("242")
-	clrGreen       = lipgloss.Color("114")
+	clrBrandStrong = lipgloss.Color(ui.ClrBrand)
+	clrMuted       = lipgloss.Color(ui.ClrMuted)
+	clrSubtle      = lipgloss.Color(ui.ClrSubtle)
+	clrGreen       = lipgloss.Color(ui.ClrGreen)
 )
 
 // Reusable lipgloss styles.
