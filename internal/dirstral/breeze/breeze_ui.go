@@ -427,13 +427,11 @@ func renderAskString(sc map[string]any) string {
 		b.WriteString(answer + "\n")
 	}
 	if ordered := citationsFor(protocol.ToolNameAsk, sc); len(ordered) > 0 {
-		if len(ordered) > 0 {
-			styled := make([]string, len(ordered))
-			for i, c := range ordered {
-				styled[i] = ui.Citation(c)
-			}
-			fmt.Fprintf(&b, "%s %s\n", ui.Dim("Sources:"), strings.Join(styled, ui.Dim(", ")))
+		styled := make([]string, len(ordered))
+		for i, c := range ordered {
+			styled[i] = ui.Citation(c)
 		}
+		fmt.Fprintf(&b, "%s %s\n", ui.Dim("Sources:"), strings.Join(styled, ui.Dim(", ")))
 	}
 	return strings.TrimSpace(b.String())
 }
