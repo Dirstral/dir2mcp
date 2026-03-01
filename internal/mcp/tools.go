@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"math"
 	"net/http"
 	"os"
@@ -13,17 +14,21 @@ import (
 	"sort"
 	"strings"
 
+	"dir2mcp/internal/ingest"
 	"dir2mcp/internal/mistral"
 	"dir2mcp/internal/model"
 )
 
 const (
-	toolNameSearch    = "dir2mcp.search"
-	toolNameAsk       = "dir2mcp.ask"
-	toolNameAskAudio  = "dir2mcp.ask_audio"
-	toolNameOpenFile  = "dir2mcp.open_file"
-	toolNameListFiles = "dir2mcp.list_files"
-	toolNameStats     = "dir2mcp.stats"
+	toolNameSearch           = "dir2mcp.search"
+	toolNameAsk              = "dir2mcp.ask"
+	toolNameAskAudio         = "dir2mcp.ask_audio"
+	toolNameTranscribe       = "dir2mcp.transcribe"
+	toolNameAnnotate         = "dir2mcp.annotate"
+	toolNameTranscribeAndAsk = "dir2mcp.transcribe_and_ask"
+	toolNameOpenFile         = "dir2mcp.open_file"
+	toolNameListFiles        = "dir2mcp.list_files"
+	toolNameStats            = "dir2mcp.stats"
 
 	defaultEmbedTextModel = "mistral-embed"
 	defaultEmbedCodeModel = "codestral-embed"
@@ -37,6 +42,9 @@ var toolOrder = []string{
 	toolNameSearch,
 	toolNameAsk,
 	toolNameAskAudio,
+	toolNameTranscribe,
+	toolNameAnnotate,
+	toolNameTranscribeAndAsk,
 	toolNameOpenFile,
 	toolNameListFiles,
 	toolNameStats,
@@ -106,6 +114,27 @@ func (s *Server) buildToolRegistry() map[string]toolDefinition {
 			InputSchema:  askAudioInputSchema(),
 			OutputSchema: askAudioOutputSchema(),
 			handler:      s.handleAskAudioTool,
+		},
+		toolNameTranscribe: {
+			Name:         toolNameTranscribe,
+			Description:  "Force transcription for an indexed audio document.",
+			InputSchema:  transcribeInputSchema(),
+			OutputSchema: transcribeOutputSchema(),
+			handler:      s.handleTranscribeTool,
+		},
+		toolNameAnnotate: {
+			Name:         toolNameAnnotate,
+			Description:  "Structured extraction using provided JSON schema.",
+			InputSchema:  annotateInputSchema(),
+			OutputSchema: annotateOutputSchema(),
+			handler:      s.handleAnnotateTool,
+		},
+		toolNameTranscribeAndAsk: {
+			Name:         toolNameTranscribeAndAsk,
+			Description:  "Ensure transcript exists for audio file, then answer a question with citations.",
+			InputSchema:  transcribeAndAskInputSchema(),
+			OutputSchema: transcribeAndAskOutputSchema(),
+			handler:      s.handleTranscribeAndAskTool,
 		},
 		toolNameOpenFile: {
 			Name:         toolNameOpenFile,
@@ -877,6 +906,265 @@ func (s *Server) handleAskAudioTool(ctx context.Context, args map[string]interfa
 	}, nil
 }
 
+func (s *Server) handleTranscribeTool(ctx context.Context, args map[string]interface{}) (toolCallResult, *toolExecutionError) {
+	if err := assertNoUnknownArguments(args, map[string]struct{}{
+		"rel_path":     {},
+		"language":     {},
+		"timestamps":   {},
+		"retranscribe": {},
+	}); err != nil {
+		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
+	}
+
+	relPath, ok, err := parseRequiredString(args, "rel_path")
+	if err != nil {
+		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
+	}
+	if !ok {
+		return toolCallResult{}, &toolExecutionError{Code: "MISSING_FIELD", Message: "rel_path is required", Retryable: false}
+	}
+	language, err := parseOptionalString(args, "language")
+	if err != nil {
+		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
+	}
+	timestamps, err := parseOptionalBool(args, "timestamps", true)
+	if err != nil {
+		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
+	}
+	retranscribe, err := parseOptionalBool(args, "retranscribe", false)
+	if err != nil {
+		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
+	}
+
+	doc, toolErr := s.lookupDocumentForTool(ctx, relPath)
+	if toolErr != nil {
+		return toolCallResult{}, toolErr
+	}
+	if doc.DocType != "audio" {
+		return toolCallResult{}, &toolExecutionError{Code: "DOC_TYPE_UNSUPPORTED", Message: "document is not audio", Retryable: false}
+	}
+
+	if strings.TrimSpace(language) != "" {
+		retranscribe = true
+	}
+	transcript, transcribed, toolErr := s.ensureTranscriptForAudioDoc(ctx, doc, retranscribe, language)
+	if toolErr != nil {
+		return toolCallResult{}, toolErr
+	}
+
+	segments := make([]map[string]interface{}, 0)
+	if timestamps {
+		for _, seg := range ingest.ChunkTranscriptByTime(transcript) {
+			segments = append(segments, map[string]interface{}{
+				"start_ms": seg.Span.StartMS,
+				"end_ms":   seg.Span.EndMS,
+				"text":     seg.Text,
+			})
+		}
+	}
+
+	structured := map[string]interface{}{
+		"rel_path":    relPath,
+		"provider":    defaultSTTProvider,
+		"model":       defaultSTTModel,
+		"indexed":     true,
+		"segments":    segments,
+		"transcribed": transcribed,
+	}
+
+	return toolCallResult{
+		Content:           []toolContentItem{{Type: "text", Text: fmt.Sprintf("transcribed %s", relPath)}},
+		StructuredContent: structured,
+	}, nil
+}
+
+func (s *Server) handleAnnotateTool(ctx context.Context, args map[string]interface{}) (toolCallResult, *toolExecutionError) {
+	if err := assertNoUnknownArguments(args, map[string]struct{}{
+		"rel_path":             {},
+		"schema_json":          {},
+		"index_flattened_text": {},
+		"max_chars":            {},
+	}); err != nil {
+		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
+	}
+
+	relPath, ok, err := parseRequiredString(args, "rel_path")
+	if err != nil {
+		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
+	}
+	if !ok {
+		return toolCallResult{}, &toolExecutionError{Code: "MISSING_FIELD", Message: "rel_path is required", Retryable: false}
+	}
+	schemaJSON, ok, err := parseRequiredObject(args, "schema_json")
+	if err != nil {
+		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
+	}
+	if !ok {
+		return toolCallResult{}, &toolExecutionError{Code: "MISSING_FIELD", Message: "schema_json is required", Retryable: false}
+	}
+	indexFlattenedText, err := parseOptionalBool(args, "index_flattened_text", true)
+	if err != nil {
+		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
+	}
+	maxChars := 32000
+	if raw, ok := args["max_chars"]; ok {
+		parsed, parseErr := parseInteger(raw, "max_chars")
+		if parseErr != nil {
+			return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: parseErr.Error(), Retryable: false}
+		}
+		maxChars = parsed
+	}
+	if maxChars < 200 || maxChars > 200000 {
+		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: "max_chars must be between 200 and 200000", Retryable: false}
+	}
+
+	doc, toolErr := s.lookupDocumentForTool(ctx, relPath)
+	if toolErr != nil {
+		return toolCallResult{}, toolErr
+	}
+
+	sourceText, sourceRep, toolErr := s.sourceTextForAnnotation(ctx, doc)
+	if toolErr != nil {
+		return toolCallResult{}, toolErr
+	}
+	if strings.TrimSpace(sourceText) == "" {
+		return toolCallResult{}, &toolExecutionError{Code: "ANNOTATE_FAILED", Message: "no source text available for annotation", Retryable: false}
+	}
+	runes := []rune(sourceText)
+	if len(runes) > maxChars {
+		sourceText = string(runes[:maxChars])
+	}
+
+	client, toolErr := s.newMistralClient()
+	if toolErr != nil {
+		return toolCallResult{}, toolErr
+	}
+
+	schemaBytes, _ := json.Marshal(schemaJSON)
+	prompt := strings.Join([]string{
+		"Extract a JSON object that strictly conforms to this schema:",
+		string(schemaBytes),
+		"Return only valid JSON object, no markdown, no prose.",
+		"Document content:",
+		sourceText,
+	}, "\n\n")
+
+	generated, genErr := client.Generate(ctx, prompt)
+	if genErr != nil {
+		return toolCallResult{}, mapToolErrorFromProvider("ANNOTATE_FAILED", genErr)
+	}
+	annotationObj, parseErr := parseJSONObjectFromModelOutput(generated)
+	if parseErr != nil {
+		return toolCallResult{}, &toolExecutionError{Code: "ANNOTATE_FAILED", Message: parseErr.Error(), Retryable: false}
+	}
+
+	if s.store == nil {
+		return toolCallResult{}, &toolExecutionError{Code: "STORE_CORRUPT", Message: "store not configured", Retryable: false}
+	}
+	ing := ingest.NewService(s.cfg, s.store)
+	preview, persistErr := ing.StoreAnnotationRepresentations(ctx, doc, annotationObj, indexFlattenedText)
+	if persistErr != nil {
+		return toolCallResult{}, &toolExecutionError{Code: "STORE_CORRUPT", Message: persistErr.Error(), Retryable: false}
+	}
+
+	structured := map[string]interface{}{
+		"rel_path":                relPath,
+		"stored":                  true,
+		"flattened_indexed":       indexFlattenedText,
+		"annotation_json":         annotationObj,
+		"annotation_text_preview": preview,
+		"source_doc_type":         doc.DocType,
+		"source_rep":              sourceRep,
+	}
+
+	return toolCallResult{
+		Content:           []toolContentItem{{Type: "text", Text: fmt.Sprintf("annotation stored for %s", relPath)}},
+		StructuredContent: structured,
+	}, nil
+}
+
+func (s *Server) handleTranscribeAndAskTool(ctx context.Context, args map[string]interface{}) (toolCallResult, *toolExecutionError) {
+	if err := assertNoUnknownArguments(args, map[string]struct{}{
+		"rel_path": {},
+		"question": {},
+		"k":        {},
+	}); err != nil {
+		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
+	}
+
+	relPath, ok, err := parseRequiredString(args, "rel_path")
+	if err != nil {
+		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
+	}
+	if !ok {
+		return toolCallResult{}, &toolExecutionError{Code: "MISSING_FIELD", Message: "rel_path is required", Retryable: false}
+	}
+	question, ok, err := parseRequiredString(args, "question")
+	if err != nil {
+		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
+	}
+	if !ok {
+		return toolCallResult{}, &toolExecutionError{Code: "MISSING_FIELD", Message: "question is required", Retryable: false}
+	}
+	k := DefaultSearchK
+	if rawK, exists := args["k"]; exists {
+		parsedK, parseErr := parseInteger(rawK, "k")
+		if parseErr != nil {
+			return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: parseErr.Error(), Retryable: false}
+		}
+		k = parsedK
+	}
+	if k <= 0 {
+		k = DefaultSearchK
+	}
+	if k > 50 {
+		return toolCallResult{}, &toolExecutionError{Code: "INVALID_RANGE", Message: "k must be between 1 and 50", Retryable: false}
+	}
+
+	if s.retriever == nil {
+		return toolCallResult{}, &toolExecutionError{Code: "INDEX_NOT_READY", Message: "retriever not configured", Retryable: false}
+	}
+
+	doc, toolErr := s.lookupDocumentForTool(ctx, relPath)
+	if toolErr != nil {
+		return toolCallResult{}, toolErr
+	}
+	if doc.DocType != "audio" {
+		return toolCallResult{}, &toolExecutionError{Code: "DOC_TYPE_UNSUPPORTED", Message: "document is not audio", Retryable: false}
+	}
+	_, transcribed, toolErr := s.ensureTranscriptForAudioDoc(ctx, doc, false, "")
+	if toolErr != nil {
+		return toolCallResult{}, toolErr
+	}
+
+	askResult, askErr := s.retriever.Ask(ctx, question, model.SearchQuery{
+		Query:    question,
+		K:        k,
+		Index:    "text",
+		FileGlob: escapeGlobLiteral(relPath),
+	})
+	if askErr != nil {
+		if errors.Is(askErr, model.ErrIndexNotReady) || errors.Is(askErr, model.ErrIndexNotConfigured) {
+			return toolCallResult{}, &toolExecutionError{Code: "INDEX_NOT_READY", Message: "index not ready", Retryable: true}
+		}
+		return toolCallResult{}, &toolExecutionError{Code: "INTERNAL_ERROR", Message: "internal server error", Retryable: true}
+	}
+
+	structured := buildAskStructuredContent(askResult)
+	structured["transcript_provider"] = defaultSTTProvider
+	structured["transcript_model"] = defaultSTTModel
+	structured["transcribed"] = transcribed
+
+	answerText := strings.TrimSpace(askResult.Answer)
+	if answerText == "" {
+		answerText = "no answer text returned"
+	}
+	return toolCallResult{
+		Content:           []toolContentItem{{Type: "text", Text: answerText}},
+		StructuredContent: structured,
+	}, nil
+}
+
 func (s *Server) handleOpenFileTool(ctx context.Context, args map[string]interface{}) (toolCallResult, *toolExecutionError) {
 	if err := assertNoUnknownArguments(args, map[string]struct{}{
 		"rel_path":   {},
@@ -1047,6 +1335,252 @@ func assertNoUnknownArguments(args map[string]interface{}, allowed map[string]st
 		}
 	}
 	return nil
+}
+
+func parseOptionalBool(args map[string]interface{}, key string, defaultValue bool) (bool, error) {
+	raw, ok := args[key]
+	if !ok {
+		return defaultValue, nil
+	}
+	v, ok := raw.(bool)
+	if !ok {
+		return false, fmt.Errorf("%s must be a boolean", key)
+	}
+	return v, nil
+}
+
+func parseRequiredObject(args map[string]interface{}, key string) (map[string]interface{}, bool, error) {
+	raw, ok := args[key]
+	if !ok {
+		return nil, false, nil
+	}
+	obj, ok := raw.(map[string]interface{})
+	if !ok {
+		return nil, true, fmt.Errorf("%s must be an object", key)
+	}
+	return obj, true, nil
+}
+
+func (s *Server) lookupDocumentForTool(ctx context.Context, relPath string) (model.Document, *toolExecutionError) {
+	relPath = strings.TrimSpace(relPath)
+	if relPath == "" {
+		return model.Document{}, &toolExecutionError{Code: "MISSING_FIELD", Message: "rel_path is required", Retryable: false}
+	}
+	if s.store == nil {
+		return model.Document{}, &toolExecutionError{Code: "STORE_CORRUPT", Message: "store not configured", Retryable: false}
+	}
+	doc, err := s.store.GetDocumentByPath(ctx, relPath)
+	if err != nil {
+		switch {
+		case errors.Is(err, os.ErrNotExist), errors.Is(err, model.ErrNotFound):
+			return model.Document{}, &toolExecutionError{Code: "NOT_FOUND", Message: "file not found", Retryable: false}
+		default:
+			return model.Document{}, &toolExecutionError{Code: "STORE_CORRUPT", Message: err.Error(), Retryable: false}
+		}
+	}
+	if doc.Deleted {
+		return model.Document{}, &toolExecutionError{Code: "NOT_FOUND", Message: "file not found", Retryable: false}
+	}
+	return doc, nil
+}
+
+func (s *Server) ensureTranscriptForAudioDoc(ctx context.Context, doc model.Document, retranscribe bool, language string) (string, bool, *toolExecutionError) {
+	content, err := s.readDocumentContent(doc.RelPath)
+	if err != nil {
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+			return "", false, &toolExecutionError{Code: "NOT_FOUND", Message: "file not found", Retryable: false}
+		case errors.Is(err, model.ErrPathOutsideRoot):
+			return "", false, &toolExecutionError{Code: "PATH_OUTSIDE_ROOT", Message: err.Error(), Retryable: false}
+		default:
+			return "", false, &toolExecutionError{Code: "FORBIDDEN", Message: err.Error(), Retryable: false}
+		}
+	}
+
+	cachePath := filepath.Join(s.cfg.StateDir, "cache", "transcribe", ingest.ComputeContentHash(content)+".txt")
+	cacheExisted := true
+	if _, statErr := os.Stat(cachePath); statErr != nil {
+		cacheExisted = false
+	}
+	if retranscribe {
+		cacheExisted = false
+		if rmErr := os.Remove(cachePath); rmErr != nil && !errors.Is(rmErr, fs.ErrNotExist) {
+			return "", false, &toolExecutionError{Code: "STORE_CORRUPT", Message: fmt.Sprintf("remove transcript cache: %v", rmErr), Retryable: false}
+		}
+	}
+
+	client, toolErr := s.newMistralClient()
+	if toolErr != nil {
+		return "", false, toolErr
+	}
+	if strings.TrimSpace(language) != "" {
+		client.DefaultTranscribeLanguage = strings.TrimSpace(language)
+	}
+	ing := ingest.NewService(s.cfg, s.store)
+	ing.SetTranscriber(client)
+	if genErr := ing.GenerateTranscriptRepresentation(ctx, doc, content); genErr != nil {
+		return "", false, mapToolErrorFromProvider("TRANSCRIBE_FAILED", genErr)
+	}
+
+	transcript, readErr := ing.ReadOrComputeTranscript(ctx, doc, content)
+	if readErr != nil {
+		return "", false, mapToolErrorFromProvider("TRANSCRIBE_FAILED", readErr)
+	}
+	return transcript, !cacheExisted, nil
+}
+
+func (s *Server) sourceTextForAnnotation(ctx context.Context, doc model.Document) (string, string, *toolExecutionError) {
+	switch doc.DocType {
+	case "audio":
+		text, _, toolErr := s.ensureTranscriptForAudioDoc(ctx, doc, false, "")
+		if toolErr != nil {
+			return "", "", toolErr
+		}
+		return text, ingest.RepTypeTranscript, nil
+	case "pdf", "image":
+		content, err := s.readDocumentContent(doc.RelPath)
+		if err != nil {
+			switch {
+			case errors.Is(err, os.ErrNotExist):
+				return "", "", &toolExecutionError{Code: "NOT_FOUND", Message: "file not found", Retryable: false}
+			case errors.Is(err, model.ErrPathOutsideRoot):
+				return "", "", &toolExecutionError{Code: "PATH_OUTSIDE_ROOT", Message: err.Error(), Retryable: false}
+			default:
+				return "", "", &toolExecutionError{Code: "FORBIDDEN", Message: err.Error(), Retryable: false}
+			}
+		}
+		client, toolErr := s.newMistralClient()
+		if toolErr != nil {
+			return "", "", toolErr
+		}
+		ing := ingest.NewService(s.cfg, s.store)
+		ing.SetOCR(client)
+		text, ocrErr := ing.ReadOrComputeOCR(ctx, doc, content)
+		if ocrErr != nil {
+			return "", "", mapToolErrorFromProvider("ANNOTATE_FAILED", ocrErr)
+		}
+		return text, ingest.RepTypeOCRMarkdown, nil
+	default:
+		content, err := s.readDocumentContent(doc.RelPath)
+		if err != nil {
+			switch {
+			case errors.Is(err, os.ErrNotExist):
+				return "", "", &toolExecutionError{Code: "NOT_FOUND", Message: "file not found", Retryable: false}
+			case errors.Is(err, model.ErrPathOutsideRoot):
+				return "", "", &toolExecutionError{Code: "PATH_OUTSIDE_ROOT", Message: err.Error(), Retryable: false}
+			default:
+				return "", "", &toolExecutionError{Code: "FORBIDDEN", Message: err.Error(), Retryable: false}
+			}
+		}
+		return string(ingest.NormalizeUTF8(content)), ingest.RepTypeRawText, nil
+	}
+}
+
+func (s *Server) readDocumentContent(relPath string) ([]byte, error) {
+	rootAbs, err := filepath.Abs(strings.TrimSpace(s.cfg.RootDir))
+	if err != nil {
+		return nil, err
+	}
+	rootReal, err := filepath.EvalSymlinks(rootAbs)
+	if err != nil {
+		return nil, err
+	}
+	normalized := filepath.ToSlash(filepath.Clean(strings.TrimSpace(relPath)))
+	if normalized == "." || normalized == ".." || strings.HasPrefix(normalized, "../") || filepath.IsAbs(relPath) {
+		return nil, model.ErrPathOutsideRoot
+	}
+	absPath := filepath.Join(rootAbs, filepath.FromSlash(normalized))
+	targetReal, err := filepath.EvalSymlinks(absPath)
+	if err != nil {
+		return nil, err
+	}
+	rel, err := filepath.Rel(rootReal, targetReal)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return nil, model.ErrPathOutsideRoot
+	}
+	return os.ReadFile(targetReal)
+}
+func escapeGlobLiteral(input string) string {
+	var b strings.Builder
+	for _, r := range input {
+		switch r {
+		case '\\', '*', '?', '[', ']':
+			b.WriteByte('\\')
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+func (s *Server) newMistralClient() (*mistral.Client, *toolExecutionError) {
+	apiKey := strings.TrimSpace(s.cfg.MistralAPIKey)
+	if apiKey == "" {
+		return nil, &toolExecutionError{Code: "CONFIG_INVALID", Message: "MISTRAL_API_KEY is required", Retryable: false}
+	}
+	client := mistral.NewClient(s.cfg.MistralBaseURL, apiKey)
+	if modelName := strings.TrimSpace(s.cfg.ChatModel); modelName != "" {
+		client.DefaultChatModel = modelName
+	}
+	return client, nil
+}
+
+func parseJSONObjectFromModelOutput(raw string) (map[string]interface{}, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return nil, errors.New("model returned empty output")
+	}
+
+	candidates := []string{trimmed}
+	if strings.HasPrefix(trimmed, "```") {
+		start := strings.Index(trimmed, "{")
+		end := strings.LastIndex(trimmed, "}")
+		if start >= 0 && end > start {
+			candidates = append(candidates, trimmed[start:end+1])
+		}
+	}
+	if start := strings.Index(trimmed, "{"); start >= 0 {
+		if end := strings.LastIndex(trimmed, "}"); end > start {
+			candidates = append(candidates, trimmed[start:end+1])
+		}
+	}
+
+	for _, candidate := range candidates {
+		var obj map[string]interface{}
+		if err := json.Unmarshal([]byte(candidate), &obj); err == nil && obj != nil {
+			return obj, nil
+		}
+	}
+	return nil, errors.New("model output is not a valid JSON object")
+}
+
+func mapToolErrorFromProvider(defaultCode string, err error) *toolExecutionError {
+	if err == nil {
+		return nil
+	}
+	var providerErr *model.ProviderError
+	if errors.As(err, &providerErr) {
+		msg := strings.TrimSpace(providerErr.Message)
+		if msg == "" {
+			msg = providerErr.Error()
+		}
+		return &toolExecutionError{
+			Code:      defaultCode,
+			Message:   msg,
+			Retryable: providerErr.Retryable,
+		}
+	}
+	if errors.Is(err, ingest.ErrTranscriptProviderFailure) {
+		return &toolExecutionError{
+			Code:      defaultCode,
+			Message:   err.Error(),
+			Retryable: true,
+		}
+	}
+	return &toolExecutionError{
+		Code:      defaultCode,
+		Message:   err.Error(),
+		Retryable: false,
+	}
 }
 
 func parseRequiredString(args map[string]interface{}, key string) (string, bool, error) {
@@ -1411,6 +1945,107 @@ func askAudioOutputSchema() map[string]interface{} {
 			"data":      map[string]interface{}{"type": "string"},
 		},
 		"required": []string{"mime_type", "data"},
+	}
+	return schema
+}
+
+func transcribeInputSchema() map[string]interface{} {
+	return map[string]interface{}{
+		"type":                 "object",
+		"additionalProperties": false,
+		"properties": map[string]interface{}{
+			"rel_path":     map[string]interface{}{"type": "string", "minLength": 1},
+			"language":     map[string]interface{}{"type": "string"},
+			"timestamps":   map[string]interface{}{"type": "boolean", "default": true},
+			"retranscribe": map[string]interface{}{"type": "boolean", "default": false},
+		},
+		"required": []string{"rel_path"},
+	}
+}
+
+func transcribeOutputSchema() map[string]interface{} {
+	return map[string]interface{}{
+		"type":                 "object",
+		"additionalProperties": false,
+		"properties": map[string]interface{}{
+			"rel_path":    map[string]interface{}{"type": "string"},
+			"provider":    map[string]interface{}{"type": "string", "enum": []string{"mistral", "elevenlabs"}},
+			"model":       map[string]interface{}{"type": "string"},
+			"indexed":     map[string]interface{}{"type": "boolean"},
+			"transcribed": map[string]interface{}{"type": "boolean"},
+			"segments": map[string]interface{}{
+				"type": "array",
+				"items": map[string]interface{}{
+					"type":                 "object",
+					"additionalProperties": false,
+					"properties": map[string]interface{}{
+						"start_ms": map[string]interface{}{"type": "integer"},
+						"end_ms":   map[string]interface{}{"type": "integer"},
+						"text":     map[string]interface{}{"type": "string"},
+					},
+					"required": []string{"start_ms", "end_ms", "text"},
+				},
+			},
+		},
+		"required": []string{"rel_path", "provider", "model", "indexed", "transcribed"},
+	}
+}
+
+func annotateInputSchema() map[string]interface{} {
+	return map[string]interface{}{
+		"type":                 "object",
+		"additionalProperties": false,
+		"properties": map[string]interface{}{
+			"rel_path":             map[string]interface{}{"type": "string", "minLength": 1},
+			"schema_json":          map[string]interface{}{"type": "object"},
+			"index_flattened_text": map[string]interface{}{"type": "boolean", "default": true},
+			"max_chars":            map[string]interface{}{"type": "integer", "minimum": 200, "maximum": 200000, "default": 32000},
+		},
+		"required": []string{"rel_path", "schema_json"},
+	}
+}
+
+func annotateOutputSchema() map[string]interface{} {
+	return map[string]interface{}{
+		"type":                 "object",
+		"additionalProperties": false,
+		"properties": map[string]interface{}{
+			"rel_path":                map[string]interface{}{"type": "string"},
+			"stored":                  map[string]interface{}{"type": "boolean"},
+			"flattened_indexed":       map[string]interface{}{"type": "boolean"},
+			"annotation_json":         map[string]interface{}{"type": "object"},
+			"annotation_text_preview": map[string]interface{}{"type": "string"},
+			"source_doc_type":         map[string]interface{}{"type": "string"},
+			"source_rep":              map[string]interface{}{"type": "string"},
+		},
+		"required": []string{"rel_path", "stored", "flattened_indexed", "annotation_json"},
+	}
+}
+
+func transcribeAndAskInputSchema() map[string]interface{} {
+	return map[string]interface{}{
+		"type":                 "object",
+		"additionalProperties": false,
+		"properties": map[string]interface{}{
+			"rel_path": map[string]interface{}{"type": "string", "minLength": 1},
+			"question": map[string]interface{}{"type": "string", "minLength": 1},
+			"k":        map[string]interface{}{"type": "integer", "minimum": 1, "maximum": 50, "default": 10},
+		},
+		"required": []string{"rel_path", "question"},
+	}
+}
+
+func transcribeAndAskOutputSchema() map[string]interface{} {
+	schema := askOutputSchema()
+	properties, ok := schema["properties"].(map[string]interface{})
+	if !ok {
+		return askOutputSchema()
+	}
+	properties["transcript_provider"] = map[string]interface{}{"type": "string", "enum": []string{"mistral", "elevenlabs"}}
+	properties["transcript_model"] = map[string]interface{}{"type": "string"}
+	properties["transcribed"] = map[string]interface{}{"type": "boolean"}
+	if required, ok := schema["required"].([]string); ok {
+		schema["required"] = append(required, "transcript_provider", "transcript_model", "transcribed")
 	}
 	return schema
 }

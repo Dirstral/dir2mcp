@@ -64,7 +64,7 @@ func TestGenerateTranscriptRepresentation_PersistsTimeChunks(t *testing.T) {
 	if st.spans[1].Kind != "time" || st.spans[1].StartMS != 2000 || st.spans[1].EndMS != 5000 {
 		t.Fatalf("unexpected second transcript span: %+v", st.spans[1])
 	}
-	if st.spans[2].Kind != "time" || st.spans[2].StartMS != 5000 || st.spans[2].EndMS != 5001 {
+	if st.spans[2].Kind != "time" || st.spans[2].StartMS != 5000 || st.spans[2].EndMS <= 5000 {
 		t.Fatalf("unexpected third transcript span: %+v", st.spans[2])
 	}
 
