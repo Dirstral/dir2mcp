@@ -22,7 +22,7 @@ func TestLighthouseMenuConfigIncludesLogsByDefault(t *testing.T) {
 	for _, item := range cfg.Items {
 		got = append(got, item.Value)
 	}
-	want := []string{"Start Server", "Server Status", "Remote MCP Status", "View Logs", "Back"}
+	want := []string{"Start Server", "Server Status", "Remote MCP Status", "View Logs", "Stop Server", "Back"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("unexpected lighthouse menu config items: got %v want %v", got, want)
 	}
