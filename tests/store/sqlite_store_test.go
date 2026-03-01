@@ -623,6 +623,104 @@ func TestSQLiteStoreRepresentationChunkSpanAndDeleteCascade(t *testing.T) {
 	}
 }
 
+func TestSQLiteStore_CorpusStats_Populated(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	if err := st.Init(ctx); err != nil {
+		t.Fatalf("Init failed: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	docs := []model.Document{
+		{RelPath: "src/main.go", DocType: "code", ContentHash: "h1", Status: "ok"},
+		{RelPath: "docs/readme.md", DocType: "md", ContentHash: "h2", Status: "skipped"},
+		{RelPath: "docs/errors.md", DocType: "md", ContentHash: "h3", Status: "error"},
+		{RelPath: "archive/old.txt", DocType: "text", ContentHash: "h4", Status: "ok", Deleted: true},
+	}
+	for _, doc := range docs {
+		d := doc
+		if err := st.UpsertDocument(ctx, d); err != nil {
+			t.Fatalf("UpsertDocument(%s) failed: %v", d.RelPath, err)
+		}
+	}
+
+	mainDoc, err := st.GetDocumentByPath(ctx, "src/main.go")
+	if err != nil {
+		t.Fatalf("GetDocumentByPath(main) failed: %v", err)
+	}
+	readmeDoc, err := st.GetDocumentByPath(ctx, "docs/readme.md")
+	if err != nil {
+		t.Fatalf("GetDocumentByPath(readme) failed: %v", err)
+	}
+
+	mainRepID, err := st.UpsertRepresentation(ctx, model.Representation{DocID: mainDoc.DocID, RepType: "raw_text", RepHash: "rep-main"})
+	if err != nil {
+		t.Fatalf("UpsertRepresentation(main) failed: %v", err)
+	}
+	readmeRepID, err := st.UpsertRepresentation(ctx, model.Representation{DocID: readmeDoc.DocID, RepType: "raw_text", RepHash: "rep-readme"})
+	if err != nil {
+		t.Fatalf("UpsertRepresentation(readme) failed: %v", err)
+	}
+
+	if _, err := st.InsertChunkWithSpans(ctx, model.Chunk{
+		RepID:           mainRepID,
+		Ordinal:         0,
+		Text:            "main chunk",
+		TextHash:        "chunk-main",
+		IndexKind:       "code",
+		EmbeddingStatus: "ok",
+	}, []model.Span{{Kind: "lines", StartLine: 1, EndLine: 2}}); err != nil {
+		t.Fatalf("InsertChunkWithSpans(main) failed: %v", err)
+	}
+	if _, err := st.InsertChunkWithSpans(ctx, model.Chunk{
+		RepID:           readmeRepID,
+		Ordinal:         0,
+		Text:            "readme chunk",
+		TextHash:        "chunk-readme",
+		IndexKind:       "text",
+		EmbeddingStatus: "pending",
+	}, []model.Span{{Kind: "lines", StartLine: 1, EndLine: 1}}); err != nil {
+		t.Fatalf("InsertChunkWithSpans(readme) failed: %v", err)
+	}
+
+	stats, err := st.CorpusStats(ctx)
+	if err != nil {
+		t.Fatalf("CorpusStats failed: %v", err)
+	}
+	if stats.Scanned != 4 || stats.Indexed != 1 || stats.Skipped != 1 || stats.Deleted != 1 || stats.Errors != 1 {
+		t.Fatalf("unexpected lifecycle counts: %+v", stats)
+	}
+	if stats.TotalDocs != 3 || stats.DocCounts["code"] != 1 || stats.DocCounts["md"] != 2 {
+		t.Fatalf("unexpected doc counts: %+v", stats)
+	}
+	if stats.Representations != 2 || stats.ChunksTotal != 2 || stats.EmbeddedOK != 1 {
+		t.Fatalf("unexpected rep/chunk counts: %+v", stats)
+	}
+}
+
+func TestSQLiteStore_CorpusStats_Empty(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewSQLiteStore(filepath.Join(t.TempDir(), "meta.sqlite"))
+	if err := st.Init(ctx); err != nil {
+		t.Fatalf("Init failed: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	stats, err := st.CorpusStats(ctx)
+	if err != nil {
+		t.Fatalf("CorpusStats failed: %v", err)
+	}
+	if stats.Scanned != 0 || stats.Indexed != 0 || stats.Skipped != 0 || stats.Deleted != 0 || stats.Errors != 0 {
+		t.Fatalf("expected zero lifecycle counts, got %+v", stats)
+	}
+	if stats.TotalDocs != 0 || len(stats.DocCounts) != 0 {
+		t.Fatalf("expected empty doc breakdown, got %+v", stats)
+	}
+	if stats.Representations != 0 || stats.ChunksTotal != 0 || stats.EmbeddedOK != 0 {
+		t.Fatalf("expected zero representation/chunk counts, got %+v", stats)
+	}
+}
+
 func TestSQLiteStoreConcurrentReadWriteWithWAL(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
