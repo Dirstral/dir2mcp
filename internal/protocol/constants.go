@@ -13,12 +13,14 @@ const (
 )
 
 const (
-	ErrorCodeUnauthorized     = "UNAUTHORIZED"
-	ErrorCodeSessionNotFound  = "SESSION_NOT_FOUND"
-	ErrorCodeIndexNotReady    = "INDEX_NOT_READY"
-	ErrorCodeFileNotFound     = "FILE_NOT_FOUND"
-	ErrorCodePermissionDenied = "PERMISSION_DENIED"
-	ErrorCodeRateLimited      = "RATE_LIMITED"
+	ErrorCodeUnauthorized      = "UNAUTHORIZED"
+	ErrorCodeSessionNotFound   = "SESSION_NOT_FOUND"
+	ErrorCodeIndexNotReady     = "INDEX_NOT_READY"
+	ErrorCodeFileNotFound      = "FILE_NOT_FOUND"
+	ErrorCodePermissionDenied  = "PERMISSION_DENIED"
+	ErrorCodeRateLimitExceeded = "RATE_LIMIT_EXCEEDED"
+	// ErrorCodeRateLimited is kept as a compatibility alias.
+	ErrorCodeRateLimited = ErrorCodeRateLimitExceeded
 )
 
 const (
