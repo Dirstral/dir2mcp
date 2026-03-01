@@ -561,7 +561,11 @@ func renderTranscribeString(sc map[string]any) string {
 }
 
 func formatTime(v any) string {
-	f, _ := strconv.ParseFloat(asString(v), 64)
+	s := asString(v)
+	f, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return s
+	}
 	totalSeconds := int(f)
 	minutes := totalSeconds / 60
 	seconds := totalSeconds % 60
