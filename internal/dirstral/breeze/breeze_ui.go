@@ -102,12 +102,9 @@ func (m breezeModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 			input := strings.TrimSpace(m.textInput.Value())
-			if input == "" {
-				return m, spCmd
-			}
-			m.textInput.SetValue("")
 
 			if len(m.confirmingPlan.Steps) > 0 {
+				m.textInput.SetValue("")
 				inputLower := strings.ToLower(input)
 				approvalTool := firstApprovalTool(m.confirmingPlan)
 				if approvalTool == "" {
@@ -121,14 +118,18 @@ func (m breezeModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.viewport.SetContent(strings.Join(m.messages, "\n\n"))
 					m.viewport.GotoBottom()
 					return m, tea.Batch(m.runPlanCmd(plan), m.spinner.Tick)
-				} else {
-					m.messages = append(m.messages, ui.Dim("Cancelled "+approvalTool+"."))
-					m.confirmingPlan = TurnPlan{}
-					m.viewport.SetContent(strings.Join(m.messages, "\n\n"))
-					m.viewport.GotoBottom()
-					return m, spCmd
 				}
+				m.messages = append(m.messages, ui.Dim("Cancelled "+approvalTool+"."))
+				m.confirmingPlan = TurnPlan{}
+				m.viewport.SetContent(strings.Join(m.messages, "\n\n"))
+				m.viewport.GotoBottom()
+				return m, spCmd
 			}
+
+			if input == "" {
+				return m, spCmd
+			}
+			m.textInput.SetValue("")
 
 			m.messages = append(m.messages, ui.Prompt("breeze")+input)
 
@@ -206,7 +207,7 @@ func (m breezeModel) View() string {
 			approvalTool = "pending plan"
 		}
 		prompt := fmt.Sprintf("%s %s %s", ui.Yellow.Render("Run tool"), ui.Brand.Render(approvalTool+"?"), ui.Dim("[y/N]: "))
-		b.WriteString(lipgloss.NewStyle().MaxWidth(maxInt(m.width-2, 20)).Render(prompt))
+		b.WriteString(lipgloss.NewStyle().MaxWidth(max(m.width-2, 20)).Render(prompt))
 		b.WriteString(m.textInput.View())
 	} else {
 		if m.isLoading {
@@ -230,15 +231,15 @@ func (m *breezeModel) applyWindowSize(width, height int) {
 	m.width = width
 	m.height = height
 
-	vpWidth := maxInt(width-2, 1)
-	m.textInput.Width = maxInt(width-16, 1)
+	vpWidth := max(width-2, 1)
+	m.textInput.Width = max(width-16, 1)
 
-	reservedHeight := 2 // input row + status row
+	reservedHeight := 4
 	if m.showHelp {
 		helpBlock := m.renderHelpBlock(width, height)
 		reservedHeight += lipgloss.Height(helpBlock) + 1
 	}
-	vpHeight := maxInt(height-reservedHeight, 1)
+	vpHeight := max(height-reservedHeight, 1)
 
 	if !m.ready {
 		m.viewport = viewport.New(vpWidth, vpHeight)
@@ -261,15 +262,8 @@ func (m breezeModel) renderHelpBlock(width, height int) string {
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(ui.ClrSubtle).
 		Padding(0, 1).
-		MaxWidth(maxInt(width-2, 1)).
+		MaxWidth(max(width-2, 1)).
 		Render(helpText)
-}
-
-func maxInt(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }
 
 func (m *breezeModel) processInputCmd(input string) tea.Cmd {
