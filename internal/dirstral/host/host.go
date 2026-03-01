@@ -542,9 +542,12 @@ func CheckHealth() HealthInfo {
 	protocolHeader, sessionHeaderName, authSourceType := readConnectionContractDetails(state)
 
 	token := resolveProbeToken(state)
+	authSourceType = strings.ToLower(strings.TrimSpace(authSourceType))
 	authDiagnostic := ""
 	if authSourceType != "" && authSourceType != "none" && authSourceType != "unknown" {
-		if token == "" {
+		if !isSupportedAuthSource(authSourceType) {
+			authDiagnostic = "invalid/unknown auth source type: " + authSourceType
+		} else if token == "" {
 			authDiagnostic = "missing required auth token for contract type: " + authSourceType
 		}
 	}
@@ -963,4 +966,13 @@ func rpcCall(ctx context.Context, client *http.Client, endpoint, token, sessionI
 		return nil, resp.StatusCode, resp.Header, fmt.Errorf("json-rpc error %d: %s", code, msg)
 	}
 	return envelope, resp.StatusCode, resp.Header, nil
+}
+
+func isSupportedAuthSource(s string) bool {
+	switch s {
+	case "env", "keychain", "file", "secret", "prompt", "contract":
+		return true
+	default:
+		return false
+	}
 }
