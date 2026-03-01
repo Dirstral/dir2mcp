@@ -24,6 +24,7 @@ import (
 	coreconfig "dir2mcp/internal/config"
 	"dir2mcp/internal/dirstral/config"
 	"dir2mcp/internal/dirstral/ui"
+	"dir2mcp/internal/protocol"
 )
 
 type State struct {
@@ -101,7 +102,7 @@ func Up(ctx context.Context, opts UpOptions) error {
 		MCPURL:    derivedURL,
 	}
 	if err := SaveState(state); err != nil {
-		return err
+		return errors.Join(err, stopStartedCommand(cmd, stdout, stderr))
 	}
 
 	done := make(chan error, 1)
@@ -201,11 +202,6 @@ func UpDetached(ctx context.Context, opts UpOptions) error {
 		return err
 	}
 
-	go func() {
-		_ = cmd.Wait()
-		_ = logFile.Close()
-	}()
-
 	state := State{
 		PID:       cmd.Process.Pid,
 		StartedAt: time.Now().Format(time.RFC3339),
@@ -215,8 +211,18 @@ func UpDetached(ctx context.Context, opts UpOptions) error {
 		MCPURL:    derivedURL,
 	}
 	if err := SaveState(state); err != nil {
+		cleanupErr := stopStartedCommand(cmd)
+		_ = logFile.Close()
+		if cleanupErr != nil {
+			return errors.Join(err, cleanupErr)
+		}
 		return err
 	}
+
+	go func() {
+		_ = cmd.Wait()
+		_ = logFile.Close()
+	}()
 
 	if !deterministic {
 		// captureEndpoint exits when one of the following happens:
@@ -400,16 +406,51 @@ func resolveDir2MCPCommand() (command string, args []string, workDir string, err
 	if cwdErr != nil {
 		return "", nil, "", cwdErr
 	}
-	tryDirs := []string{
-		filepath.Join(cwd, "dir2mcp"),
-		filepath.Join(cwd, "..", "dir2mcp"),
+	tryDirs := []struct {
+		probeDir string
+		runDir   string
+	}{
+		{probeDir: filepath.Join(cwd, "cmd", "dir2mcp"), runDir: cwd},
+		{probeDir: filepath.Join(cwd, "..", "cmd", "dir2mcp"), runDir: filepath.Clean(filepath.Join(cwd, ".."))},
+		{probeDir: filepath.Join(cwd, "dir2mcp"), runDir: filepath.Join(cwd, "dir2mcp")},
+		{probeDir: filepath.Join(cwd, "..", "dir2mcp"), runDir: filepath.Join(cwd, "..", "dir2mcp")},
 	}
 	for _, d := range tryDirs {
-		if st, statErr := os.Stat(d); statErr == nil && st.IsDir() {
-			return "go", []string{"run", "./cmd/dir2mcp"}, d, nil
+		if st, statErr := os.Stat(d.probeDir); statErr == nil && st.IsDir() {
+			return "go", []string{"run", "./cmd/dir2mcp"}, d.runDir, nil
 		}
 	}
 	return "", nil, "", fmt.Errorf("could not locate dir2mcp binary or source directory")
+}
+
+func stopStartedCommand(cmd *exec.Cmd, pipes ...io.Closer) error {
+	if cmd == nil {
+		return nil
+	}
+	for _, pipe := range pipes {
+		if pipe == nil {
+			continue
+		}
+		_ = pipe.Close()
+	}
+	if cmd.Process == nil {
+		return nil
+	}
+	killErr := cmd.Process.Kill()
+	waitErr := cmd.Wait()
+	if killErr == nil && waitErr == nil {
+		return nil
+	}
+	if killErr != nil && errors.Is(killErr, os.ErrProcessDone) {
+		killErr = nil
+	}
+	if killErr == nil {
+		return waitErr
+	}
+	if waitErr == nil {
+		return killErr
+	}
+	return errors.Join(killErr, waitErr)
 }
 
 func terminateProcess(pid int) error {
@@ -736,7 +777,7 @@ func probeMCPReady(ctx context.Context, endpoint, token string) (bool, string) {
 }
 
 func initializeMCP(ctx context.Context, client *http.Client, endpoint, token string) (string, error) {
-	body, status, headers, err := rpcCall(ctx, client, endpoint, token, "", true, "initialize", map[string]any{
+	body, status, headers, err := rpcCall(ctx, client, endpoint, token, "", true, protocol.RPCMethodInitialize, map[string]any{
 		"protocolVersion": coreconfig.DefaultProtocolVersion,
 		"capabilities":    map[string]any{"tools": map[string]any{}},
 		"clientInfo":      map[string]any{"name": "dirstral-lighthouse", "version": "0.1.0"},
@@ -747,9 +788,9 @@ func initializeMCP(ctx context.Context, client *http.Client, endpoint, token str
 	if status < 200 || status >= 300 {
 		return "", fmt.Errorf("initialize failed with status %d", status)
 	}
-	sessionID := strings.TrimSpace(headers.Get("MCP-Session-Id"))
+	sessionID := strings.TrimSpace(headers.Get(protocol.MCPSessionHeader))
 	if sessionID == "" {
-		return "", fmt.Errorf("initialize missing MCP-Session-Id")
+		return "", fmt.Errorf("initialize missing %s", protocol.MCPSessionHeader)
 	}
 	if _, ok := body["result"].(map[string]any); !ok {
 		return "", fmt.Errorf("initialize returned invalid payload")
@@ -758,7 +799,7 @@ func initializeMCP(ctx context.Context, client *http.Client, endpoint, token str
 }
 
 func notifyInitialized(ctx context.Context, client *http.Client, endpoint, token, sessionID string) error {
-	_, status, _, err := rpcCall(ctx, client, endpoint, token, sessionID, false, "notifications/initialized", map[string]any{})
+	_, status, _, err := rpcCall(ctx, client, endpoint, token, sessionID, false, protocol.RPCMethodNotificationsInitialized, map[string]any{})
 	if err != nil {
 		return fmt.Errorf("notifications/initialized failed: %w", err)
 	}
@@ -769,7 +810,7 @@ func notifyInitialized(ctx context.Context, client *http.Client, endpoint, token
 }
 
 func listTools(ctx context.Context, client *http.Client, endpoint, token, sessionID string) error {
-	body, status, _, err := rpcCall(ctx, client, endpoint, token, sessionID, true, "tools/list", map[string]any{})
+	body, status, _, err := rpcCall(ctx, client, endpoint, token, sessionID, true, protocol.RPCMethodToolsList, map[string]any{})
 	if err != nil {
 		return fmt.Errorf("tools/list failed: %w", err)
 	}
@@ -810,7 +851,7 @@ func rpcCall(ctx context.Context, client *http.Client, endpoint, token, sessionI
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	if sessionID != "" {
-		req.Header.Set("MCP-Session-Id", sessionID)
+		req.Header.Set(protocol.MCPSessionHeader, sessionID)
 	}
 
 	resp, err := client.Do(req)
