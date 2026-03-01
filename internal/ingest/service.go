@@ -49,6 +49,10 @@ type Service struct {
 	// hook invoked instead of enforceOCRCachePolicy; useful for tests that
 	// want to simulate a failure without touching the filesystem. nil means
 	// use the normal method.
+	//
+	// Despite the OCR-prefixed names, these cache controls are intentionally
+	// shared by OCR and transcript caches. Transcript writes call the same
+	// write counter/hook so both cache trees follow one policy and cadence.
 	ocrCacheEnforce func(string) error
 
 	// mutex protecting all of the OCR cache configuration fields and the
@@ -161,9 +165,10 @@ func (s *Service) SetOCRCacheEnforceHook(fn func(string) error) {
 	s.ocrCacheEnforce = fn
 }
 
-// markOCRCacheWrite increments the write counter and reports whether policy
-// enforcement should run for this write. When enforcement is due, the counter
-// is reset so the next N writes are free of scans.
+// markOCRCacheWrite increments the shared cache write counter (used by both
+// OCR and transcript caches) and reports whether policy enforcement should run
+// for this write. When enforcement is due, the counter is reset so the next N
+// writes are free of scans.
 func (s *Service) markOCRCacheWrite() bool {
 	s.ocrCacheMu.Lock()
 	defer s.ocrCacheMu.Unlock()

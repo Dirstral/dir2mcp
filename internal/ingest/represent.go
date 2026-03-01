@@ -308,7 +308,7 @@ func chunkTranscriptByTime(content string) []chunkSegment {
 
 	out := make([]chunkSegment, 0, len(segments))
 	for i := range segments {
-		endMS := segments[i].startMS
+		endMS := segments[i].startMS + 1
 		if i+1 < len(segments) && segments[i+1].startMS >= segments[i].startMS {
 			endMS = segments[i+1].startMS
 		}
@@ -352,7 +352,7 @@ func parseTranscriptTimestamp(line string) (int, string, bool) {
 		if err != nil {
 			return 0, "", false
 		}
-		if minutes < 0 || seconds < 0 || seconds > 59 {
+		if minutes < 0 || minutes > 59 || seconds < 0 || seconds > 59 {
 			return 0, "", false
 		}
 	} else {

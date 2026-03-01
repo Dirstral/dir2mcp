@@ -826,9 +826,11 @@ func (s *SQLiteStore) NextPending(ctx context.Context, limit int, indexKind stri
 	query := `SELECT c.chunk_id, c.rel_path, c.doc_type, c.rep_type, c.text, c.index_kind,
 	          COALESCE(sp.span_kind, ''), COALESCE(sp.start, 0), COALESCE(sp.end, 0)
 	          FROM chunks c
-	          LEFT JOIN spans sp ON sp.span_id = (
-	            SELECT span_id FROM spans WHERE chunk_id = c.chunk_id ORDER BY span_id LIMIT 1
-	          )
+	          LEFT JOIN (
+	            SELECT chunk_id, span_kind, start, "end",
+	                   ROW_NUMBER() OVER (PARTITION BY chunk_id ORDER BY span_id) AS rn
+	            FROM spans
+	          ) sp ON sp.chunk_id = c.chunk_id AND sp.rn = 1
 	          WHERE c.embedding_status = ? AND c.deleted = 0 AND c.chunk_id > 0`
 	if strings.TrimSpace(indexKind) != "" {
 		query += " AND c.index_kind = ?"
@@ -893,9 +895,11 @@ func (s *SQLiteStore) ListEmbeddedChunkMetadata(ctx context.Context, indexKind s
 	query := `SELECT c.chunk_id, c.rel_path, c.doc_type, c.rep_type, c.text, c.index_kind,
 	          COALESCE(sp.span_kind, ''), COALESCE(sp.start, 0), COALESCE(sp.end, 0)
 	          FROM chunks c
-	          LEFT JOIN spans sp ON sp.span_id = (
-	            SELECT span_id FROM spans WHERE chunk_id = c.chunk_id ORDER BY span_id LIMIT 1
-	          )
+	          LEFT JOIN (
+	            SELECT chunk_id, span_kind, start, "end",
+	                   ROW_NUMBER() OVER (PARTITION BY chunk_id ORDER BY span_id) AS rn
+	            FROM spans
+	          ) sp ON sp.chunk_id = c.chunk_id AND sp.rn = 1
 	          WHERE c.embedding_status = ? AND c.deleted = 0 AND c.chunk_id > 0`
 	if strings.TrimSpace(indexKind) != "" {
 		query += ` AND c.index_kind = ?`
