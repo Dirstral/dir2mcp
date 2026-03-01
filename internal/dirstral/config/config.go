@@ -397,12 +397,12 @@ func ValidateField(key, value string) error {
 			return fmt.Errorf("verbose must be \"true\" or \"false\", got %q", value)
 		}
 	case "host.listen":
-		host, port, err := net.SplitHostPort(strings.TrimSpace(value))
+		_, port, err := net.SplitHostPort(strings.TrimSpace(value))
 		if err != nil {
 			return fmt.Errorf("host.listen must be host:port (e.g. %q): %w", DefaultHostListen, err)
 		}
-		if strings.TrimSpace(host) == "" && strings.TrimSpace(port) == "" {
-			return fmt.Errorf("host.listen must include a port (e.g. %q)", DefaultHostListen)
+		if strings.TrimSpace(port) == "" {
+			return fmt.Errorf("host.listen must include a non-empty port (e.g. %q)", DefaultHostListen)
 		}
 		portNumber, err := strconv.Atoi(port)
 		if err != nil || portNumber < 0 || portNumber > 65535 {
