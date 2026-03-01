@@ -103,19 +103,36 @@ func TestConfigSaveAndLoadRoundTrip(t *testing.T) {
 }
 
 func TestSaveSecretWritesDotEnvLocalAndEnvironment(t *testing.T) {
-	chdirTemp(t)
+	home := filepath.Join(t.TempDir(), "home")
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatalf("mkdir home: %v", err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	unsetEnv(t, "ELEVENLABS_API_KEY")
 
 	if err := config.SaveSecret("ELEVENLABS_API_KEY", "test-secret"); err != nil {
 		t.Fatalf("save secret: %v", err)
 	}
-
-	envLocal, err := godotenv.Read(".env.local")
+	stateDir, err := config.StateDir()
 	if err != nil {
-		t.Fatalf("read .env.local: %v", err)
+		t.Fatalf("state dir: %v", err)
+	}
+
+	envLocalPath := filepath.Join(stateDir, ".env.local")
+	envLocal, err := godotenv.Read(envLocalPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", envLocalPath, err)
 	}
 	if got := envLocal["ELEVENLABS_API_KEY"]; got != "test-secret" {
-		t.Fatalf(".env.local missing secret entry: got %q", got)
+		t.Fatalf("%s missing secret entry: got %q", envLocalPath, got)
+	}
+	info, err := os.Stat(envLocalPath)
+	if err != nil {
+		t.Fatalf("stat %s: %v", envLocalPath, err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("unexpected secret file permissions: got=%#o want=%#o", info.Mode().Perm(), 0o600)
 	}
 	if got := os.Getenv("ELEVENLABS_API_KEY"); got != "test-secret" {
 		t.Fatalf("env not updated: got %q", got)
@@ -123,7 +140,12 @@ func TestSaveSecretWritesDotEnvLocalAndEnvironment(t *testing.T) {
 }
 
 func TestDeleteSecretRemovesDotEnvLocalAndEnvironment(t *testing.T) {
-	chdirTemp(t)
+	home := filepath.Join(t.TempDir(), "home")
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatalf("mkdir home: %v", err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	unsetEnv(t, "ELEVENLABS_API_KEY")
 
 	if err := config.SaveSecret("ELEVENLABS_API_KEY", "test-secret"); err != nil {
@@ -132,13 +154,18 @@ func TestDeleteSecretRemovesDotEnvLocalAndEnvironment(t *testing.T) {
 	if err := config.DeleteSecret("ELEVENLABS_API_KEY"); err != nil {
 		t.Fatalf("delete secret: %v", err)
 	}
-
-	b, err := os.ReadFile(".env.local")
+	stateDir, err := config.StateDir()
 	if err != nil {
-		t.Fatalf("read .env.local: %v", err)
+		t.Fatalf("state dir: %v", err)
+	}
+	envLocalPath := filepath.Join(stateDir, ".env.local")
+
+	b, err := os.ReadFile(envLocalPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", envLocalPath, err)
 	}
 	if strings.Contains(string(b), "ELEVENLABS_API_KEY=") {
-		t.Fatalf("expected .env.local to remove ELEVENLABS_API_KEY, got %q", string(b))
+		t.Fatalf("expected %s to remove ELEVENLABS_API_KEY, got %q", envLocalPath, string(b))
 	}
 	if _, ok := os.LookupEnv("ELEVENLABS_API_KEY"); ok {
 		t.Fatalf("expected ELEVENLABS_API_KEY to be unset")
