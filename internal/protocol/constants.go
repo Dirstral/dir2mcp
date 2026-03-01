@@ -24,8 +24,11 @@ const (
 const (
 	DefaultListenAddr = "127.0.0.1:8087"
 	DefaultMCPPath    = "/mcp"
+	DefaultTransport  = "streamable-http"
+	DefaultModel      = "mistral-small-latest"
 
-	MCPSessionHeader = "MCP-Session-Id"
+	MCPSessionHeader         = "MCP-Session-Id"
+	MCPProtocolVersionHeader = "MCP-Protocol-Version"
 )
 
 const (
