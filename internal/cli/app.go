@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -59,8 +60,9 @@ type App struct {
 	stdout io.Writer
 	stderr io.Writer
 
-	newIngestor func(config.Config, model.Store) model.Ingestor
-	newStore    func(config.Config) model.Store
+	newIngestor  func(config.Config, model.Store) model.Ingestor
+	newStore     func(config.Config) model.Store
+	newRetriever func(config.Config, model.Store) model.Retriever
 }
 
 type indexingStateAware interface {
@@ -80,8 +82,9 @@ type activeDocCountStore interface {
 }
 
 type RuntimeHooks struct {
-	NewIngestor func(config.Config, model.Store) model.Ingestor
-	NewStore    func(config.Config) model.Store
+	NewIngestor  func(config.Config, model.Store) model.Ingestor
+	NewStore     func(config.Config) model.Store
+	NewRetriever func(config.Config, model.Store) model.Retriever
 }
 
 type globalOptions struct {
@@ -103,6 +106,16 @@ type upOptions struct {
 	embedModelText string
 	embedModelCode string
 	chatModel      string
+}
+
+type askOptions struct {
+	question   string
+	k          int
+	mode       string
+	index      string
+	pathPrefix string
+	fileGlob   string
+	docTypes   []string
 }
 
 type authMaterial struct {
@@ -196,6 +209,9 @@ func NewAppWithIOAndHooks(stdout, stderr io.Writer, hooks RuntimeHooks) *App {
 	if hooks.NewStore != nil {
 		app.newStore = hooks.NewStore
 	}
+	if hooks.NewRetriever != nil {
+		app.newRetriever = hooks.NewRetriever
+	}
 	return app
 }
 
@@ -245,15 +261,15 @@ func (a *App) RunWithContext(ctx context.Context, args []string) int {
 		}
 		return a.runUp(ctx, upOpts)
 	case "status":
-		return a.runStatus()
+		return a.runStatus(ctx, globalOpts, remaining[1:])
 	case "ask":
-		return a.runAsk(remaining[1:])
+		return a.runAsk(ctx, globalOpts, remaining[1:])
 	case "reindex":
 		return a.runReindex(ctx)
 	case "config":
-		return a.runConfig(remaining[1:])
+		return a.runConfig(ctx, globalOpts, remaining[1:])
 	case "version":
-		writeln(a.stdout, "dir2mcp skeleton v0.0.0-dev")
+		writeln(a.stdout, "dir2mcp v0.0.0-dev")
 		return exitSuccess
 	default:
 		writef(a.stderr, "unknown command: %s\n", remaining[0])
@@ -263,7 +279,7 @@ func (a *App) RunWithContext(ctx context.Context, args []string) int {
 }
 
 func (a *App) printUsage() {
-	writeln(a.stdout, "dir2mcp skeleton")
+	writeln(a.stdout, "dir2mcp")
 	writeln(a.stdout, "usage: dir2mcp [--json] [--non-interactive] <command>")
 	writeln(a.stdout, "commands: up, status, ask, reindex, config, version")
 	writeln(a.stdout, "for 'up' the following flags are available: --listen, --mcp-path, --public, --read-only, --auth, --allowed-origins, --embed-model-text, --embed-model-code, --chat-model, ...")
@@ -686,17 +702,210 @@ func startEmbeddingWorkers(
 	start("code", codeIndex)
 }
 
-func (a *App) runStatus() int {
-	writeln(a.stdout, "status command skeleton: not implemented")
+func (a *App) runStatus(ctx context.Context, global globalOptions, args []string) int {
+	if len(args) > 0 {
+		writef(a.stderr, "status command does not accept arguments: %s\n", strings.Join(args, " "))
+		return exitGeneric
+	}
+
+	cfg, err := config.Load(".dir2mcp.yaml")
+	if err != nil {
+		writef(a.stderr, "load config: %v\n", err)
+		return exitConfigInvalid
+	}
+	if strings.TrimSpace(cfg.StateDir) == "" {
+		cfg.StateDir = filepath.Join(".", ".dir2mcp")
+	}
+
+	snapshotPath := filepath.Join(cfg.StateDir, "corpus.json")
+	snapshot, err := readCorpusSnapshot(snapshotPath)
+	source := "corpus_json"
+	if err != nil {
+		metaPath := filepath.Join(cfg.StateDir, "meta.sqlite")
+		if _, statErr := os.Stat(metaPath); statErr != nil {
+			if errors.Is(statErr, os.ErrNotExist) {
+				writeln(a.stderr, "no state found in .dir2mcp; run: dir2mcp up")
+				return exitGeneric
+			}
+			writef(a.stderr, "read state: %v\n", statErr)
+			return exitGeneric
+		}
+
+		st := a.storeForConfig(cfg)
+		defer func() { _ = st.Close() }()
+		if initErr := st.Init(ctx); initErr != nil && !errors.Is(initErr, model.ErrNotImplemented) {
+			writef(a.stderr, "initialize metadata store: %v\n", initErr)
+			return exitIndexLoadFailure
+		}
+		snapshot, err = buildCorpusSnapshot(ctx, st, nil)
+		if err != nil {
+			writef(a.stderr, "build status snapshot: %v\n", err)
+			return exitGeneric
+		}
+		source = "computed"
+	}
+
+	if global.jsonOutput {
+		payload := map[string]interface{}{
+			"source":    source,
+			"state_dir": cfg.StateDir,
+			"snapshot":  snapshot,
+		}
+		if err := emitJSON(a.stdout, payload); err != nil {
+			writef(a.stderr, "encode status json: %v\n", err)
+			return exitGeneric
+		}
+		return exitSuccess
+	}
+
+	writeln(a.stdout, "State:", cfg.StateDir)
+	writef(a.stdout, "Source: %s\n", source)
+	writef(a.stdout, "Timestamp: %s\n", snapshot.Timestamp)
+	writeln(a.stdout)
+	writeln(a.stdout, "Indexing:")
+	writef(a.stdout, "  mode=%s running=%t scanned=%d indexed=%d skipped=%d deleted=%d reps=%d chunks=%d embedded=%d errors=%d\n",
+		snapshot.Indexing.Mode,
+		snapshot.Indexing.Running,
+		snapshot.Indexing.Scanned,
+		snapshot.Indexing.Indexed,
+		snapshot.Indexing.Skipped,
+		snapshot.Indexing.Deleted,
+		snapshot.Indexing.Representations,
+		snapshot.Indexing.ChunksTotal,
+		snapshot.Indexing.EmbeddedOK,
+		snapshot.Indexing.Errors,
+	)
+	writef(a.stdout, "Documents: total=%d code_ratio=%.4f\n", snapshot.TotalDocs, snapshot.CodeRatio)
+	if len(snapshot.DocCounts) > 0 {
+		keys := make([]string, 0, len(snapshot.DocCounts))
+		for key := range snapshot.DocCounts {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		writeln(a.stdout, "Doc counts:")
+		for _, key := range keys {
+			writef(a.stdout, "  %s=%d\n", key, snapshot.DocCounts[key])
+		}
+	}
 	return exitSuccess
 }
 
-func (a *App) runAsk(args []string) int {
-	if len(args) == 0 {
-		writeln(a.stderr, "ask command requires a question argument")
+func (a *App) runAsk(ctx context.Context, global globalOptions, args []string) int {
+	opts, err := parseAskOptions(args)
+	if err != nil {
+		writef(a.stderr, "invalid ask flags: %v\n", err)
 		return exitGeneric
 	}
-	writef(a.stdout, "ask command skeleton: %q\n", args[0])
+
+	cfg, err := config.Load(".dir2mcp.yaml")
+	if err != nil {
+		writef(a.stderr, "load config: %v\n", err)
+		return exitConfigInvalid
+	}
+	if strings.TrimSpace(cfg.StateDir) == "" {
+		cfg.StateDir = filepath.Join(".", ".dir2mcp")
+	}
+
+	if strings.TrimSpace(cfg.MistralAPIKey) == "" {
+		nonInteractiveMode := global.nonInteractive || !isTerminal(os.Stdin) || !isTerminal(os.Stdout)
+		if nonInteractiveMode {
+			writeln(a.stderr, "ERROR: CONFIG_INVALID: Missing MISTRAL_API_KEY")
+			writeln(a.stderr, "Set env: MISTRAL_API_KEY=...")
+			writeln(a.stderr, "Or run: dir2mcp config init")
+		} else {
+			writeln(a.stderr, "CONFIG_INVALID: Missing MISTRAL_API_KEY")
+			writeln(a.stderr, "Run: dir2mcp config init")
+		}
+		return exitConfigInvalid
+	}
+
+	st := a.storeForConfig(cfg)
+	defer func() { _ = st.Close() }()
+	if err := st.Init(ctx); err != nil && !errors.Is(err, model.ErrNotImplemented) {
+		writef(a.stderr, "initialize metadata store: %v\n", err)
+		return exitIndexLoadFailure
+	}
+
+	retriever, cleanup, err := a.buildRetrieverForAsk(ctx, cfg, st)
+	if err != nil {
+		writef(a.stderr, "initialize retriever: %v\n", err)
+		return exitIndexLoadFailure
+	}
+	if cleanup != nil {
+		defer cleanup()
+	}
+
+	query := model.SearchQuery{
+		Query:      opts.question,
+		K:          opts.k,
+		Index:      opts.index,
+		PathPrefix: opts.pathPrefix,
+		FileGlob:   opts.fileGlob,
+		DocTypes:   opts.docTypes,
+	}
+
+	if opts.mode == "search_only" {
+		hits, searchErr := retriever.Search(ctx, query)
+		if searchErr != nil {
+			writef(a.stderr, "ask failed: %v\n", searchErr)
+			return exitGeneric
+		}
+		if global.jsonOutput {
+			payload := map[string]interface{}{
+				"question":          opts.question,
+				"answer":            "",
+				"citations":         []interface{}{},
+				"hits":              serializeHits(hits),
+				"indexing_complete": false,
+			}
+			if err := emitJSON(a.stdout, payload); err != nil {
+				writef(a.stderr, "encode ask json: %v\n", err)
+				return exitGeneric
+			}
+			return exitSuccess
+		}
+
+		writef(a.stdout, "found %d supporting result(s)\n", len(hits))
+		for _, hit := range hits {
+			snippet := strings.TrimSpace(hit.Snippet)
+			if snippet == "" {
+				snippet = "(no snippet)"
+			}
+			writef(a.stdout, "- %s [score=%.4f]\n", hit.RelPath, hit.Score)
+			writef(a.stdout, "  %s\n", snippet)
+		}
+		return exitSuccess
+	}
+
+	askResult, askErr := retriever.Ask(ctx, opts.question, query)
+	if askErr != nil {
+		writef(a.stderr, "ask failed: %v\n", askErr)
+		return exitGeneric
+	}
+
+	if global.jsonOutput {
+		payload := map[string]interface{}{
+			"question":          askResult.Question,
+			"answer":            askResult.Answer,
+			"citations":         serializeCitations(askResult.Citations),
+			"hits":              serializeHits(askResult.Hits),
+			"indexing_complete": askResult.IndexingComplete,
+		}
+		if err := emitJSON(a.stdout, payload); err != nil {
+			writef(a.stderr, "encode ask json: %v\n", err)
+			return exitGeneric
+		}
+		return exitSuccess
+	}
+
+	writeln(a.stdout, askResult.Answer)
+	if len(askResult.Citations) > 0 {
+		writeln(a.stdout)
+		writeln(a.stdout, "Citations:")
+		for _, citation := range askResult.Citations {
+			writef(a.stdout, "- chunk=%d path=%s span=%s\n", citation.ChunkID, citation.RelPath, formatSpan(citation.Span))
+		}
+	}
 	return exitSuccess
 }
 
@@ -753,7 +962,7 @@ func (a *App) runReindex(ctx context.Context) int {
 
 	err = ing.Reindex(ctx)
 	if errors.Is(err, model.ErrNotImplemented) {
-		writeln(a.stdout, "reindex skeleton: ingestion pipeline not implemented yet")
+		writeln(a.stdout, "reindex is not available yet: ingestion pipeline not implemented")
 		return exitSuccess
 	}
 	if err != nil {
@@ -763,14 +972,14 @@ func (a *App) runReindex(ctx context.Context) int {
 	return exitSuccess
 }
 
-func (a *App) runConfig(args []string) int {
+func (a *App) runConfig(ctx context.Context, global globalOptions, args []string) int {
 	if len(args) == 0 {
-		writeln(a.stdout, "config command skeleton: supported subcommands are init and print")
+		writeln(a.stdout, "config command: supported subcommands are init and print")
 		return exitSuccess
 	}
 	switch args[0] {
 	case "init":
-		writeln(a.stdout, "config init skeleton: not implemented")
+		return a.runConfigInit(global, args[1:])
 	case "print":
 		cfg, err := config.Load(".dir2mcp.yaml")
 		if err != nil {
@@ -792,6 +1001,249 @@ func (a *App) runConfig(args []string) int {
 		return exitGeneric
 	}
 	return exitSuccess
+}
+
+func (a *App) runConfigInit(global globalOptions, args []string) int {
+	if len(args) > 0 {
+		writef(a.stderr, "config init does not accept arguments: %s\n", strings.Join(args, " "))
+		return exitGeneric
+	}
+
+	configPath := ".dir2mcp.yaml"
+	cfg := config.Default()
+	created := false
+
+	if _, err := os.Stat(configPath); err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			writef(a.stderr, "stat config: %v\n", err)
+			return exitGeneric
+		}
+		created = true
+	} else {
+		existing, err := config.LoadFile(configPath)
+		if err != nil {
+			writef(a.stderr, "load config file: %v\n", err)
+			return exitConfigInvalid
+		}
+		cfg = existing
+	}
+
+	if err := config.SaveFile(configPath, cfg); err != nil {
+		writef(a.stderr, "save config file: %v\n", err)
+		return exitGeneric
+	}
+
+	nextSteps := []string{
+		"Set env: MISTRAL_API_KEY=...",
+		"Or add MISTRAL_API_KEY to .env.local/.env",
+		"Run: dir2mcp up",
+	}
+
+	if global.jsonOutput {
+		payload := map[string]interface{}{
+			"path":       configPath,
+			"created":    created,
+			"updated":    !created,
+			"next_steps": nextSteps,
+		}
+		if err := emitJSON(a.stdout, payload); err != nil {
+			writef(a.stderr, "encode config init json: %v\n", err)
+			return exitGeneric
+		}
+		return exitSuccess
+	}
+
+	if created {
+		writef(a.stdout, "created %s with baseline settings\n", configPath)
+	} else {
+		writef(a.stdout, "updated %s and ensured baseline settings are present\n", configPath)
+	}
+	writeln(a.stdout, "Next steps:")
+	for _, step := range nextSteps {
+		writef(a.stdout, "- %s\n", step)
+	}
+	return exitSuccess
+}
+
+func (a *App) buildRetrieverForAsk(ctx context.Context, cfg config.Config, st model.Store) (model.Retriever, func(), error) {
+	if a != nil && a.newRetriever != nil {
+		return a.newRetriever(cfg, st), nil, nil
+	}
+
+	textIndexPath := filepath.Join(cfg.StateDir, "vectors_text.hnsw")
+	codeIndexPath := filepath.Join(cfg.StateDir, "vectors_code.hnsw")
+
+	textIx := index.NewHNSWIndex(textIndexPath)
+	if err := textIx.Load(textIndexPath); err != nil &&
+		!errors.Is(err, model.ErrNotImplemented) &&
+		!errors.Is(err, os.ErrNotExist) {
+		_ = textIx.Close()
+		return nil, nil, fmt.Errorf("load text index: %w", err)
+	}
+
+	codeIx := index.NewHNSWIndex(codeIndexPath)
+	if err := codeIx.Load(codeIndexPath); err != nil &&
+		!errors.Is(err, model.ErrNotImplemented) &&
+		!errors.Is(err, os.ErrNotExist) {
+		_ = textIx.Close()
+		_ = codeIx.Close()
+		return nil, nil, fmt.Errorf("load code index: %w", err)
+	}
+
+	client := mistral.NewClient(cfg.MistralBaseURL, cfg.MistralAPIKey)
+	ret := retrieval.NewService(st, textIx, client, client)
+	ret.SetCodeIndex(codeIx)
+	ret.SetRootDir(cfg.RootDir)
+
+	if metadataStore, ok := st.(embeddedChunkLister); ok {
+		if _, err := preloadEmbeddedChunkMetadata(ctx, metadataStore, ret); err != nil && !errors.Is(err, model.ErrNotImplemented) {
+			_ = textIx.Close()
+			_ = codeIx.Close()
+			return nil, nil, fmt.Errorf("preload embedded chunk metadata: %w", err)
+		}
+	}
+
+	cleanup := func() {
+		_ = textIx.Close()
+		_ = codeIx.Close()
+	}
+	return ret, cleanup, nil
+}
+
+func parseAskOptions(args []string) (askOptions, error) {
+	opts := askOptions{
+		k:     mcp.DefaultSearchK,
+		mode:  "answer",
+		index: "auto",
+	}
+	var rawDocTypes string
+
+	fs := flag.NewFlagSet("ask", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.IntVar(&opts.k, "k", opts.k, "number of results (1-50)")
+	fs.StringVar(&opts.mode, "mode", opts.mode, "answer|search_only")
+	fs.StringVar(&opts.index, "index", opts.index, "auto|text|code|both")
+	fs.StringVar(&opts.pathPrefix, "path-prefix", "", "optional path prefix filter")
+	fs.StringVar(&opts.fileGlob, "file-glob", "", "optional file glob filter")
+	fs.StringVar(&rawDocTypes, "doc-types", "", "comma-separated doc type filter")
+	if err := fs.Parse(args); err != nil {
+		return askOptions{}, err
+	}
+
+	opts.question = strings.TrimSpace(strings.Join(fs.Args(), " "))
+	if opts.question == "" {
+		return askOptions{}, errors.New("ask command requires a question argument")
+	}
+	if opts.k <= 0 || opts.k > 50 {
+		return askOptions{}, errors.New("k must be between 1 and 50")
+	}
+
+	opts.mode = strings.ToLower(strings.TrimSpace(opts.mode))
+	switch opts.mode {
+	case "answer", "search_only":
+	default:
+		return askOptions{}, errors.New("mode must be one of answer,search_only")
+	}
+
+	opts.index = strings.ToLower(strings.TrimSpace(opts.index))
+	switch opts.index {
+	case "auto", "text", "code", "both":
+	default:
+		return askOptions{}, errors.New("index must be one of auto,text,code,both")
+	}
+
+	if trimmed := strings.TrimSpace(rawDocTypes); trimmed != "" {
+		parts := strings.Split(trimmed, ",")
+		opts.docTypes = make([]string, 0, len(parts))
+		for _, part := range parts {
+			part = strings.TrimSpace(part)
+			if part == "" {
+				continue
+			}
+			opts.docTypes = append(opts.docTypes, part)
+		}
+	}
+
+	return opts, nil
+}
+
+func readCorpusSnapshot(path string) (corpusSnapshot, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return corpusSnapshot{}, err
+	}
+	var snapshot corpusSnapshot
+	if err := json.Unmarshal(raw, &snapshot); err != nil {
+		return corpusSnapshot{}, err
+	}
+	return snapshot, nil
+}
+
+func emitJSON(out io.Writer, payload interface{}) error {
+	enc := json.NewEncoder(out)
+	enc.SetIndent("", "  ")
+	return enc.Encode(payload)
+}
+
+func serializeHits(hits []model.SearchHit) []map[string]interface{} {
+	out := make([]map[string]interface{}, 0, len(hits))
+	for _, hit := range hits {
+		out = append(out, map[string]interface{}{
+			"chunk_id": hit.ChunkID,
+			"rel_path": hit.RelPath,
+			"doc_type": hit.DocType,
+			"rep_type": hit.RepType,
+			"score":    hit.Score,
+			"snippet":  hit.Snippet,
+			"span":     serializeSpan(hit.Span),
+		})
+	}
+	return out
+}
+
+func serializeCitations(citations []model.Citation) []map[string]interface{} {
+	out := make([]map[string]interface{}, 0, len(citations))
+	for _, citation := range citations {
+		out = append(out, map[string]interface{}{
+			"chunk_id": citation.ChunkID,
+			"rel_path": citation.RelPath,
+			"span":     serializeSpan(citation.Span),
+		})
+	}
+	return out
+}
+
+func serializeSpan(span model.Span) map[string]interface{} {
+	switch strings.ToLower(strings.TrimSpace(span.Kind)) {
+	case "page":
+		return map[string]interface{}{
+			"kind": "page",
+			"page": span.Page,
+		}
+	case "time":
+		return map[string]interface{}{
+			"kind":     "time",
+			"start_ms": span.StartMS,
+			"end_ms":   span.EndMS,
+		}
+	default:
+		return map[string]interface{}{
+			"kind":       "lines",
+			"start_line": span.StartLine,
+			"end_line":   span.EndLine,
+		}
+	}
+}
+
+func formatSpan(span model.Span) string {
+	switch strings.ToLower(strings.TrimSpace(span.Kind)) {
+	case "page":
+		return fmt.Sprintf("page:%d", span.Page)
+	case "time":
+		return fmt.Sprintf("time:%d-%d", span.StartMS, span.EndMS)
+	default:
+		return fmt.Sprintf("lines:%d-%d", span.StartLine, span.EndLine)
+	}
 }
 
 func parseGlobalOptions(args []string) (globalOptions, []string, error) {
