@@ -66,18 +66,21 @@ func TestLockForExecutionKey_SerializesAndCleansUpWithRefCounts(t *testing.T) {
 
 	bAcquired := make(chan struct{})
 	bRelease := make(chan struct{})
+	startedBlocking := make(chan struct{})
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		// signal that goroutine B is about to attempt the keyed lock
+		close(startedBlocking)
 		unlockB := s.lockForExecutionKey(key)
 		close(bAcquired)
 		<-bRelease
 		unlockB()
 	}()
 
-	// B has incremented ref and is waiting on A's lock.
-	time.Sleep(20 * time.Millisecond)
+	// wait for B to reach the lock attempt and thus increment ref
+	<-startedBlocking
 	s.execMu.Lock()
 	km, ok := s.execKeyMu[key]
 	if !ok || km.ref != 2 {

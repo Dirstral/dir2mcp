@@ -1107,9 +1107,7 @@ func (s *Server) handleAnnotateTool(ctx context.Context, args map[string]interfa
 		return toolCallResult{}, &toolExecutionError{Code: "ANNOTATE_FAILED", Message: parseErr.Error(), Retryable: false}
 	}
 
-	if s.store == nil {
-		return toolCallResult{}, &toolExecutionError{Code: "STORE_CORRUPT", Message: "store not configured", Retryable: false}
-	}
+	// store is already validated above
 	ing := ingest.NewService(s.cfg, s.store)
 	preview, persistErr := ing.StoreAnnotationRepresentations(ctx, doc, annotationObj, indexFlattenedText)
 	if persistErr != nil {
@@ -1447,12 +1445,18 @@ func (s *Server) ensureTranscriptForAudioDoc(ctx context.Context, doc model.Docu
 	}
 
 	cachePath := filepath.Join(s.cfg.StateDir, "cache", "transcribe", ingest.ComputeContentHash(content)+".txt")
-	cacheExisted := true
+	// Determine whether we already have a usable cache file. We initially
+	// consider the cache "valid" if it exists on disk. When a retranscribe is
+	// requested we treat the cached file as stale regardless of whether it
+	// existed, so we force cacheValid=false and remove the file.
+	cacheValid := true
 	if _, statErr := os.Stat(cachePath); statErr != nil {
-		cacheExisted = false
+		cacheValid = false
 	}
 	if retranscribe {
-		cacheExisted = false
+		cacheValid = false
+		// remove any existing cache so that future callers don't accidentally
+		// read stale data; ignore not-exist errors since that's fine.
 		if rmErr := os.Remove(cachePath); rmErr != nil && !errors.Is(rmErr, fs.ErrNotExist) {
 			return "", false, false, &toolExecutionError{Code: "STORE_CORRUPT", Message: fmt.Sprintf("remove transcript cache: %v", rmErr), Retryable: false}
 		}
@@ -1484,7 +1488,10 @@ func (s *Server) ensureTranscriptForAudioDoc(ctx context.Context, doc model.Docu
 		indexed = true
 	}
 
-	return transcript, !cacheExisted, indexed, nil
+	// second return value indicates whether we computed a fresh transcript
+	// (true when the cache was not valid). cacheValid is false when either the
+	// file never existed or retranscribe forced invalidation.
+	return transcript, !cacheValid, indexed, nil
 }
 
 func (s *Server) sourceTextForAnnotation(ctx context.Context, doc model.Document) (string, string, *toolExecutionError) {
@@ -1588,14 +1595,11 @@ func parseJSONObjectFromModelOutput(raw string) (map[string]interface{}, error) 
 		return nil, errors.New("model returned empty output")
 	}
 
+	// We'll try a few candidate substrings in case the model output contains
+	// extra prose (e.g. "Here's your JSON: {...}" or triple-backtick code
+	// fences). The later generic search covers both ```json and non-markdown
+	// wrappers by locating the first '{' and last '}' in the trimmed text.
 	candidates := []string{trimmed}
-	if strings.HasPrefix(trimmed, "```") {
-		start := strings.Index(trimmed, "{")
-		end := strings.LastIndex(trimmed, "}")
-		if start >= 0 && end > start {
-			candidates = append(candidates, trimmed[start:end+1])
-		}
-	}
 	if start := strings.Index(trimmed, "{"); start >= 0 {
 		if end := strings.LastIndex(trimmed, "}"); end > start {
 			candidates = append(candidates, trimmed[start:end+1])

@@ -38,3 +38,15 @@ func TestFlattenJSONForIndexing_MarshalErrorFallback(t *testing.T) {
 		t.Fatalf("expected empty output for marshal-error fallback, got %q", out)
 	}
 }
+
+func TestFlattenJSONForIndexing_TopLevelScalar(t *testing.T) {
+	// A string at the top level should not be prefixed by a colon.
+	s := &Service{}
+	if out := s.flattenJSONForIndexing("hello"); out != "hello" {
+		t.Fatalf("expected scalar output without leading colon, got %q", out)
+	}
+	// numeric value - should produce JSON representation only.
+	if out := s.flattenJSONForIndexing(42); out != "42" {
+		t.Fatalf("expected numeric output without prefix, got %q", out)
+	}
+}

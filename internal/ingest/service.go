@@ -20,6 +20,16 @@ import (
 	"dir2mcp/internal/model"
 )
 
+// annotationChunk* constants mirror the hardcoded parameters previously
+// used when splitting annotation JSON/text into segments for indexing. They
+// centralize tuning values and improve readability of call sites in this
+// file. The defaults were 1200, 200 and 120 respectively.
+const (
+	annotationChunkSize    = 1200
+	annotationChunkOverlap = 200
+	annotationChunkMinSize = 120
+)
+
 type Service struct {
 	cfg           config.Config
 	store         model.Store
@@ -766,7 +776,7 @@ func (s *Service) StoreAnnotationRepresentations(ctx context.Context, doc model.
 		if upsertErr != nil {
 			return fmt.Errorf("upsert annotation json representation: %w", upsertErr)
 		}
-		if upsertErr := s.repGen.upsertChunksForRepresentationWithStore(ctx, tx, jsonRepID, "text", chunkTextByChars(jsonText, 1200, 200, 120)); upsertErr != nil {
+		if upsertErr := s.repGen.upsertChunksForRepresentationWithStore(ctx, tx, jsonRepID, "text", chunkTextByChars(jsonText, annotationChunkSize, annotationChunkOverlap, annotationChunkMinSize)); upsertErr != nil {
 			return fmt.Errorf("persist annotation json chunks: %w", upsertErr)
 		}
 
@@ -785,13 +795,18 @@ func (s *Service) StoreAnnotationRepresentations(ctx context.Context, doc model.
 		if upsertErr != nil {
 			return fmt.Errorf("upsert annotation text representation: %w", upsertErr)
 		}
-		if upsertErr := s.repGen.upsertChunksForRepresentationWithStore(ctx, tx, textRepID, "text", chunkTextByChars(flattened, 1200, 200, 120)); upsertErr != nil {
+		if upsertErr := s.repGen.upsertChunksForRepresentationWithStore(ctx, tx, textRepID, "text", chunkTextByChars(flattened, annotationChunkSize, annotationChunkOverlap, annotationChunkMinSize)); upsertErr != nil {
 			return fmt.Errorf("persist annotation text chunks: %w", upsertErr)
 		}
 		return nil
 	})
 	if err != nil {
 		return "", err
+	}
+	// Count JSON representation; count text representation only if created.
+	s.addRepresentations(1)
+	if indexFlattenedText {
+		s.addRepresentations(1)
 	}
 	return preview, nil
 }
@@ -1033,7 +1048,11 @@ func (s *Service) flattenJSONForIndexing(v interface{}) string {
 			}
 		case string:
 			if text := strings.TrimSpace(typed); text != "" {
-				lines = append(lines, fmt.Sprintf("%s: %s", prefix, text))
+				if prefix != "" {
+					lines = append(lines, fmt.Sprintf("%s: %s", prefix, text))
+				} else {
+					lines = append(lines, text)
+				}
 			}
 		default:
 			b, err := json.Marshal(typed)
@@ -1046,7 +1065,12 @@ func (s *Service) flattenJSONForIndexing(v interface{}) string {
 					prefix, typed, err, len(lines))
 				return
 			}
-			lines = append(lines, fmt.Sprintf("%s: %s", prefix, string(b)))
+			str := string(b)
+			if prefix != "" {
+				lines = append(lines, fmt.Sprintf("%s: %s", prefix, str))
+			} else {
+				lines = append(lines, str)
+			}
 		}
 	}
 

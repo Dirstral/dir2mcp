@@ -688,6 +688,8 @@ func TestUpX402OnAllowsMissingFields(t *testing.T) {
 			continue
 		}
 		found = true
+		// break early once we locate the desired event
+		break
 	}
 	if !found {
 		t.Fatal("missing server_started event")

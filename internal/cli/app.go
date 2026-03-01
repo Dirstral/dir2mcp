@@ -1412,6 +1412,15 @@ func parseUpOptions(global globalOptions, args []string) (upOptions, error) {
 		opts.x402ToolsCallEnabled = toolsCallEnabledFlag.value
 		opts.x402ToolsCallEnabledIsSet = true
 	}
+
+	// if both forms of the facilitator token are supplied, the file wins.  the
+	// CLI parsing layer clears the direct-token field when a file path is
+	// present so that callers (including tests) can rely on mutual
+	// exclusivity without re‑implementing precedence logic.
+	if opts.x402FacilitatorTokenFile != "" && strings.TrimSpace(opts.x402FacilitatorToken) != "" {
+		opts.x402FacilitatorToken = ""
+	}
+
 	if fs.NArg() > 0 {
 		return upOptions{}, fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))
 	}

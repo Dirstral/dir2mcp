@@ -164,6 +164,7 @@ func TestLoad_X402FacilitatorTokenEnvOnly(t *testing.T) {
 	testutil.WithWorkingDir(t, tmp, func() {
 		// write a config file containing the sensitive field; it should be ignored
 		writeFile(t, filepath.Join(tmp, ".dir2mcp.yaml"), "x402_facilitator_token: should-not-be-used\n")
+		t.Setenv("DIR2MCP_X402_FACILITATOR_TOKEN", "")
 		// no environment variable set -> token stays empty
 		cfg, err := config.Load("")
 		if err != nil {

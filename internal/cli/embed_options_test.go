@@ -23,14 +23,37 @@ func TestParseUpOptions_EmbedModelFlags(t *testing.T) {
 
 func TestParseUpOptions_X402TokenFlags(t *testing.T) {
 	global := globalOptions{}
-	opts, err := parseUpOptions(global, []string{"--x402-facilitator-token-file", "path/to/token", "--x402-facilitator-token", "flagval"})
-	if err != nil {
-		t.Fatalf("parse error: %v", err)
+
+	// cases exercise the mutual‑exclusivity and documented precedence between
+	// the two token flags. parseUpOptions itself does not read the file, but
+	// the command‑line semantics dictate that the file flag wins over a direct
+	// token when both are provided.
+	tests := []struct {
+		name      string
+		args      []string
+		wantFile  string
+		wantToken string
+	}{
+		{"file only", []string{"--x402-facilitator-token-file", "path/to/token"}, "path/to/token", ""},
+		{"token only", []string{"--x402-facilitator-token", "flagval"}, "", "flagval"},
+		// both flags present; precedence rules say the file path should win,
+		// so parseUpOptions is expected to clear the direct token.
+		{"both", []string{"--x402-facilitator-token-file", "path/to/token", "--x402-facilitator-token", "flagval"}, "path/to/token", ""},
+		{"neither", []string{}, "", ""},
 	}
-	if opts.x402FacilitatorTokenFile != "path/to/token" {
-		t.Errorf("expected x402FacilitatorTokenFile path/to/token, got %q", opts.x402FacilitatorTokenFile)
-	}
-	if opts.x402FacilitatorToken != "flagval" {
-		t.Errorf("expected x402FacilitatorToken flagval, got %q", opts.x402FacilitatorToken)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts, err := parseUpOptions(global, tt.args)
+			if err != nil {
+				t.Fatalf("parse error: %v", err)
+			}
+			if opts.x402FacilitatorTokenFile != tt.wantFile {
+				t.Errorf("expected x402FacilitatorTokenFile %q, got %q", tt.wantFile, opts.x402FacilitatorTokenFile)
+			}
+			if opts.x402FacilitatorToken != tt.wantToken {
+				t.Errorf("expected x402FacilitatorToken %q, got %q", tt.wantToken, opts.x402FacilitatorToken)
+			}
+		})
 	}
 }

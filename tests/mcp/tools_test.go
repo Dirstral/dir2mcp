@@ -102,6 +102,46 @@ func TestMCPToolsCallTranscribe_MissingRelPath(t *testing.T) {
 	assertToolCallErrorCode(t, resp, "MISSING_FIELD")
 }
 
+func requireRetryableAndResetBody(t *testing.T, resp *http.Response) {
+	// read and validate that the response has a retryable error flag inside
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("failed to read response body: %v", err)
+	}
+
+	var payload struct {
+		Result struct {
+			StructuredContent map[string]interface{} `json:"structuredContent"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatalf("failed to unmarshal response body: %v; body=%s", err, string(body))
+	}
+
+	errObjRaw, ok := payload.Result.StructuredContent["error"]
+	if !ok {
+		t.Fatalf("response body missing structuredContent.error: %s", string(body))
+	}
+	errObj, ok := errObjRaw.(map[string]interface{})
+	if !ok {
+		t.Fatalf("structuredContent.error is not an object: %#v", errObjRaw)
+	}
+	retryableVal, ok := errObj["retryable"]
+	if !ok {
+		t.Fatalf("response body missing structuredContent.error.retryable: %s", string(body))
+	}
+	retryableBool, ok := retryableVal.(bool)
+	if !ok {
+		t.Fatalf("retryable field is not a boolean: %#v", retryableVal)
+	}
+	if !retryableBool {
+		t.Fatalf("expected retryable=true, got %v", retryableBool)
+	}
+
+	// reset body so callers can read it again (assertToolCallErrorCode will)
+	resp.Body = io.NopCloser(bytes.NewReader(body))
+}
+
 func TestMCPToolsCallTranscribe_ProviderFailureIsRetryable(t *testing.T) {
 	cfg, st, _ := setupMCPToolStore(t, "voice.wav", "audio", []byte("RIFF0000WAVEfmt data"))
 	cfg.MistralAPIKey = "test-key"
@@ -126,40 +166,8 @@ func TestMCPToolsCallTranscribe_ProviderFailureIsRetryable(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected HTTP 200 for retryable provider failure, got %d", resp.StatusCode)
 	}
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatalf("failed to read response body: %v", err)
-	}
-	// decode JSON and verify the nested tool-level retryable flag in
-	// result.structuredContent.error.retryable.
-	var payload struct {
-		Result struct {
-			StructuredContent map[string]interface{} `json:"structuredContent"`
-		} `json:"result"`
-	}
-	if err := json.Unmarshal(body, &payload); err != nil {
-		t.Fatalf("failed to unmarshal response body: %v; body=%s", err, string(body))
-	}
-	errObjRaw, ok := payload.Result.StructuredContent["error"]
-	if !ok {
-		t.Fatalf("response body missing structuredContent.error: %s", string(body))
-	}
-	errObj, ok := errObjRaw.(map[string]interface{})
-	if !ok {
-		t.Fatalf("structuredContent.error is not an object: %#v", errObjRaw)
-	}
-	retryableVal, ok := errObj["retryable"]
-	if !ok {
-		t.Fatalf("response body missing structuredContent.error.retryable: %s", string(body))
-	}
-	retryableBool, ok := retryableVal.(bool)
-	if !ok {
-		t.Fatalf("retryable field is not a boolean: %#v", retryableVal)
-	}
-	if !retryableBool {
-		t.Fatalf("expected retryable=true, got %v", retryableBool)
-	}
-	resp.Body = io.NopCloser(bytes.NewReader(body))
+
+	requireRetryableAndResetBody(t, resp)
 	assertToolCallErrorCode(t, resp, "TRANSCRIBE_FAILED")
 }
 

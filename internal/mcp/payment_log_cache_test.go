@@ -13,11 +13,15 @@ import (
 )
 
 // badWriter implements io.Writer but always returns an error. It is used to
-// trigger a flush failure inside Server.Close during testing.
+// trigger a flush failure inside Server.Close during testing. We expose the
+// underlying error as a sentinel so tests can use errors.Is to verify that the
+// joined error contains it.
+
+var errWriteFailure = errors.New("write failure")
 
 type badWriter struct{}
 
-func (badWriter) Write(p []byte) (int, error) { return 0, errors.New("write failure") }
+func (badWriter) Write(p []byte) (int, error) { return 0, errWriteFailure }
 
 func TestAppendPaymentLogCachingAndClose(t *testing.T) {
 	// create a temp state dir to hold the log
@@ -94,9 +98,21 @@ func TestCloseErrorsPropagated(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected error from Close when flush and file close fail")
 	}
-	msg := err.Error()
-	if !strings.Contains(msg, "payment log flush") || !strings.Contains(msg, "payment log file close") {
-		t.Fatalf("unexpected combined error message: %s", msg)
+	// Ensure both underlying errors are present via errors.Is.
+	if !errors.Is(err, errWriteFailure) {
+		t.Fatalf("joined error did not contain flush error: %v", err)
+	}
+	if !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("joined error did not contain file close error: %v", err)
+	}
+	// Verify that the returned error implements Unwrap() []error so we know it's
+	// actually a joined error and that there are two components.
+	if je, ok := err.(interface{ Unwrap() []error }); ok {
+		if len(je.Unwrap()) != 2 {
+			t.Fatalf("expected two errors from joined error, got %d", len(je.Unwrap()))
+		}
+	} else {
+		t.Fatalf("expected joined error type, got %T", err)
 	}
 	if s.paymentLogWriter != nil || s.paymentLogFile != nil {
 		t.Fatalf("expected writer and file fields to be cleared after Close")

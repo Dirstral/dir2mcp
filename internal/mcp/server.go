@@ -712,22 +712,20 @@ func (s *Server) Close() error {
 	s.paymentLogMu.Lock()
 	defer s.paymentLogMu.Unlock()
 
-	var firstErr error
+	var errs []error
 	if s.paymentLogWriter != nil {
 		if err := s.paymentLogWriter.Flush(); err != nil {
-			firstErr = fmt.Errorf("payment log flush: %w", err)
+			errs = append(errs, fmt.Errorf("payment log flush: %w", err))
 		}
 		s.paymentLogWriter = nil
 	}
 	if s.paymentLogFile != nil {
 		if err := s.paymentLogFile.Close(); err != nil {
-			if firstErr != nil {
-				firstErr = fmt.Errorf("%v; payment log file close: %w", firstErr, err)
-			} else {
-				firstErr = fmt.Errorf("payment log file close: %w", err)
-			}
+			errs = append(errs, fmt.Errorf("payment log file close: %w", err))
 		}
 		s.paymentLogFile = nil
 	}
-	return firstErr
+	// errors.Join will return nil when "errs" is empty, which keeps behavior
+	// consistent with the previous implementation.
+	return errors.Join(errs...)
 }

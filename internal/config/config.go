@@ -832,8 +832,15 @@ func (c Config) ValidateX402(strict bool) error {
 	if _, ok := price.SetString(priceStr, 10); !ok || price.Sign() < 0 {
 		return fmt.Errorf("x402 price must be a non-negative integer")
 	}
-	if strings.TrimSpace(c.X402.Scheme) == "" {
+	// normalize scheme input by trimming spaces and converting to lower-case
+	scheme := strings.ToLower(strings.TrimSpace(c.X402.Scheme))
+	if scheme == "" {
 		return fmt.Errorf("x402 scheme is required")
+	}
+	switch scheme {
+	case "exact", "upto":
+	default:
+		return fmt.Errorf("x402 scheme must be one of: exact, upto")
 	}
 	if strings.TrimSpace(c.X402.Network) == "" {
 		return fmt.Errorf("x402 network is required")

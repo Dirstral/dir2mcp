@@ -100,6 +100,7 @@ func TestValidateX402_InvalidNetwork(t *testing.T) {
 	cfg.X402.ToolsCallEnabled = true
 	cfg.X402.FacilitatorURL = "https://facilitator.example.com"
 	cfg.X402.ResourceBaseURL = "https://resource.example.com"
+	cfg.X402.FacilitatorToken = "token"
 	cfg.X402.PriceAtomic = "1000"
 	cfg.X402.Scheme = "exact"
 	cfg.X402.Network = "not-a-caip2-network"
@@ -121,26 +122,37 @@ func TestValidateX402_PriceMustBeNonNegativeInteger(t *testing.T) {
 	cfg.X402.ToolsCallEnabled = true
 	cfg.X402.FacilitatorURL = "https://facilitator.example.com"
 	cfg.X402.ResourceBaseURL = "https://resource.example.com"
+	cfg.X402.FacilitatorToken = "token"
 	cfg.X402.Scheme = "exact"
 	cfg.X402.Network = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp" // valid CAIP-2
 	cfg.X402.Asset = "asset"
 	cfg.X402.PayTo = "payto"
 
-	for _, bad := range []string{"", "abc", "-100"} {
-		cfg.X402.PriceAtomic = bad
-		err := cfg.ValidateX402(true)
-		if err == nil {
-			t.Fatalf("price %q should have failed validation", bad)
-		}
-		if bad == "" {
-			if !strings.Contains(err.Error(), "required") {
-				t.Fatalf("empty price produced wrong error: %v", err)
+	// iterate through a few invalid price strings, running each in a subtest
+	for _, tc := range []struct {
+		name string
+		bad  string
+	}{
+		{"empty", ""},
+		{"non-integer", "abc"},
+		{"negative", "-100"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg.X402.PriceAtomic = tc.bad
+			err := cfg.ValidateX402(true)
+			if err == nil {
+				t.Fatalf("price %q should have failed validation", tc.bad)
 			}
-		} else {
-			if !strings.Contains(err.Error(), "non-negative integer") {
-				t.Fatalf("unexpected error message for price %q: %v", bad, err)
+			if tc.bad == "" {
+				if !strings.Contains(err.Error(), "required") {
+					t.Fatalf("empty price produced wrong error: %v", err)
+				}
+			} else {
+				if !strings.Contains(err.Error(), "non-negative integer") {
+					t.Fatalf("unexpected error message for price %q: %v", tc.bad, err)
+				}
 			}
-		}
+		})
 	}
 
 	cfg.X402.PriceAtomic = "0"
@@ -150,5 +162,37 @@ func TestValidateX402_PriceMustBeNonNegativeInteger(t *testing.T) {
 	cfg.X402.PriceAtomic = "12345"
 	if err := cfg.ValidateX402(true); err != nil {
 		t.Fatalf("expected positive price to be valid, got %v", err)
+	}
+}
+
+func TestValidateX402_InvalidScheme(t *testing.T) {
+	cfg := config.Default()
+	cfg.X402.Mode = "required"
+	cfg.X402.ToolsCallEnabled = true
+	cfg.X402.FacilitatorURL = "https://facilitator.example.com"
+	cfg.X402.ResourceBaseURL = "https://resource.example.com"
+	cfg.X402.FacilitatorToken = "token"
+	cfg.X402.PriceAtomic = "1000"
+	cfg.X402.Scheme = "not-allowed"
+	cfg.X402.Network = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"
+	cfg.X402.Asset = "asset"
+	cfg.X402.PayTo = "payto"
+
+	err := cfg.ValidateX402(true)
+	if err == nil {
+		t.Fatal("expected strict x402 validation error for invalid scheme")
+	}
+	if !strings.Contains(err.Error(), "one of") {
+		t.Fatalf("unexpected error message for scheme: %v", err)
+	}
+
+	cfg.X402.Scheme = "EXACT"
+	if err := cfg.ValidateX402(true); err != nil {
+		t.Fatalf("expected uppercase exact to be accepted, got %v", err)
+	}
+
+	cfg.X402.Scheme = " UpTo "
+	if err := cfg.ValidateX402(true); err != nil {
+		t.Fatalf("expected spaced/upper upto to be accepted, got %v", err)
 	}
 }

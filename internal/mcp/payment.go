@@ -300,9 +300,10 @@ func (s *Server) setPaymentExecutionOutcome(key string, outcome paymentExecution
 	now := time.Now().UTC()
 	s.prunePaymentOutcomesLocked(now)
 
-	// compare-and-swap: only write if there is no existing finalized outcome.
-	existing, ok := s.paymentOutcomes[key]
-	if ok && !existing.UpdatedAt.IsZero() {
+	// compare-and-swap: only write if there is no existing outcome.  Any
+	// stored outcome has a non-zero UpdatedAt, so we only need to check for
+	// existence rather than inspect the timestamp.
+	if _, ok := s.paymentOutcomes[key]; ok {
 		// already completed by another goroutine; skip overwrite.
 		return
 	}
@@ -407,24 +408,11 @@ func (s *Server) appendPaymentLog(event string, data map[string]interface{}) {
 		return
 	}
 
-	// Try the cached writer while holding the mutex so it cannot be
-	// swapped/closed during the write.
+	// acquire lock and ensure writer is initialized before doing any write.
+	// this prevents a second goroutine from racing in between the nil-check and
+	// the actual write and dropping an entry.
 	s.paymentLogMu.Lock()
-	if s.paymentLogWriter != nil && s.paymentLogFile != nil {
-		w := s.paymentLogWriter
-		if err := writeLogEntry(w, raw); err != nil {
-			s.paymentLogMu.Unlock()
-			s.emitPaymentLogWarning(err)
-			return
-		}
-		s.paymentLogMu.Unlock()
-		return
-	}
-	// no cached writer, release lock and fall through to initialization
-	s.paymentLogMu.Unlock()
-
-	// initialize cache if needed and log entry
-	s.paymentLogMu.Lock()
+	// initialize cache if needed
 	if s.paymentLogWriter == nil || s.paymentLogFile == nil {
 		if err := os.MkdirAll(filepath.Dir(s.paymentLogPath), 0o755); err != nil {
 			s.paymentLogMu.Unlock()
@@ -450,12 +438,12 @@ func (s *Server) appendPaymentLog(event string, data map[string]interface{}) {
 		w := bufio.NewWriter(f)
 		s.paymentLogFile = f
 		s.paymentLogWriter = w
-		// log entry before unlocking
-		if err := writeLogEntry(w, raw); err != nil {
-			s.paymentLogMu.Unlock()
-			s.emitPaymentLogWarning(err)
-			return
-		}
+	}
+	// write the entry while still holding the lock
+	if err := writeLogEntry(s.paymentLogWriter, raw); err != nil {
+		s.paymentLogMu.Unlock()
+		s.emitPaymentLogWarning(err)
+		return
 	}
 	s.paymentLogMu.Unlock()
 

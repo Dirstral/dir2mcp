@@ -54,9 +54,18 @@ type AcceptEntry struct {
 	Resource          string `json:"resource"`
 }
 
+const allowedSchemesText = "exact, upto"
+
 func (r Requirement) Validate() error {
-	if strings.TrimSpace(r.Scheme) == "" {
+	// normalize and check scheme value
+	scheme := strings.ToLower(strings.TrimSpace(r.Scheme))
+	if scheme == "" {
 		return fmt.Errorf("x402 scheme is required")
+	}
+	switch scheme {
+	case "exact", "upto":
+	default:
+		return fmt.Errorf("x402 scheme must be one of: %s", allowedSchemesText)
 	}
 	if strings.TrimSpace(r.Network) == "" {
 		return fmt.Errorf("x402 network is required")
@@ -92,7 +101,7 @@ func BuildPaymentRequiredHeaderValue(req Requirement) (string, error) {
 		X402Version: 2,
 		Accept: []AcceptEntry{
 			{
-				Scheme:            strings.TrimSpace(req.Scheme),
+				Scheme:            strings.ToLower(strings.TrimSpace(req.Scheme)),
 				Network:           strings.TrimSpace(req.Network),
 				Amount:            strings.TrimSpace(req.Amount),
 				MaxAmountRequired: strings.TrimSpace(req.Amount),

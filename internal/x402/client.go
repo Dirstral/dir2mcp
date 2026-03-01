@@ -41,7 +41,9 @@ func (c *HTTPClient) Settle(ctx context.Context, paymentSignature string, req Re
 }
 
 func (c *HTTPClient) do(ctx context.Context, operation, paymentSignature string, req Requirement) (json.RawMessage, error) {
-	if strings.TrimSpace(c.baseURL) == "" {
+	// constructor already trims/normalizes baseURL, so a simple empty
+	// comparison is sufficient here.
+	if c.baseURL == "" {
 		return nil, &FacilitatorError{
 			Operation: operation,
 			Code:      CodePaymentConfigInvalid,
@@ -182,7 +184,7 @@ func (c *HTTPClient) do(ctx context.Context, operation, paymentSignature string,
 
 func toRequirementPayload(req Requirement) map[string]interface{} {
 	return map[string]interface{}{
-		"scheme":            strings.TrimSpace(req.Scheme),
+		"scheme":            strings.ToLower(strings.TrimSpace(req.Scheme)),
 		"network":           strings.TrimSpace(req.Network),
 		"amount":            strings.TrimSpace(req.Amount),
 		"maxAmountRequired": strings.TrimSpace(req.Amount),
