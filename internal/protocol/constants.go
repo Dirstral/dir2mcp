@@ -27,3 +27,10 @@ const (
 
 	MCPSessionHeader = "MCP-Session-Id"
 )
+
+const (
+	RPCMethodInitialize               = "initialize"
+	RPCMethodNotificationsInitialized = "notifications/initialized"
+	RPCMethodToolsList                = "tools/list"
+	RPCMethodToolsCall                = "tools/call"
+)
