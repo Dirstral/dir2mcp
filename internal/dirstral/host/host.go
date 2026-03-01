@@ -195,7 +195,7 @@ func UpDetached(ctx context.Context, opts UpOptions) error {
 		cmd.Dir = workDir
 	}
 
-	logFile, err := os.OpenFile(LogPath(), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	logFile, err := os.OpenFile(LogPath(), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}
@@ -348,14 +348,14 @@ func SaveState(state State) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
 	b, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, b, 0o644)
+	return os.WriteFile(path, b, 0o600)
 }
 
 func LoadState() (State, error) {
@@ -592,7 +592,27 @@ func endpointReachable(raw string) bool {
 	if err != nil {
 		return false
 	}
-	conn, err := net.DialTimeout("tcp", u.Host, 2*time.Second)
+	if strings.TrimSpace(u.Host) == "" {
+		u, err = url.Parse("http://" + raw)
+		if err != nil {
+			return false
+		}
+	}
+	hostname := strings.TrimSpace(u.Hostname())
+	if hostname == "" {
+		return false
+	}
+	port := strings.TrimSpace(u.Port())
+	if port == "" {
+		switch strings.ToLower(strings.TrimSpace(u.Scheme)) {
+		case "https":
+			port = "443"
+		default:
+			port = "80"
+		}
+	}
+	address := net.JoinHostPort(hostname, port)
+	conn, err := net.DialTimeout("tcp", address, 2*time.Second)
 	if err != nil {
 		return false
 	}
