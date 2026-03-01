@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -18,6 +19,7 @@ import (
 func decodeEvents(t *testing.T, data []byte) []map[string]any {
 	t.Helper()
 	s := bufio.NewScanner(bytes.NewReader(data))
+	s.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	events := make([]map[string]any, 0)
 	for s.Scan() {
 		var evt map[string]any
@@ -42,6 +44,22 @@ func assertEventEnvelope(t *testing.T, evt map[string]any) {
 	}
 	if _, ok := evt["data"].(map[string]any); !ok {
 		t.Fatalf("event data must be object: %#v", evt)
+	}
+}
+
+func reportHandlerError(errCh chan error, err error) {
+	select {
+	case errCh <- err:
+	default:
+	}
+}
+
+func assertNoHandlerError(t *testing.T, errCh chan error) {
+	t.Helper()
+	select {
+	case err := <-errCh:
+		t.Fatalf("test server handler error: %v", err)
+	default:
 	}
 }
 
@@ -70,22 +88,25 @@ func TestParseInputUsesModelProfileForAsk(t *testing.T) {
 func TestBreezeJSONOutputStructureAndModelPropagation(t *testing.T) {
 	var askK any
 	calledTools := make([]string, 0)
+	handlerErrCh := make(chan error, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			_ = r.Body.Close()
 		}()
 		var req map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			t.Fatalf("decode request: %v", err)
+			reportHandlerError(handlerErrCh, fmt.Errorf("decode request: %w", err))
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
 		}
 		method, _ := req["method"].(string)
 		switch method {
 		case "initialize":
-			w.Header().Set("MCP-Session-Id", "sess-test")
+			w.Header().Set(protocol.MCPSessionHeader, "sess-test")
 			_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": req["id"], "result": map[string]any{}})
 		case "notifications/initialized":
 			w.WriteHeader(http.StatusAccepted)
-		case "tools/call":
+		case protocol.RPCMethodToolsCall:
 			params, _ := req["params"].(map[string]any)
 			name, _ := params["name"].(string)
 			args, _ := params["arguments"].(map[string]any)
@@ -126,10 +147,14 @@ func TestBreezeJSONOutputStructureAndModelPropagation(t *testing.T) {
 					},
 				})
 			default:
-				t.Fatalf("unexpected tools/call name: %s", name)
+				reportHandlerError(handlerErrCh, fmt.Errorf("unexpected tools/call name: %s", name))
+				http.Error(w, "unexpected tool", http.StatusBadRequest)
+				return
 			}
 		default:
-			t.Fatalf("unexpected method: %s", method)
+			reportHandlerError(handlerErrCh, fmt.Errorf("unexpected method: %s", method))
+			http.Error(w, "unexpected method", http.StatusBadRequest)
+			return
 		}
 	}))
 	defer server.Close()
@@ -145,6 +170,7 @@ func TestBreezeJSONOutputStructureAndModelPropagation(t *testing.T) {
 	if err := breeze.RunJSONLoopWithIO(context.Background(), client, opts, in, out); err != nil {
 		t.Fatalf("json loop: %v", err)
 	}
+	assertNoHandlerError(t, handlerErrCh)
 
 	if askK != float64(12) {
 		t.Fatalf("expected ask k=12 from model profile, got %v", askK)
@@ -189,26 +215,32 @@ func TestBreezeJSONOutputStructureAndModelPropagation(t *testing.T) {
 	if len(citations) == 0 {
 		t.Fatalf("expected citations in tool_result")
 	}
+	assertNoHandlerError(t, handlerErrCh)
 }
 
 func TestBreezeJSONHelpErrorAndExitEvents(t *testing.T) {
+	handlerErrCh := make(chan error, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			_ = r.Body.Close()
 		}()
 		var req map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			t.Fatalf("decode request: %v", err)
+			reportHandlerError(handlerErrCh, fmt.Errorf("decode request: %w", err))
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
 		}
 		method, _ := req["method"].(string)
 		switch method {
 		case "initialize":
-			w.Header().Set("MCP-Session-Id", "sess-test")
+			w.Header().Set(protocol.MCPSessionHeader, "sess-test")
 			_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": req["id"], "result": map[string]any{}})
 		case "notifications/initialized":
 			w.WriteHeader(http.StatusAccepted)
 		default:
-			t.Fatalf("unexpected method: %s", method)
+			reportHandlerError(handlerErrCh, fmt.Errorf("unexpected method: %s", method))
+			http.Error(w, "unexpected method", http.StatusBadRequest)
+			return
 		}
 	}))
 	defer server.Close()
@@ -224,6 +256,7 @@ func TestBreezeJSONHelpErrorAndExitEvents(t *testing.T) {
 	if err := breeze.RunJSONLoopWithIO(context.Background(), client, opts, in, out); err != nil {
 		t.Fatalf("json loop: %v", err)
 	}
+	assertNoHandlerError(t, handlerErrCh)
 
 	events := decodeEvents(t, out.Bytes())
 	if len(events) != 4 {
@@ -258,26 +291,32 @@ func TestBreezeJSONHelpErrorAndExitEvents(t *testing.T) {
 	if exitData["reason"] != "user" {
 		t.Fatalf("expected exit reason=user, got %#v", events[3])
 	}
+	assertNoHandlerError(t, handlerErrCh)
 }
 
 func TestBreezeJSONClearEvent(t *testing.T) {
+	handlerErrCh := make(chan error, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			_ = r.Body.Close()
 		}()
 		var req map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			t.Fatalf("decode request: %v", err)
+			reportHandlerError(handlerErrCh, fmt.Errorf("decode request: %w", err))
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
 		}
 		method, _ := req["method"].(string)
 		switch method {
 		case "initialize":
-			w.Header().Set("MCP-Session-Id", "sess-test")
+			w.Header().Set(protocol.MCPSessionHeader, "sess-test")
 			_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": req["id"], "result": map[string]any{}})
 		case "notifications/initialized":
 			w.WriteHeader(http.StatusAccepted)
 		default:
-			t.Fatalf("unexpected method: %s", method)
+			reportHandlerError(handlerErrCh, fmt.Errorf("unexpected method: %s", method))
+			http.Error(w, "unexpected method", http.StatusBadRequest)
+			return
 		}
 	}))
 	defer server.Close()
@@ -293,6 +332,7 @@ func TestBreezeJSONClearEvent(t *testing.T) {
 	if err := breeze.RunJSONLoopWithIO(context.Background(), client, opts, in, out); err != nil {
 		t.Fatalf("json loop: %v", err)
 	}
+	assertNoHandlerError(t, handlerErrCh)
 
 	events := decodeEvents(t, out.Bytes())
 	if len(events) != 3 {
@@ -301,4 +341,5 @@ func TestBreezeJSONClearEvent(t *testing.T) {
 	if events[1]["type"] != "cleared" {
 		t.Fatalf("expected second event type=cleared, got %v", events[1]["type"])
 	}
+	assertNoHandlerError(t, handlerErrCh)
 }
