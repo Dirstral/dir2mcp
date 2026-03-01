@@ -130,14 +130,18 @@ func transcribeElevenLabs(ctx context.Context, baseURL, audioPath string) (strin
 	req.Header.Set("xi-api-key", apiKey)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 
-	resp, err := http.DefaultClient.Do(req)
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", err
 	}
 	defer func() {
 		_ = resp.Body.Close()
 	}()
-	body, _ := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("read stt response: %w", err)
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return "", fmt.Errorf("stt http %d: %s", resp.StatusCode, string(body))
 	}
