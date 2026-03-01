@@ -421,13 +421,13 @@ func newFacilitatorStub(t *testing.T) *facilitatorStub {
 }
 
 func clampIndex(idx int, sliceLen int) int {
-    if sliceLen <= 0 {
-        return 0
-    }
-    if idx >= sliceLen {
-        return sliceLen - 1
-    }
-    return idx
+	if sliceLen <= 0 {
+		return 0
+	}
+	if idx >= sliceLen {
+		return sliceLen - 1
+	}
+	return idx
 }
 
 func (f *facilitatorStub) ServeHTTP(w http.ResponseWriter, r *http.Request) {

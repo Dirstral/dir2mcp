@@ -77,6 +77,34 @@ func TestCleanupPaymentOutcomes_AppliesTTLAndCap(t *testing.T) {
 	}
 }
 
+func TestCleanupPaymentOutcomes_DeterministicOrder(t *testing.T) {
+	now := time.Now().UTC()
+	// all entries share the same timestamp; we rely on the sort tie-breaker
+	// which orders by key when ts are equal. The eviction logic removes the
+	// lexicographically smallest key first in this situation.
+	ts := now.Add(-1 * time.Minute)
+	s := &Server{
+		paymentOutcomes: map[string]paymentExecutionOutcome{
+			"a": {UpdatedAt: ts},
+			"b": {UpdatedAt: ts},
+			"c": {UpdatedAt: ts},
+		},
+		paymentTTL:      time.Hour,
+		paymentMaxItems: 2,
+	}
+
+	s.cleanupPaymentOutcomes(now)
+
+	if _, ok := s.paymentOutcomes["a"]; ok {
+		t.Fatal("expected key 'a' to be evicted when all timestamps equal and cap=2")
+	}
+	if _, ok := s.paymentOutcomes["b"]; !ok {
+		t.Fatal("expected key 'b' to remain after deterministic eviction")
+	}
+	if _, ok := s.paymentOutcomes["c"]; !ok {
+		t.Fatal("expected key 'c' to remain after deterministic eviction")
+	}
+}
 func waitForKeyRef(ctx context.Context, s *Server, key string, wantRef int) error {
 	for {
 		s.execMu.Lock()
@@ -122,10 +150,11 @@ func TestLockForExecutionKey_SerializesAndCleansUpWithRefCounts(t *testing.T) {
 	// wait until the reference count for the key reaches 2 (A + B)
 	{
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
 		if err := waitForKeyRef(ctx, s, key, 2); err != nil {
+			cancel()
 			t.Fatalf("expected key mutex ref=2 while B waits: %v", err)
 		}
+		cancel()
 	}
 
 	unlockA()
@@ -152,10 +181,11 @@ func TestLockForExecutionKey_SerializesAndCleansUpWithRefCounts(t *testing.T) {
 	// the logic we used earlier above when waiting for B to register.
 	{
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
 		if err := waitForKeyRef(ctx, s, key, 2); err != nil {
+			cancel()
 			t.Fatalf("expected key mutex ref=2 while C waits: %v", err)
 		}
+		cancel()
 	}
 	// Now that C is registered, ensure it is still blocked (should not have acquired lock yet).
 	select {

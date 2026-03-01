@@ -372,9 +372,12 @@ func splitTranscriptSegmentWithTiming(text string, startMS, endMS int) []chunkSe
 	// equal division if the result would be zero. using rune counts ensures
 	// that multi-byte UTF‑8 characters are treated consistently with
 	// chunkTextByChars.
+	counts := make([]int, len(parts))
 	totalChars := 0
-	for _, part := range parts {
-		totalChars += utf8.RuneCountInString(part.Text)
+	for i, part := range parts {
+		cnt := utf8.RuneCountInString(part.Text)
+		counts[i] = cnt
+		totalChars += cnt
 	}
 	if totalChars == 0 {
 		// nothing to measure, just do the old uniform split
@@ -397,9 +400,9 @@ func splitTranscriptSegmentWithTiming(text string, startMS, endMS int) []chunkSe
 	}
 
 	cumChars := 0
-	for _, part := range parts {
+	for i, part := range parts {
 		partStart := startMS + (duration*cumChars)/totalChars
-		cumChars += utf8.RuneCountInString(part.Text)
+		cumChars += counts[i]
 		partEnd := startMS + (duration*cumChars)/totalChars
 		if partEnd <= partStart {
 			partEnd = partStart + 1

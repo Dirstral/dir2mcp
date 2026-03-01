@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -223,8 +224,13 @@ func (s *Server) RunOnListener(ctx context.Context, ln net.Listener) error {
 		return errors.New("nil listener passed to RunOnListener")
 	}
 	// make sure any cached payment-log resources are flushed when the server
-	// stops; the deferred call is harmless if nothing was opened.
-	defer func() { _ = s.Close() }() // ignore error per errcheck
+	// stops; the deferred call is harmless if nothing was opened.  Log any
+	// error instead of silently discarding it.
+	defer func() {
+		if err := s.Close(); err != nil {
+			log.Printf("error closing payment log: %v", err)
+		}
+	}()
 
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -623,7 +629,12 @@ func (s *Server) prunePaymentOutcomesLocked(now time.Time) {
 	for key, outcome := range s.paymentOutcomes {
 		entries = append(entries, entry{key: key, ts: outcome.UpdatedAt})
 	}
-	sort.Slice(entries, func(i, j int) bool {
+	// ensure deterministic eviction order when timestamps are equal by
+	// performing a stable sort and using the key as a tie-breaker.
+	sort.SliceStable(entries, func(i, j int) bool {
+		if entries[i].ts.Equal(entries[j].ts) {
+			return entries[i].key < entries[j].key
+		}
 		return entries[i].ts.Before(entries[j].ts)
 	})
 

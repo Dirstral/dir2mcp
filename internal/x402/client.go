@@ -141,7 +141,8 @@ func (c *HTTPClient) do(ctx context.Context, operation, paymentSignature string,
 		_ = resp.Body.Close()
 	}()
 
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	const maxRespSize = 1 << 20
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxRespSize+1))
 	if err != nil {
 		// reading the response failed; wrap in a FacilitatorError so callers
 		// can handle it like other transport-level failures.  This situation
@@ -153,6 +154,14 @@ func (c *HTTPClient) do(ctx context.Context, operation, paymentSignature string,
 			Message:   "failed to read facilitator response",
 			Retryable: true,
 			Cause:     err,
+		}
+	}
+	if len(respBody) > maxRespSize {
+		return nil, &FacilitatorError{
+			Operation: operation,
+			Code:      CodePaymentFacilitatorUnavailable,
+			Message:   "facilitator response exceeds maximum size",
+			Retryable: true,
 		}
 	}
 	normalized := normalizeResponsePayload(respBody)
@@ -249,7 +258,13 @@ func redactNormalizedPayload(normalized json.RawMessage) string {
 
 	var obj map[string]interface{}
 	if err := json.Unmarshal(normalized, &obj); err == nil {
-		for _, key := range []string{"paymentPayload", "token", "secret", "password"} {
+		for _, key := range []string{
+			"paymentPayload", "token", "secret", "password",
+			"authorization", "authorizationHeader",
+			"api_key", "apiKey",
+			"access_token", "refresh_token",
+			"credential", "auth", "bearer",
+		} {
 			if _, ok := obj[key]; ok {
 				obj[key] = "[REDACTED]"
 			}

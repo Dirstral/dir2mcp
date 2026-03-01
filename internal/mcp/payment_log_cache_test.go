@@ -171,8 +171,6 @@ func TestAppendPaymentLogMkdirAllFailure(t *testing.T) {
 	if fi, err := os.Stat(s.paymentLogPath); err == nil {
 		t.Logf("unexpected log path exists: %v (isdir=%v)", fi.Name(), fi.IsDir())
 		t.Fatalf("expected log file to not exist")
-	} else {
-		// nothing to do here; we'll assert events below
 	}
 
 	// Regardless of the stat result above (IsNotExist or other), we expect a

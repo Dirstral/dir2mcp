@@ -185,9 +185,7 @@ func TestLoad_X402FacilitatorTokenEnvOnly(t *testing.T) {
 		testutil.WithWorkingDir(t, tmp, func() {
 			// config file still contains a value that should be ignored
 			writeFile(t, filepath.Join(tmp, ".dir2mcp.yaml"), "x402_facilitator_token: should-not-be-used\n")
-			// start with no token to prove override later
-			t.Setenv("DIR2MCP_X402_FACILITATOR_TOKEN", "")
-			// now set the actual override
+			// set the actual override
 			t.Setenv("DIR2MCP_X402_FACILITATOR_TOKEN", "envval")
 			cfg, err := config.Load("")
 			if err != nil {
@@ -206,7 +204,10 @@ func TestLoad_X402FacilitatorTokenEnvOnly(t *testing.T) {
 			writeFile(t, filepath.Join(tmp, ".dir2mcp.yaml"), "x402_facilitator_token: should-not-be-used\n")
 			// simulate previous override then clear it
 			t.Setenv("DIR2MCP_X402_FACILITATOR_TOKEN", "envval")
-			t.Setenv("DIR2MCP_X402_FACILITATOR_TOKEN", "")
+			// clearing should be done with Unsetenv so Load() sees no value
+			if err := os.Unsetenv("DIR2MCP_X402_FACILITATOR_TOKEN"); err != nil {
+				t.Fatalf("Unsetenv failed: %v", err)
+			}
 			cfg, err := config.Load("")
 			if err != nil {
 				t.Fatalf("Load failed: %v", err)
@@ -217,7 +218,6 @@ func TestLoad_X402FacilitatorTokenEnvOnly(t *testing.T) {
 		})
 	})
 }
-
 
 func TestLoad_InvalidX402ToolsCallEnabledEnvWarning(t *testing.T) {
 	tmp := t.TempDir()

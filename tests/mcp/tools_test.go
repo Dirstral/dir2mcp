@@ -324,7 +324,6 @@ func TestMCPToolsCallAnnotate_Success(t *testing.T) {
 
 func TestMCPToolsCallAnnotate_PromptTooLarge(t *testing.T) {
 	cfg, st, _ := setupMCPToolStore(t, "note.txt", "text", []byte("small"))
-	cfg.AuthMode = "none"
 	cfg.MistralAPIKey = "test-key"
 
 	server := httptest.NewServer(mcp.NewServer(cfg, nil, mcp.WithStore(st)).Handler())

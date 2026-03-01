@@ -1,6 +1,9 @@
 package x402
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
 
 func TestNormalizeMode(t *testing.T) {
 	t.Parallel()
@@ -15,10 +18,17 @@ func TestNormalizeMode(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		got := NormalizeMode(tc.input)
-		if got != tc.want {
-			t.Errorf("NormalizeMode(%q) = %q; want %q", tc.input, got, tc.want)
+		name := tc.input
+		if name == "" {
+			name = "<empty>"
 		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			got := NormalizeMode(tc.input)
+			if got != tc.want {
+				t.Errorf("NormalizeMode(%q) = %q; want %q", tc.input, got, tc.want)
+			}
+		})
 	}
 }
 
@@ -37,5 +47,79 @@ func TestIsModeValid(t *testing.T) {
 		if IsModeValid(v) {
 			t.Errorf("expected %q to be invalid", v)
 		}
+	}
+}
+
+func TestIsModeEnabled(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		input string
+		want  bool
+	}{
+		{"off", false},
+		{"on", true},
+		{"required", true},
+		{"  ON  ", true},
+		{"unknown", false},
+		{"", false},
+	}
+
+	for _, tc := range cases {
+		if IsModeEnabled(tc.input) != tc.want {
+			t.Errorf("IsModeEnabled(%q) = %v; want %v", tc.input, IsModeEnabled(tc.input), tc.want)
+		}
+	}
+}
+
+func TestIsCAIP2Network(t *testing.T) {
+	t.Parallel()
+
+	valid := []string{
+		"eip155:1",
+		"solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+		"foo:bar",
+		"a:1",
+	}
+	for _, v := range valid {
+		if !IsCAIP2Network(v) {
+			t.Errorf("expected %q to be valid CAIP-2 network", v)
+		}
+	}
+
+	invalid := []string{
+		"", ":", "no-colon", "too:many:parts", "UPPER:case",
+		"ns!:ref", "ns:ref$", "toolongnamespaceabcdefghijklmnopqrstuvwxyz0123456789",
+		"ns:", ":ref",
+	}
+	for _, v := range invalid {
+		if IsCAIP2Network(v) {
+			t.Errorf("expected %q to be invalid CAIP-2 network", v)
+		}
+	}
+}
+
+func TestFacilitatorError(t *testing.T) {
+	t.Parallel()
+
+	err := &FacilitatorError{Code: "X", Message: "msg"}
+	if err.Error() != "X: msg" {
+		t.Errorf("unexpected error string %q", err.Error())
+	}
+	err = &FacilitatorError{Code: "X"}
+	if err.Error() != "X" {
+		t.Errorf("unexpected error string %q", err.Error())
+	}
+	err = &FacilitatorError{Message: "msg"}
+	if err.Error() != "msg" {
+		t.Errorf("unexpected error string %q", err.Error())
+	}
+	err = &FacilitatorError{}
+	if err.Error() != "facilitator request failed" {
+		t.Errorf("unexpected error string %q", err.Error())
+	}
+
+	if (&FacilitatorError{Cause: fmt.Errorf("cause")}).Unwrap() == nil {
+		t.Error("expected Non-nil Unwrap result")
 	}
 }

@@ -57,7 +57,7 @@ func TestFlattenJSONForIndexing_TopLevelScalar(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			if out := s.flattenJSONForIndexing(tc.input); out != tc.want {
-				t.Fatalf("%s: expected %q, got %q", tc.name, tc.want, out)
+				t.Fatalf("expected %q, got %q", tc.want, out)
 			}
 		})
 	}

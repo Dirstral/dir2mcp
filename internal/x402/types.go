@@ -57,7 +57,7 @@ type AcceptEntry struct {
 	Scheme            string `json:"scheme"`
 	Network           string `json:"network"`
 	Amount            string `json:"amount"`
-	MaxAmountRequired string `json:"maxAmountRequired"`
+	MaxAmountRequired string `json:"maxAmountRequired,omitempty"`
 	Asset             string `json:"asset"`
 	PayTo             string `json:"payTo"`
 	Resource          string `json:"resource"`
@@ -95,7 +95,6 @@ func (r Requirement) Validate() error {
 	// For "upto" scheme we also require a max value which must be a
 	// positive integer and not smaller than amount.  The MaxAmountRequired
 	// field may be empty for "exact" since it is ignored.
-	scheme = strings.ToLower(strings.TrimSpace(r.Scheme))
 	if scheme == "upto" {
 		max := strings.TrimSpace(r.MaxAmountRequired)
 		if max == "" {

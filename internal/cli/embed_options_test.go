@@ -30,11 +30,13 @@ func TestParseUpOptions_X402TokenFlags(t *testing.T) {
 	// token when both are provided.
 	//
 	// wantDirectSet mirrors the post‑parse value of
-	// opts.x402FacilitatorTokenDirectSet.  It indicates whether the direct
-	// token flag remains set after parsing (i.e. not cleared because a file
-	// took precedence), not merely whether the flag was passed on the
-	// command line.  The "token only" case leaves it false; the "both" case
-	// sets it true even though the direct token value is wiped.
+	// opts.x402FacilitatorTokenDirectSet.  Rather than signifying that the
+	// option "remains set" internally, it simply records whether the flag was
+	// supplied on the command line at all.  The parser may still clear the
+	// token value later if a file flag takes precedence; we keep the boolean
+	// for conflict detection and warning logic.  For example, in the "both"
+	// test case the direct token is wiped in favour of the file, but
+	// wantDirectSet is true because the user did pass the flag.
 	tests := []struct {
 		name          string
 		args          []string

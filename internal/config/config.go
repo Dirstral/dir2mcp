@@ -879,7 +879,9 @@ func (c *Config) ValidateX402(strict bool) error {
 		return fmt.Errorf("x402 price must be a positive integer")
 	}
 	// normalize scheme input by trimming spaces and converting to lower-case
+	// write the normalized value back to the struct so later code sees it too
 	scheme := strings.ToLower(strings.TrimSpace(c.X402.Scheme))
+	c.X402.Scheme = scheme
 	if scheme == "" {
 		return fmt.Errorf("x402 scheme is required")
 	}
@@ -888,10 +890,14 @@ func (c *Config) ValidateX402(strict bool) error {
 	default:
 		return fmt.Errorf("x402 scheme must be one of: exact, upto")
 	}
-	if strings.TrimSpace(c.X402.Network) == "" {
+
+	// ensure network string is trimmed before we validate and store it
+	net := strings.TrimSpace(c.X402.Network)
+	c.X402.Network = net
+	if net == "" {
 		return fmt.Errorf("x402 network is required")
 	}
-	if !isCAIP2Network(c.X402.Network) {
+	if !isCAIP2Network(net) {
 		return fmt.Errorf("x402 network must be CAIP-2")
 	}
 	if strings.TrimSpace(c.X402.Asset) == "" {

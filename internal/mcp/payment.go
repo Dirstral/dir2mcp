@@ -7,13 +7,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
-
-	"net/http"
 
 	"dir2mcp/internal/x402"
 )
@@ -343,18 +342,27 @@ func (s *Server) setPaymentExecutionOutcome(key string, outcome paymentExecution
 }
 
 func (s *Server) markPaymentExecutionSettled(key, paymentResponse string) (paymentExecutionOutcome, bool) {
+	// read and update shared state under lock; emit any warning afterwards.
+	var outcome paymentExecutionOutcome
+	var ok bool
+
 	s.paymentMu.Lock()
-	defer s.paymentMu.Unlock()
-	outcome, ok := s.paymentOutcomes[key]
+	outcome, ok = s.paymentOutcomes[key]
+	if ok {
+		outcome.Settled = true
+		outcome.PaymentResponse = strings.TrimSpace(paymentResponse)
+		outcome.UpdatedAt = time.Now().UTC()
+		s.paymentOutcomes[key] = outcome
+	}
+	s.paymentMu.Unlock()
+
 	if !ok {
-		// nothing to settle; avoid creating a partial entry
+		// nothing to settle; avoid creating a partial entry. emit warning after
+		// releasing the lock to avoid blocking other goroutines holding
+		// paymentMu.
 		s.emitPaymentEvent("warning", "payment_outcome_missing", map[string]interface{}{"key": key})
 		return paymentExecutionOutcome{}, false
 	}
-	outcome.Settled = true
-	outcome.PaymentResponse = strings.TrimSpace(paymentResponse)
-	outcome.UpdatedAt = time.Now().UTC()
-	s.paymentOutcomes[key] = outcome
 	return outcome, true
 }
 
@@ -471,6 +479,12 @@ func (s *Server) appendPaymentLog(event string, data map[string]interface{}) {
 		s.emitPaymentLogWarning(err)
 		// persistent writer failure; try to re-create writer & retry once
 		if s.paymentLogWriter != nil {
+			// flush any buffered data before dropping the writer. we deliberately
+			// ignore flush errors beyond emitting a warning since the primary
+			// write has already failed and we're about to reinitialize the writer.
+			if err := s.paymentLogWriter.Flush(); err != nil {
+				s.emitPaymentLogWarning(err)
+			}
 			// drop the buffered writer; there is nothing to close
 			s.paymentLogWriter = nil
 		}

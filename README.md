@@ -231,6 +231,10 @@ curl -sS -D "$INIT_HEADERS" -o "$INIT_BODY" \
     exit 1
 }
 
+# HTTP header names are case-insensitive per RFC 7230.  The awk
+# command lowercases each header line, matches a prefix of
+# "mcp-session-id:", strips any CR characters from the second field,
+# and then prints that field (the session ID) once found.
 SESSION_ID="$(awk -F': ' 'tolower($0) ~ /^mcp-session-id:/{gsub("\r","",$2); print $2; exit}' "$INIT_HEADERS")"
 if [ -z "$SESSION_ID" ]; then
   echo "error: could not extract MCP-Session-Id from initialization response" >&2

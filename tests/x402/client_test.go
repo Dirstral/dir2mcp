@@ -73,6 +73,49 @@ func TestVerify_ReadError(t *testing.T) {
 	}
 }
 
+func TestVerify_ResponseTooLarge(t *testing.T) {
+	large := strings.Repeat("a", (1<<20)+1)
+	r := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(large)),
+		Request: &http.Request{
+			Method: http.MethodPost,
+			URL:    &url.URL{Scheme: "https", Host: "api.example.com", Path: "/"},
+		},
+	}
+	r.Header.Set("Content-Type", "application/json")
+
+	rt := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return r, nil
+	})
+
+	client := x402.NewHTTPClient("https://facilitator.test", "token", &http.Client{Transport: rt})
+	req := x402.Requirement{
+		Scheme:            "exact",
+		Network:           "foo:bar",
+		Amount:            "1",
+		MaxAmountRequired: "1",
+		Asset:             "asset",
+		PayTo:             "pay",
+		Resource:          "res",
+	}
+	_, err := client.Verify(context.Background(), "sig", req)
+	if err == nil {
+		t.Fatalf("expected error when facilitator response exceeds max size")
+	}
+	var fe *x402.FacilitatorError
+	if !errors.As(err, &fe) {
+		t.Fatalf("expected FacilitatorError, got %v", err)
+	}
+	if fe.Code != x402.CodePaymentFacilitatorUnavailable {
+		t.Fatalf("code=%q want=%q", fe.Code, x402.CodePaymentFacilitatorUnavailable)
+	}
+	if !strings.Contains(fe.Message, "exceeds maximum size") {
+		t.Fatalf("message=%q missing overflow detail", fe.Message)
+	}
+}
+
 // When the facilitator returns a non-2xx status we include a copy of the
 // normalized response in FacilitatorError.Body.  That payload should be
 // redacted/truncated so that large or sensitive fields are not exposed.
@@ -271,14 +314,35 @@ func TestBuildPaymentRequiredHeaderValue_MaxIncluded(t *testing.T) {
 	}
 }
 
+func TestBuildPaymentRequiredHeaderValue_MaxOmittedWhenEmpty(t *testing.T) {
+	req := x402.Requirement{
+		Scheme:            "exact",
+		Network:           "foo:bar",
+		Amount:            "3",
+		MaxAmountRequired: "", // explicitly empty
+		Asset:             "a",
+		PayTo:             "p",
+		Resource:          "r",
+	}
+	payload, err := x402.BuildPaymentRequiredHeaderValue(req)
+	if err != nil {
+		t.Fatalf("build header failed: %v", err)
+	}
+	// inspect raw JSON for absence of maxAmountRequired key
+	if strings.Contains(payload, "maxAmountRequired") {
+		t.Errorf("payload should not include maxAmountRequired when empty: %s", payload)
+	}
+}
 func TestVerify_NormalizesSchemeInOutgoingPayload(t *testing.T) {
 	var gotScheme string
+	var gotMax string
 	// the transport should return errors for failures so that the upstream
 	// Verify call can observe them and fail at the assertion site.
 	rt := roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		var body struct {
 			PaymentRequirements []struct {
-				Scheme string `json:"scheme"`
+				Scheme            string `json:"scheme"`
+				MaxAmountRequired string `json:"maxAmountRequired"`
 			} `json:"paymentRequirements"`
 		}
 		if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
@@ -288,6 +352,7 @@ func TestVerify_NormalizesSchemeInOutgoingPayload(t *testing.T) {
 			return nil, fmt.Errorf("payment requirements len=%d want=1", len(body.PaymentRequirements))
 		}
 		gotScheme = body.PaymentRequirements[0].Scheme
+		gotMax = body.PaymentRequirements[0].MaxAmountRequired
 		r := &http.Response{
 			StatusCode: http.StatusOK,
 			Header:     make(http.Header),
@@ -317,7 +382,12 @@ func TestVerify_NormalizesSchemeInOutgoingPayload(t *testing.T) {
 	if gotScheme != "upto" {
 		t.Fatalf("scheme sent=%q want=%q", gotScheme, "upto")
 	}
-	if gotMax := strings.TrimSpace(req.MaxAmountRequired); gotMax == "" {
+	// ensure the payload actually contained the trimmed max amount -- don't rely on
+	// the original request struct since trimming happens during serialization.
+	if strings.TrimSpace(gotMax) == "" {
 		t.Fatalf("max amount was not sent")
+	}
+	if gotMax != "2" {
+		t.Fatalf("max amount sent=%q want=%q", gotMax, "2")
 	}
 }
