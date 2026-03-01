@@ -203,6 +203,28 @@ func ShouldGenerateRawText(docType string) bool {
 	}
 }
 
+// Ingest package chunking parameters.  These constants are the values used
+// internally when breaking up transcripts and text into smaller pieces for
+// indexing.  They are exported so that tests (and potentially other packages)
+// can reason about the limits without duplicating magic numbers.
+const (
+	// TranscriptChunkMaxChars is the maximum number of runes that will appear in
+	// any single chunk produced by chunkTranscriptSegmentWithTiming.  The
+	// implementation enforces this bound before trimming whitespace, so the
+	// actual text length may be smaller but will never exceed this value.
+	TranscriptChunkMaxChars = 1200
+
+	// TranscriptChunkOverlapChars is the number of runes that overlap between
+	// adjacent chunks when a transcript segment is split.  Overlap helps ensure
+	// that context is preserved across chunk boundaries.
+	TranscriptChunkOverlapChars = 120
+
+	// TranscriptChunkMinChars is the minimum number of runes that a non-terminal
+	// chunk must contain.  Segments shorter than this threshold are merged with
+	// the next window unless they are the final one.
+	TranscriptChunkMinChars = 80
+)
+
 type chunkSegment struct {
 	Text string
 	Span model.Span
@@ -333,12 +355,11 @@ func splitTranscriptSegmentWithTiming(text string, startMS, endMS int) []chunkSe
 		endMS = startMS + 1
 	}
 
-	const (
-		maxChars = 1200
-		overlap  = 120
-		minChars = 80
-	)
-	parts := chunkTextByChars(text, maxChars, overlap, minChars)
+	// use the exported constants so callers (including tests) can reason about
+	// the underlying configuration without duplicating numbers.  The constants
+	// are unrolled here rather than passing a struct to keep the original
+	// implementation simple.
+	parts := chunkTextByChars(text, TranscriptChunkMaxChars, TranscriptChunkOverlapChars, TranscriptChunkMinChars)
 	if len(parts) == 0 {
 		parts = []chunkSegment{{Text: text}}
 	}
