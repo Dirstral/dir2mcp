@@ -1526,6 +1526,11 @@ server:
     cert_file: ""
     key_file: ""
   public: false
+  # session timeouts for MCP sessions
+  # default inactivity ~24h, adjust as needed
+  # session_max_lifetime zero disables absolute limit
+  session_inactivity_timeout: "24h"
+  session_max_lifetime: "0"
 
 secrets:
   provider: auto         # auto|keychain|file|env|session

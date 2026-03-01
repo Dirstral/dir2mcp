@@ -320,6 +320,9 @@ func load(path string, overrideEnv map[string]string, applyEnv bool) (Config, er
 		if applyEnv {
 			applyEnvOverrides(&cfg, overrideEnv)
 		}
+		if err := cfg.Validate(); err != nil {
+			return Config{}, err
+		}
 		return cfg, nil
 	}
 
@@ -327,6 +330,9 @@ func load(path string, overrideEnv map[string]string, applyEnv bool) (Config, er
 		if errors.Is(err, os.ErrNotExist) {
 			if applyEnv {
 				applyEnvOverrides(&cfg, overrideEnv)
+			}
+			if err := cfg.Validate(); err != nil {
+				return Config{}, err
 			}
 			return cfg, nil
 		}
@@ -338,6 +344,9 @@ func load(path string, overrideEnv map[string]string, applyEnv bool) (Config, er
 	}
 	if applyEnv {
 		applyEnvOverrides(&cfg, overrideEnv)
+	}
+	if err := cfg.Validate(); err != nil {
+		return Config{}, err
 	}
 	return cfg, nil
 }
@@ -792,7 +801,18 @@ func applyEnvOverrides(cfg *Config, overrideEnv map[string]string) {
 	}
 	// session-related environment variables are durations parsed by
 	// time.ParseDuration.  invalid values are warned but not fatal.
-	if raw, ok := envLookup("DIR2MCP_SESSION_TIMEOUT", overrideEnv); ok && strings.TrimSpace(raw) != "" {
+	// Historically the variable was named DIR2MCP_SESSION_TIMEOUT; we
+	// elect to prefer the more explicit DIR2MCP_SESSION_INACTIVITY_TIMEOUT
+	// while still accepting the old name for compatibility.
+	if raw, ok := envLookup("DIR2MCP_SESSION_INACTIVITY_TIMEOUT", overrideEnv); ok && strings.TrimSpace(raw) != "" {
+		d, err := time.ParseDuration(raw)
+		if err != nil {
+			cfg.Warnings = append(cfg.Warnings, fmt.Errorf("invalid duration for DIR2MCP_SESSION_INACTIVITY_TIMEOUT: %q (%v)", raw, err))
+		} else {
+			cfg.SessionInactivityTimeout = d
+		}
+	} else if raw, ok := envLookup("DIR2MCP_SESSION_TIMEOUT", overrideEnv); ok && strings.TrimSpace(raw) != "" {
+		// fallback to old name
 		d, err := time.ParseDuration(raw)
 		if err != nil {
 			cfg.Warnings = append(cfg.Warnings, fmt.Errorf("invalid duration for DIR2MCP_SESSION_TIMEOUT: %q (%v)", raw, err))
@@ -850,6 +870,32 @@ func applyEnvOverrides(cfg *Config, overrideEnv map[string]string) {
 	if raw, ok := envLookup("DIR2MCP_X402_PAY_TO", overrideEnv); ok && strings.TrimSpace(raw) != "" {
 		cfg.X402.PayTo = strings.TrimSpace(raw)
 	}
+}
+
+// Validate checks configuration consistency and applies normalization
+// or defaults.  It currently enforces rules around session durations:
+//
+//   - both SessionInactivityTimeout and SessionMaxLifetime must be >= 0
+//   - a zero SessionInactivityTimeout is interpreted as the default value
+//     (24h) and is rewritten accordingly.  callers should invoke this
+//     method after the config is loaded so they needn't special-case a
+//     zero value elsewhere.
+//
+// Future validations unrelated to x402 should also live here.  Like
+// ValidateX402, this method operates on a pointer receiver so that it can
+// modify the receiver in-place.
+func (c *Config) Validate() error {
+	if c.SessionInactivityTimeout < 0 {
+		return fmt.Errorf("session_inactivity_timeout must be non-negative: %v", c.SessionInactivityTimeout)
+	}
+	if c.SessionMaxLifetime < 0 {
+		return fmt.Errorf("session_max_lifetime must be non-negative: %v", c.SessionMaxLifetime)
+	}
+	if c.SessionInactivityTimeout == 0 {
+		// zero is shorthand for the default
+		c.SessionInactivityTimeout = Default().SessionInactivityTimeout
+	}
+	return nil
 }
 
 // ValidateX402 performs consistency checks on the embedded X402Config

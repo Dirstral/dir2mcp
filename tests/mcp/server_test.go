@@ -13,6 +13,45 @@ import (
 	"dir2mcp/internal/mcp"
 )
 
+func postToolsListWithSession(serverURL, mcpPath, sessionID string) (*http.Response, error) {
+	body := `{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`
+	req, err := http.NewRequest(http.MethodPost, serverURL+mcpPath, strings.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("MCP-Session-Id", sessionID)
+	return http.DefaultClient.Do(req)
+}
+
+func waitForSessionExpiry(t *testing.T, serverURL, mcpPath, sessionID, expectedReason string) *http.Response {
+	t.Helper()
+
+	deadline := time.Now().Add(2 * time.Second)
+	var lastStatus int
+	var lastReason string
+
+	for time.Now().Before(deadline) {
+		resp, err := postToolsListWithSession(serverURL, mcpPath, sessionID)
+		if err != nil {
+			t.Fatalf("tools/list request failed while waiting for expiry: %v", err)
+		}
+
+		reason := strings.TrimSpace(resp.Header.Get("X-MCP-Session-Expired"))
+		if resp.StatusCode == http.StatusNotFound && reason == expectedReason {
+			return resp
+		}
+
+		lastStatus = resp.StatusCode
+		lastReason = reason
+		_ = resp.Body.Close()
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	t.Fatalf("session did not expire as expected; last status=%d reason=%q expected reason=%q", lastStatus, lastReason, expectedReason)
+	return nil
+}
+
 func TestMCPInitialize_AllowsOriginWithPortWhenAllowlistOmitsPort(t *testing.T) {
 	cfg := config.Default()
 	cfg.AuthMode = "none"
@@ -49,9 +88,9 @@ func TestMCPInitialize_AllowsOriginWithPortWhenAllowlistOmitsPort(t *testing.T) 
 func TestSessionExpiration_InactivityHeader(t *testing.T) {
 	cfg := config.Default()
 	cfg.AuthMode = "none"
-	// keep values small but with enough buffer to avoid timer-granularity
-	// flakes in CI environments.
-	cfg.SessionInactivityTimeout = 20 * time.Millisecond
+	// Inactivity expiry cannot be polled with repeated requests because each
+	// successful request refreshes lastSeen. Use a conservative one-shot wait.
+	cfg.SessionInactivityTimeout = 50 * time.Millisecond
 	cfg.SessionMaxLifetime = 0
 
 	server := httptest.NewServer(mcp.NewServer(cfg, nil).Handler())
@@ -66,19 +105,19 @@ func TestSessionExpiration_InactivityHeader(t *testing.T) {
 		t.Fatalf("do initialize: %v", err)
 	}
 	sessionID := resp.Header.Get("MCP-Session-Id")
+	if resp.StatusCode != http.StatusOK || strings.TrimSpace(sessionID) == "" {
+		if strings.TrimSpace(sessionID) == "" {
+			t.Fatalf("initialize failed: status=%d, missing MCP-Session-Id", resp.StatusCode)
+		}
+		t.Fatalf("initialize failed: status=%d, sessionID=%q", resp.StatusCode, sessionID)
+	}
 	_ = resp.Body.Close()
 
-	// wait comfortably past inactivity window
-	time.Sleep(100 * time.Millisecond)
-
-	// send a non-initialize request so session validation runs
-	body2 := `{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`
-	req2, _ := http.NewRequest(http.MethodPost, server.URL+cfg.MCPPath, strings.NewReader(body2))
-	req2.Header.Set("Content-Type", "application/json")
-	req2.Header.Set("MCP-Session-Id", sessionID)
-	resp2, err := http.DefaultClient.Do(req2)
+	// Wait well beyond inactivity timeout, then issue a single check request.
+	time.Sleep(500 * time.Millisecond)
+	resp2, err := postToolsListWithSession(server.URL, cfg.MCPPath, sessionID)
 	if err != nil {
-		t.Fatalf("do second req: %v", err)
+		t.Fatalf("tools/list request failed after inactivity wait: %v", err)
 	}
 	defer func() { _ = resp2.Body.Close() }()
 
@@ -109,18 +148,15 @@ func TestSessionExpiration_MaxLifetimeHeader(t *testing.T) {
 		t.Fatalf("do initialize: %v", err)
 	}
 	sessionID := resp.Header.Get("MCP-Session-Id")
+	if resp.StatusCode != http.StatusOK || strings.TrimSpace(sessionID) == "" {
+		if strings.TrimSpace(sessionID) == "" {
+			t.Fatalf("initialize failed: status=%d, missing MCP-Session-Id", resp.StatusCode)
+		}
+		t.Fatalf("initialize failed: status=%d, sessionID=%q", resp.StatusCode, sessionID)
+	}
 	_ = resp.Body.Close()
 
-	time.Sleep(100 * time.Millisecond)
-
-	body2 := `{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`
-	req2, _ := http.NewRequest(http.MethodPost, server.URL+cfg.MCPPath, strings.NewReader(body2))
-	req2.Header.Set("Content-Type", "application/json")
-	req2.Header.Set("MCP-Session-Id", sessionID)
-	resp2, err := http.DefaultClient.Do(req2)
-	if err != nil {
-		t.Fatalf("do second req: %v", err)
-	}
+	resp2 := waitForSessionExpiry(t, server.URL, cfg.MCPPath, sessionID, "max-lifetime")
 	defer func() { _ = resp2.Body.Close() }()
 
 	if resp2.StatusCode != http.StatusNotFound {

@@ -561,16 +561,26 @@ func writeResponse(w http.ResponseWriter, statusCode int, response rpcResponse) 
 	_ = json.NewEncoder(w).Encode(response)
 }
 
+// resolveSessionTimeouts returns the effective inactivity and max-life
+// durations for sessions.  The helper centralizes the logic of choosing the
+// hard‑coded default `sessionTTL` when a custom inactivity timeout isn't set
+// and pulling the configured max lifetime.  Both hasActiveSession and
+// cleanupExpiredSessions rely on the same rules so they call this helper to
+// avoid divergence.
+func (s *Server) resolveSessionTimeouts() (inactivity, maxLife time.Duration) {
+	inactivity = sessionTTL
+	if s.cfg.SessionInactivityTimeout > 0 {
+		inactivity = s.cfg.SessionInactivityTimeout
+	}
+	maxLife = s.cfg.SessionMaxLifetime
+	return
+}
+
 func (s *Server) hasActiveSession(id string, now time.Time) (bool, string) {
 	// returns (active, reason) reason is empty when active or unknown
 	// otherwise one of "inactivity" or "max-lifetime".
 
-	// pick configured timeouts or fall back to constant defaults
-	inactivity := sessionTTL
-	if s.cfg.SessionInactivityTimeout > 0 {
-		inactivity = s.cfg.SessionInactivityTimeout
-	}
-	maxLife := s.cfg.SessionMaxLifetime
+	inactivity, maxLife := s.resolveSessionTimeouts()
 
 	s.sessionMu.Lock()
 	defer s.sessionMu.Unlock()
@@ -633,11 +643,7 @@ func (s *Server) runRateLimitCleanup(ctx context.Context) {
 
 func (s *Server) cleanupExpiredSessions(now time.Time) {
 	// mirror the logic from hasActiveSession but without logging or updating
-	inactivity := sessionTTL
-	if s.cfg.SessionInactivityTimeout > 0 {
-		inactivity = s.cfg.SessionInactivityTimeout
-	}
-	maxLife := s.cfg.SessionMaxLifetime
+	inactivity, maxLife := s.resolveSessionTimeouts()
 
 	s.sessionMu.Lock()
 	defer s.sessionMu.Unlock()

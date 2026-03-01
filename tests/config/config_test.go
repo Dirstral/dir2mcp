@@ -176,6 +176,7 @@ func TestLoad_SessionTimeout_EnvAndYAML(t *testing.T) {
 	}
 
 	testutil.WithWorkingDir(t, tmp, func() {
+		// old variable name should still work
 		t.Setenv("DIR2MCP_SESSION_TIMEOUT", "3s")
 		t.Setenv("DIR2MCP_SESSION_MAX_LIFETIME", "4s")
 		cfg2, err := config.Load(path)
@@ -187,6 +188,44 @@ func TestLoad_SessionTimeout_EnvAndYAML(t *testing.T) {
 		}
 		if cfg2.SessionMaxLifetime != 4*time.Second {
 			t.Fatalf("env override max lifetime=%v want=4s", cfg2.SessionMaxLifetime)
+		}
+
+		// now prefer new variable name when both are present
+		t.Setenv("DIR2MCP_SESSION_INACTIVITY_TIMEOUT", "5s")
+		cfg3, err := config.Load(path)
+		if err != nil {
+			t.Fatalf("Load failed: %v", err)
+		}
+		if cfg3.SessionInactivityTimeout != 5*time.Second {
+			t.Fatalf("prefer new env var; got %v want=5s", cfg3.SessionInactivityTimeout)
+		}
+	})
+}
+
+func TestLoad_SessionDurations_Validation(t *testing.T) {
+	// negative values should be rejected and zero becomes default
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, ".dir2mcp.yaml")
+
+	writeFile(t, path, "session_inactivity_timeout: -1s\n")
+	if _, err := config.LoadFile(path); err == nil {
+		t.Fatalf("expected error loading negative inactivity timeout")
+	}
+
+	writeFile(t, path, "session_inactivity_timeout: 0s\n")
+	cfg, err := config.LoadFile(path)
+	if err != nil {
+		t.Fatalf("load failed: %v", err)
+	}
+	if cfg.SessionInactivityTimeout != 24*time.Hour {
+		t.Fatalf("zero inactivity timeout did not default, got %v", cfg.SessionInactivityTimeout)
+	}
+
+	// env negative should also error when using Load
+	testutil.WithWorkingDir(t, tmp, func() {
+		t.Setenv("DIR2MCP_SESSION_INACTIVITY_TIMEOUT", "-5s")
+		if _, err := config.Load(""); err == nil {
+			t.Fatalf("expected error for negative inactivity via env")
 		}
 	})
 }
