@@ -204,7 +204,7 @@ Test organization:
 By default, integration tests are skipped. To run the live Mistral embedding integration test:
 
 ```bash
-RUN_INTEGRATION_TESTS=1 go test -v ./internal/mistral -run Integration
+RUN_INTEGRATION_TESTS=1 go test -v ./tests/mistral -run Embed_Integration
 ```
 
 Required env vars:
@@ -220,6 +220,21 @@ go test -v ./tests -run MistralOCR
 ```
 
 `MISTRAL_OCR_SAMPLE` can be a local `.pdf`, `.png`, `.jpg`, or `.jpeg` file.
+
+To run the live transcription integration test:
+
+```bash
+RUN_INTEGRATION_TESTS=1 \
+MISTRAL_STT_SAMPLE=/absolute/path/to/sample.mp3 \
+go test -v ./tests/mistral -run Transcribe_Integration
+```
+
+To run the live generation integration test:
+
+```bash
+RUN_INTEGRATION_TESTS=1 \
+go test -v ./tests/mistral -run Generate_Integration
+```
 
 ## Ingestion notes
 
