@@ -203,13 +203,22 @@ func (m MenuModel) View() string {
 
 		isSelected := i == m.cursor
 
-		badgeStr := ""
+		badgePlain := ""
+		badgeStyled := ""
 		if item.Badge != "" {
-			badgeStr = " [" + item.Badge + "]"
+			badgePlain = " [" + item.Badge + "]"
+			badgeStyle := styleSubtle
+			if item.BadgeStyle != nil {
+				badgeStyle = *item.BadgeStyle
+			}
+			badgeStyled = " [" + badgeStyle.Render(item.Badge) + "]"
 		}
 
 		if compactRows || descWidth < 10 {
-			label := truncateText(item.Label+badgeStr, maxInt(contentWidth-6, 4))
+			label := truncateText(item.Label+badgePlain, maxInt(contentWidth-6, 4))
+			if badgeStyled != "" {
+				label = strings.Replace(label, badgePlain, badgeStyled, 1)
+			}
 			if isSelected {
 				menuLines = append(menuLines, fmt.Sprintf(" %s %s", styleSelected.Render(">"), styleSelectedRow.Render(" "+label+" ")))
 			} else {
@@ -218,7 +227,10 @@ func (m MenuModel) View() string {
 			continue
 		}
 
-		paddedLabel := fitText(item.Label+badgeStr, labelWidth)
+		paddedLabel := fitText(item.Label+badgePlain, labelWidth)
+		if badgeStyled != "" {
+			paddedLabel = strings.Replace(paddedLabel, badgePlain, badgeStyled, 1)
+		}
 		desc := fitText(item.Description, descWidth)
 		marker := styleMuted.Render(" ")
 		labelCell := styleMuted.Width(labelWidth).Render(paddedLabel)
