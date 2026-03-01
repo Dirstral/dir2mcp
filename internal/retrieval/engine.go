@@ -87,12 +87,14 @@ func NewEngine(stateDir, rootDir string, cfg *config.Config) (*Engine, error) {
 	svc.SetProtocolVersion(effective.ProtocolVersion)
 
 	if source, ok := interface{}(metadataStore).(embeddedChunkMetadataSource); ok {
-		if _, err := preloadEngineChunkMetadata(context.Background(), source, svc); err != nil {
+		total, err := preloadEngineChunkMetadata(context.Background(), source, svc)
+		if err != nil {
 			_ = metadataStore.Close()
 			_ = textIndex.Close()
 			_ = codeIndex.Close()
 			return nil, fmt.Errorf("preload chunk metadata: %w", err)
 		}
+		svc.logf("preloaded engine chunk metadata: %d", total)
 	}
 
 	return &Engine{
@@ -210,7 +212,7 @@ type AskResult struct {
 // Citation references a source span.
 type Citation struct {
 	RelPath string
-	Span    interface{}
+	Span    model.Span
 }
 
 // Ask runs retrieval + generation and returns answer/citations.
