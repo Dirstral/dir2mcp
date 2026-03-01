@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"dir2mcp/internal/dirstral/config"
+	"dir2mcp/internal/dirstral/host"
 	"dir2mcp/internal/dirstral/ui"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -612,6 +613,12 @@ func (m model) stateLines() []string {
 		lines = append(lines, pending...)
 		if len(pending) > 0 {
 			lines = append(lines, settingsSubtleStyle.Render("Source labels update after save."))
+		}
+
+		// Issue 78: Show auth contract details
+		health := host.CheckHealth()
+		if health.AuthSourceType != "" && health.AuthSourceType != "unknown" {
+			lines = append(lines, settingsSubtleStyle.Render(fmt.Sprintf("Active auth contract: %s", health.AuthSourceType)))
 		}
 	}
 
