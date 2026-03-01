@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 
 	"dir2mcp/internal/protocol"
@@ -61,7 +62,32 @@ func ActionableMessageForCode(code string) string {
 
 // ActionableMessageFromError derives canonical code and returns user guidance.
 func ActionableMessageFromError(err error) string {
-	return ActionableMessageForCode(CanonicalCodeFromError(err))
+	msg := ActionableMessageForCode(CanonicalCodeFromError(err))
+	if msg == "" {
+		return ""
+	}
+
+	var rpcErr *jsonRPCError
+	if errors.As(err, &rpcErr) && rpcErr.isPaymentRequired() {
+		if rpcErr.PaymentRequiredHeader != nil && len(rpcErr.PaymentRequiredHeader.Accept) > 0 {
+			acc := rpcErr.PaymentRequiredHeader.Accept[0]
+			var hints []string
+			if acc.Amount != "" {
+				hints = append(hints, "amount="+acc.Amount)
+			}
+			if acc.Asset != "" {
+				hints = append(hints, "asset="+acc.Asset)
+			}
+			if acc.Network != "" {
+				hints = append(hints, "network="+acc.Network)
+			}
+			if len(hints) > 0 {
+				msg += fmt.Sprintf(" (Hints: %s)", strings.Join(hints, ", "))
+			}
+		}
+	}
+
+	return msg
 }
 
 func canonicalCodeFromText(text string) string {
