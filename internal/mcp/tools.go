@@ -983,6 +983,7 @@ func (s *Server) handleAnnotateTool(ctx context.Context, args map[string]interfa
 		"rel_path":             {},
 		"schema_json":          {},
 		"index_flattened_text": {},
+		"max_chars":            {},
 	}); err != nil {
 		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
 	}
@@ -1005,6 +1006,17 @@ func (s *Server) handleAnnotateTool(ctx context.Context, args map[string]interfa
 	if err != nil {
 		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: err.Error(), Retryable: false}
 	}
+	maxChars := 32000
+	if raw, ok := args["max_chars"]; ok {
+		parsed, parseErr := parseInteger(raw, "max_chars")
+		if parseErr != nil {
+			return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: parseErr.Error(), Retryable: false}
+		}
+		maxChars = parsed
+	}
+	if maxChars < 200 || maxChars > 200000 {
+		return toolCallResult{}, &toolExecutionError{Code: "INVALID_FIELD", Message: "max_chars must be between 200 and 200000", Retryable: false}
+	}
 
 	doc, toolErr := s.lookupDocumentForTool(ctx, relPath)
 	if toolErr != nil {
@@ -1017,6 +1029,10 @@ func (s *Server) handleAnnotateTool(ctx context.Context, args map[string]interfa
 	}
 	if strings.TrimSpace(sourceText) == "" {
 		return toolCallResult{}, &toolExecutionError{Code: "ANNOTATE_FAILED", Message: "no source text available for annotation", Retryable: false}
+	}
+	runes := []rune(sourceText)
+	if len(runes) > maxChars {
+		sourceText = string(runes[:maxChars])
 	}
 
 	client, toolErr := s.newMistralClient()
@@ -1424,7 +1440,14 @@ func (s *Server) sourceTextForAnnotation(ctx context.Context, doc model.Document
 	case "pdf", "image":
 		content, err := s.readDocumentContent(doc.RelPath)
 		if err != nil {
-			return "", "", &toolExecutionError{Code: "FORBIDDEN", Message: err.Error(), Retryable: false}
+			switch {
+			case errors.Is(err, os.ErrNotExist):
+				return "", "", &toolExecutionError{Code: "NOT_FOUND", Message: "file not found", Retryable: false}
+			case errors.Is(err, model.ErrPathOutsideRoot):
+				return "", "", &toolExecutionError{Code: "PATH_OUTSIDE_ROOT", Message: err.Error(), Retryable: false}
+			default:
+				return "", "", &toolExecutionError{Code: "FORBIDDEN", Message: err.Error(), Retryable: false}
+			}
 		}
 		client, toolErr := s.newMistralClient()
 		if toolErr != nil {
@@ -1440,21 +1463,19 @@ func (s *Server) sourceTextForAnnotation(ctx context.Context, doc model.Document
 	default:
 		content, err := s.readDocumentContent(doc.RelPath)
 		if err != nil {
-			return "", "", &toolExecutionError{Code: "FORBIDDEN", Message: err.Error(), Retryable: false}
+			switch {
+			case errors.Is(err, os.ErrNotExist):
+				return "", "", &toolExecutionError{Code: "NOT_FOUND", Message: "file not found", Retryable: false}
+			case errors.Is(err, model.ErrPathOutsideRoot):
+				return "", "", &toolExecutionError{Code: "PATH_OUTSIDE_ROOT", Message: err.Error(), Retryable: false}
+			default:
+				return "", "", &toolExecutionError{Code: "FORBIDDEN", Message: err.Error(), Retryable: false}
+			}
 		}
 		return string(ingest.NormalizeUTF8(content)), ingest.RepTypeRawText, nil
 	}
 }
 
-func (s *Server) readDocumentContent(relPath string) ([]byte, error) {
-	rootAbs, err := filepath.Abs(strings.TrimSpace(s.cfg.RootDir))
-	if err != nil {
-		return nil, err
-	}
-	normalized := filepath.ToSlash(filepath.Clean(strings.TrimSpace(relPath)))
-	if normalized == "." || normalized == ".." || strings.HasPrefix(normalized, "../") || filepath.IsAbs(relPath) {
-		return nil, model.ErrPathOutsideRoot
-	}
 func (s *Server) readDocumentContent(relPath string) ([]byte, error) {
 	rootAbs, err := filepath.Abs(strings.TrimSpace(s.cfg.RootDir))
 	if err != nil {
@@ -1478,7 +1499,6 @@ func (s *Server) readDocumentContent(relPath string) ([]byte, error) {
 		return nil, model.ErrPathOutsideRoot
 	}
 	return os.ReadFile(targetReal)
-}
 }
 
 func (s *Server) newMistralClient() (*mistral.Client, *toolExecutionError) {
@@ -1968,6 +1988,7 @@ func annotateInputSchema() map[string]interface{} {
 			"rel_path":             map[string]interface{}{"type": "string", "minLength": 1},
 			"schema_json":          map[string]interface{}{"type": "object"},
 			"index_flattened_text": map[string]interface{}{"type": "boolean", "default": true},
+			"max_chars":            map[string]interface{}{"type": "integer", "minimum": 200, "maximum": 200000, "default": 32000},
 		},
 		"required": []string{"rel_path", "schema_json"},
 	}
