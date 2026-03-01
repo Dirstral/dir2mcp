@@ -168,10 +168,28 @@ func runJSONLoop(ctx context.Context, client *mcp.Client, opts Options, in io.Re
 			}
 			continue
 		}
-		last := execRes.Executions[len(execRes.Executions)-1]
 		usedTools := make([]string, 0, len(execRes.Executions))
 		for _, ex := range execRes.Executions {
 			usedTools = append(usedTools, ex.Tool)
+		}
+		if len(execRes.Executions) == 0 {
+			if err := write("tool_result", map[string]any{
+				"tool":               "",
+				"args":               map[string]any{},
+				"tools":              usedTools,
+				"is_error":           false,
+				"output":             execRes.Output,
+				"citations":          execRes.Citations,
+				"structured_content": map[string]any{},
+			}); err != nil {
+				return err
+			}
+			continue
+		}
+		last := execRes.Executions[len(execRes.Executions)-1]
+		structuredContent := map[string]any{}
+		if last.Result != nil && last.Result.StructuredContent != nil {
+			structuredContent = last.Result.StructuredContent
 		}
 		if err := write("tool_result", map[string]any{
 			"tool":               last.Tool,
@@ -180,7 +198,7 @@ func runJSONLoop(ctx context.Context, client *mcp.Client, opts Options, in io.Re
 			"is_error":           last.Result != nil && last.Result.IsError,
 			"output":             execRes.Output,
 			"citations":          execRes.Citations,
-			"structured_content": last.Result.StructuredContent,
+			"structured_content": structuredContent,
 		}); err != nil {
 			return err
 		}
