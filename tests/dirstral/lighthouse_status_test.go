@@ -16,6 +16,7 @@ import (
 
 	coreconfig "dir2mcp/internal/config"
 	"dir2mcp/internal/dirstral/host"
+	"dir2mcp/internal/protocol"
 )
 
 func TestComputeMCPURLDeterministic(t *testing.T) {
@@ -93,7 +94,7 @@ func TestStatusIncludesConnectionContractDetails(t *testing.T) {
 		},
 		"session": map[string]any{
 			"uses_mcp_session_id":    true,
-			"header_name":            "MCP-Session-Id",
+			"header_name":            protocol.MCPSessionHeader,
 			"assigned_on_initialize": true,
 		},
 		"token_source": "secret.token",
@@ -119,7 +120,7 @@ func TestStatusIncludesConnectionContractDetails(t *testing.T) {
 	if !strings.Contains(clean, "protocol="+coreconfig.DefaultProtocolVersion) {
 		t.Fatalf("expected protocol details in output, got: %q", clean)
 	}
-	if !strings.Contains(clean, "session_header=MCP-Session-Id") {
+	if !strings.Contains(clean, "session_header="+protocol.MCPSessionHeader) {
 		t.Fatalf("expected session header details in output, got: %q", clean)
 	}
 	if !strings.Contains(clean, "auth_source=secret.token") {
@@ -177,7 +178,7 @@ func TestStatusDerivesAuthSourceFromTokenFileIndicator(t *testing.T) {
 		},
 		"session": map[string]any{
 			"uses_mcp_session_id": false,
-			"header_name":         "MCP-Session-Id",
+			"header_name":         protocol.MCPSessionHeader,
 		},
 		"token_file": filepath.Join(root, ".dir2mcp", "secret.token"),
 	})
@@ -298,8 +299,8 @@ func newMockMCPServer(t *testing.T, ready bool) *httptest.Server {
 		id, hasID := req["id"]
 
 		switch method {
-		case "initialize":
-			w.Header().Set("MCP-Session-Id", sessionID)
+		case protocol.RPCMethodInitialize:
+			w.Header().Set(protocol.MCPSessionHeader, sessionID)
 			w.Header().Set("Content-Type", "application/json")
 			if !hasID {
 				http.Error(w, "missing id", http.StatusBadRequest)
@@ -312,10 +313,10 @@ func newMockMCPServer(t *testing.T, ready bool) *httptest.Server {
 					"capabilities": map[string]any{"tools": map[string]any{}},
 				},
 			})
-		case "notifications/initialized":
+		case protocol.RPCMethodNotificationsInitialized:
 			w.WriteHeader(http.StatusAccepted)
-		case "tools/list":
-			if r.Header.Get("MCP-Session-Id") != sessionID {
+		case protocol.RPCMethodToolsList:
+			if r.Header.Get(protocol.MCPSessionHeader) != sessionID {
 				http.Error(w, "unknown session", http.StatusNotFound)
 				return
 			}
