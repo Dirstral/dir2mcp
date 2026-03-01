@@ -1099,8 +1099,14 @@ func (s *Server) handleAnnotateTool(ctx context.Context, args map[string]interfa
 	// we fail with a mapped tool error rather than invoking client.Generate
 	// which would likely return a provider error.
 	if len([]rune(prompt)) > maxMistralContextChars {
-		return toolCallResult{}, s.mapToolErrorFromProvider("ANNOTATE_FAILED",
-			fmt.Errorf("prompt length %d exceeds max context %d", len([]rune(prompt)), maxMistralContextChars))
+		// This is a local validation failure; return a toolExecutionError rather
+		// than mapping it to a provider error so callers know it didn't involve
+		// the external API.
+		return toolCallResult{}, &toolExecutionError{
+			Code:      "ANNOTATE_FAILED",
+			Message:   fmt.Sprintf("prompt length %d exceeds max context %d", len([]rune(prompt)), maxMistralContextChars),
+			Retryable: false,
+		}
 	}
 
 	generated, genErr := client.Generate(ctx, prompt)

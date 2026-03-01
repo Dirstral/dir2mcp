@@ -103,6 +103,7 @@ func TestMCPToolsCallTranscribe_MissingRelPath(t *testing.T) {
 }
 
 func requireRetryableAndResetBody(t *testing.T, resp *http.Response) {
+	t.Helper()
 	// read and validate that the response has a retryable error flag inside
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {

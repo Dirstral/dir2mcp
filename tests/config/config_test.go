@@ -202,7 +202,11 @@ func TestLoad_X402FacilitatorTokenEnvOnly(t *testing.T) {
 		testutil.WithWorkingDir(t, tmp, func() {
 			// config file again contains a token that should be ignored
 			writeFile(t, filepath.Join(tmp, ".dir2mcp.yaml"), "x402_facilitator_token: should-not-be-used\n")
-			// simulate previous override then clear it
+			// simulate a previously-set environment variable, then remove it.
+			// we call Setenv first so the testing harness tracks the variable, but
+			// immediately Unsetenv to ensure config.Load("") sees no value.  The
+			// subtest is named "env-cleared" and below we assert that
+			// cfg.X402.FacilitatorToken ends up empty once the env var is removed.
 			t.Setenv("DIR2MCP_X402_FACILITATOR_TOKEN", "envval")
 			// clearing should be done with Unsetenv so Load() sees no value
 			if err := os.Unsetenv("DIR2MCP_X402_FACILITATOR_TOKEN"); err != nil {

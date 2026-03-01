@@ -48,6 +48,7 @@ func TestFlattenJSONForIndexing_TopLevelScalar(t *testing.T) {
 	}{
 		{name: "string", input: "hello", want: "hello"},
 		{name: "number", input: 42, want: "42"},
+		{name: "float", input: 3.14, want: "3.14"},
 		{name: "bool-true", input: true, want: "true"},
 		{name: "bool-false", input: false, want: "false"},
 		{name: "nil", input: nil, want: "null"},

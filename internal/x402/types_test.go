@@ -66,8 +66,9 @@ func TestIsModeEnabled(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		if IsModeEnabled(tc.input) != tc.want {
-			t.Errorf("IsModeEnabled(%q) = %v; want %v", tc.input, IsModeEnabled(tc.input), tc.want)
+		got := IsModeEnabled(tc.input)
+		if got != tc.want {
+			t.Errorf("IsModeEnabled(%q) = %v; want %v", tc.input, got, tc.want)
 		}
 	}
 }
@@ -121,5 +122,9 @@ func TestFacilitatorError(t *testing.T) {
 
 	if (&FacilitatorError{Cause: fmt.Errorf("cause")}).Unwrap() == nil {
 		t.Error("expected Non-nil Unwrap result")
+	}
+	// also verify that an error with no Cause returns nil from Unwrap
+	if (&FacilitatorError{}).Unwrap() != nil {
+		t.Error("expected nil Unwrap result when Cause is nil")
 	}
 }

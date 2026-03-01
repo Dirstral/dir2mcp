@@ -106,31 +106,41 @@ func TestCleanupPaymentOutcomes_DeterministicOrder(t *testing.T) {
 	}
 }
 func waitForKeyRef(ctx context.Context, s *Server, key string, wantRef int) error {
-	for {
+	// we'll broadcast the condition when the context is done so that Wait
+	// returns and we can check cancellation.  this goroutine exits quickly
+	// once ctx is closed.
+	go func() {
+		<-ctx.Done()
+		if s == nil || s.execCond == nil {
+			return
+		}
 		s.execMu.Lock()
+		s.execCond.Broadcast()
+		s.execMu.Unlock()
+	}()
+
+	s.execMu.Lock()
+	defer s.execMu.Unlock()
+	for {
 		km, ok := s.execKeyMu[key]
 		if ok && km.ref == wantRef {
-			s.execMu.Unlock()
 			return nil
 		}
-		ref := -1
-		if km != nil {
-			ref = km.ref
+		if err := ctx.Err(); err != nil {
+			ref := -1
+			if km != nil {
+				ref = km.ref
+			}
+			return fmt.Errorf("key=%s ok=%v ref=%d: %w", key, ok, ref, err)
 		}
-		s.execMu.Unlock()
-
-		select {
-		case <-ctx.Done():
-			// include current state in error for diagnostic purposes
-			return fmt.Errorf("key=%s ok=%v ref=%d: %w", key, ok, ref, ctx.Err())
-		case <-time.After(5 * time.Millisecond):
-			// continue polling
-		}
+		s.execCond.Wait()
 	}
 }
 
 func TestLockForExecutionKey_SerializesAndCleansUpWithRefCounts(t *testing.T) {
 	s := &Server{execKeyMu: make(map[string]*keyMutex)}
+	// wait helper relies on cond being initialized
+	s.execCond = sync.NewCond(&s.execMu)
 	key := "same-signature:same-params"
 
 	unlockA := s.lockForExecutionKey(key)
@@ -207,5 +217,41 @@ func TestLockForExecutionKey_SerializesAndCleansUpWithRefCounts(t *testing.T) {
 	defer s.execMu.Unlock()
 	if len(s.execKeyMu) != 0 {
 		t.Fatalf("expected key mutex map to be empty after all unlocks, got %d entries", len(s.execKeyMu))
+	}
+}
+
+// TestCloneRPCError_DeepCopy ensures that modifications to the original
+// rpcError (including its Data field) do not affect a previously obtained
+// clone.  This guards the assumption that cloneRPCError returns a completely
+// independent copy, even if rpcErrorData is extended with nested mutable
+// structures in the future.
+func TestCloneRPCError_DeepCopy(t *testing.T) {
+	orig := &rpcError{
+		Code:    123,
+		Message: "original",
+		Data: &rpcErrorData{
+			Code:      "foo",
+			Retryable: false,
+		},
+	}
+	clone := cloneRPCError(orig)
+	if clone == orig {
+		t.Fatal("cloneRPCError returned same pointer")
+	}
+	if clone.Data == orig.Data {
+		t.Fatal("data pointer was shared; copy must allocate new value")
+	}
+
+	// mutate the original after cloning
+	orig.Code = 999
+	orig.Message = "changed"
+	orig.Data.Code = "bar"
+	orig.Data.Retryable = true
+
+	if clone.Code != 123 || clone.Message != "original" {
+		t.Errorf("clone top-level fields mutated; got %+v", clone)
+	}
+	if clone.Data.Code != "foo" || clone.Data.Retryable {
+		t.Errorf("clone data mutated; got %+v", clone.Data)
 	}
 }

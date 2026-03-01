@@ -78,8 +78,13 @@ type Server struct {
 	paymentLogWriter *bufio.Writer
 
 	// per-execution-key locks used to serialize payment handling for identical
-	// signatures+params.  Map is protected by execMu.
+	// signatures+params.  Map is protected by execMu.  execCond is a condition
+	// variable that goroutines can wait on when they need to observe changes to
+	// the ref counts stored in execKeyMu.  It is always created with execMu as
+	// its Locker (see NewServer) so callers must hold execMu before calling
+	// Wait/Signal/Broadcast.
 	execMu    sync.Mutex
+	execCond  *sync.Cond
 	execKeyMu map[string]*keyMutex
 
 	eventEmitter func(level, event string, data interface{})
@@ -105,6 +110,21 @@ type rpcError struct {
 	Data    *rpcErrorData `json:"data,omitempty"`
 }
 
+// rpcErrorData is attached to an rpcError when additional metadata is
+// required by the JSON-RPC response.  All fields are exported so that the
+// structure can be marshaled to JSON; presently the type contains only
+// primitive values.  The copy helper in mcp/payment.go relies on this
+// property to produce an independent duplicate.  If new fields are added that
+// are themselves reference types (slices, maps, pointers, etc.) the cloning
+// logic must be kept in sync (the deep-copy performed via JSON round-trip
+// already handles such extensions, so tests should guard against regressions).
+//
+// Keeping rpcErrorData simple helps avoid accidental sharing of mutable
+// state between the original and any clones.
+//
+// NOTE: because we use encoding/json for the deep copy, the layout of this
+// struct must remain JSON-encodable.  Adding unexported fields or custom
+// types will require updating cloneRPCError accordingly.
 type rpcErrorData struct {
 	Code      string `json:"code"`
 	Retryable bool   `json:"retryable"`
@@ -160,6 +180,8 @@ func NewServer(cfg config.Config, retriever model.Retriever, opts ...ServerOptio
 		paymentMaxItems: paymentOutcomeMaxEntries,
 		execKeyMu:       make(map[string]*keyMutex),
 	}
+	// cond must be set after the zero-value mutex has been created above
+	s.execCond = sync.NewCond(&s.execMu)
 	for _, opt := range opts {
 		if opt != nil {
 			opt(s)

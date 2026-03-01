@@ -157,11 +157,15 @@ func (c *HTTPClient) do(ctx context.Context, operation, paymentSignature string,
 		}
 	}
 	if len(respBody) > maxRespSize {
+		// The response body was truncated by LimitReader above, so we only
+		// examine the first maxRespSize+1 bytes. Treat over-limit responses as
+		// deterministic validation failures rather than applying content-based
+		// heuristics.
 		return nil, &FacilitatorError{
 			Operation: operation,
 			Code:      CodePaymentFacilitatorUnavailable,
-			Message:   "facilitator response exceeds maximum size",
-			Retryable: true,
+			Message:   fmt.Sprintf("facilitator response exceeds maximum size (%d bytes)", maxRespSize),
+			Retryable: false,
 		}
 	}
 	normalized := normalizeResponsePayload(respBody)
@@ -250,25 +254,59 @@ func normalizeResponsePayload(payload []byte) json.RawMessage {
 // tokens, etc.) and to prevent unbounded logging of very large error
 // responses.  It attempts to parse the payload and redact a handful of
 // common keys, then truncates the result to a reasonable maximum length.
+// list of keys whose values should be masked when found in a JSON
+// object.  Note that keys are normalized exactly; casing matters, but the
+// set includes both snake_case and camelCase forms used in various APIs.
+var sensitiveKeys = map[string]struct{}{
+	"paymentPayload":      {},
+	"token":               {},
+	"secret":              {},
+	"password":            {},
+	"authorization":       {},
+	"authorizationHeader": {},
+	"api_key":             {},
+	"apiKey":              {},
+	"access_token":        {},
+	"refresh_token":       {},
+	"credential":          {},
+	"auth":                {},
+	"bearer":              {},
+}
+
+// redactRecursive walks v (which may be a map, slice, or other value) and
+// replaces any values associated with sensitive keys with the string
+// "[REDACTED]".  Non-map/slice values are left untouched.  The function is
+// safe when called with nil or unknown types.
+func redactRecursive(v interface{}) {
+	switch t := v.(type) {
+	case map[string]interface{}:
+		for k, val := range t {
+			if _, ok := sensitiveKeys[k]; ok {
+				t[k] = "[REDACTED]"
+			} else {
+				redactRecursive(val)
+			}
+		}
+	case []interface{}:
+		for i := range t {
+			redactRecursive(t[i])
+		}
+	default:
+		// primitives and other types are ignored
+	}
+}
+
 func redactNormalizedPayload(normalized json.RawMessage) string {
 	s := string(normalized)
 	if s == "" {
 		return ""
 	}
 
-	var obj map[string]interface{}
+	var obj interface{}
 	if err := json.Unmarshal(normalized, &obj); err == nil {
-		for _, key := range []string{
-			"paymentPayload", "token", "secret", "password",
-			"authorization", "authorizationHeader",
-			"api_key", "apiKey",
-			"access_token", "refresh_token",
-			"credential", "auth", "bearer",
-		} {
-			if _, ok := obj[key]; ok {
-				obj[key] = "[REDACTED]"
-			}
-		}
+		// we expect a JSON object most of the time, but our helper can handle
+		// arrays or other top-level types as well.
+		redactRecursive(obj)
 		if data, err := json.Marshal(obj); err == nil {
 			s = string(data)
 		}

@@ -111,8 +111,57 @@ func TestVerify_ResponseTooLarge(t *testing.T) {
 	if fe.Code != x402.CodePaymentFacilitatorUnavailable {
 		t.Fatalf("code=%q want=%q", fe.Code, x402.CodePaymentFacilitatorUnavailable)
 	}
+	if fe.Retryable {
+		t.Fatalf("expected non-retryable for oversized response; got retryable")
+	}
 	if !strings.Contains(fe.Message, "exceeds maximum size") {
 		t.Fatalf("message=%q missing overflow detail", fe.Message)
+	}
+}
+
+// overflow remains non-retryable even for HTML-like payloads.
+func TestVerify_ResponseTooLarge_HtmlProxy(t *testing.T) {
+	header := "<html>"
+	count := (1<<20)/len(header) + 10
+	large := strings.Repeat(header, count)
+	r := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(large)),
+		Request: &http.Request{
+			Method: http.MethodPost,
+			URL:    &url.URL{Scheme: "https", Host: "api.example.com", Path: "/"},
+		},
+	}
+	r.Header.Set("Content-Type", "application/json")
+
+	rt := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return r, nil
+	})
+
+	client := x402.NewHTTPClient("https://facilitator.test", "token", &http.Client{Transport: rt})
+	req := x402.Requirement{
+		Scheme:            "exact",
+		Network:           "foo:bar",
+		Amount:            "1",
+		MaxAmountRequired: "1",
+		Asset:             "asset",
+		PayTo:             "pay",
+		Resource:          "res",
+	}
+	_, err := client.Verify(context.Background(), "sig", req)
+	if err == nil {
+		t.Fatalf("expected error when facilitator response exceeds max size")
+	}
+	var fe *x402.FacilitatorError
+	if !errors.As(err, &fe) {
+		t.Fatalf("expected FacilitatorError, got %v", err)
+	}
+	if fe.Code != x402.CodePaymentFacilitatorUnavailable {
+		t.Fatalf("code=%q want=%q", fe.Code, x402.CodePaymentFacilitatorUnavailable)
+	}
+	if fe.Retryable {
+		t.Fatalf("expected non-retryable for HTML-like overflow")
 	}
 }
 
@@ -160,6 +209,57 @@ func TestVerify_BodyRedactedOnError(t *testing.T) {
 	}
 	if !strings.Contains(fe.Body, "[REDACTED]") {
 		t.Errorf("expected redacted value in body, got %q", fe.Body)
+	}
+}
+
+// Nested sensitive fields (in maps and arrays) should also be scrubbed.
+func TestVerify_BodyRedactedOnError_Nested(t *testing.T) {
+	secret := "topsecret"
+	orig := fmt.Sprintf(`{
+		"ok":false,
+		"nested": {"password": %q, "inner": {"apiKey":"abc"}},
+		"arr": [{"bearer":"token"},"plain"],
+		"secret": %q
+	}`, "pw", secret)
+	resp := &http.Response{
+		StatusCode: 400,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(bytes.NewBufferString(orig)),
+		Request: &http.Request{
+			Method: http.MethodPost,
+			URL:    &url.URL{Scheme: "https", Host: "api.example.com", Path: "/"},
+		},
+	}
+	resp.Header.Set("Content-Type", "application/json")
+
+	rt := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return resp, nil
+	})
+
+	client := x402.NewHTTPClient("https://facilitator.test", "token", &http.Client{Transport: rt})
+	req := x402.Requirement{
+		Scheme:            "exact",
+		Network:           "foo:bar",
+		Amount:            "1",
+		MaxAmountRequired: "1",
+		Asset:             "asset",
+		PayTo:             "pay",
+		Resource:          "res",
+	}
+	_, err := client.Verify(context.Background(), "sig", req)
+	if err == nil {
+		t.Fatalf("expected error from bad status code")
+	}
+	var fe *x402.FacilitatorError
+	if !errors.As(err, &fe) {
+		t.Fatalf("expected FacilitatorError, got %v", err)
+	}
+	if strings.Contains(fe.Body, "pw") || strings.Contains(fe.Body, "abc") || strings.Contains(fe.Body, "token") {
+		t.Errorf("nested sensitive values leaked: %s", fe.Body)
+	}
+	count := strings.Count(fe.Body, "[REDACTED]")
+	if count < 4 {
+		t.Errorf("expected at least 4 redactions; got %d body=%s", count, fe.Body)
 	}
 }
 
@@ -213,12 +313,16 @@ func TestVerify_MessageTruncatedOnStructuredPayload(t *testing.T) {
 			if !errors.As(err, &fe) {
 				t.Fatalf("expected FacilitatorError, got %v", err)
 			}
-			max := 256
+			// maxContentRunes is the maximum number of runes allowed for the
+			// *content portion* of the error message. The truncation indicator
+			// string (`sel`) may be appended afterward, so the total length of
+			// `fe.Message` is allowed to exceed maxContentRunes by len(sel).
+			maxContentRunes := 256
 			sel := "… (truncated)"
 			if !strings.Contains(fe.Message, sel) {
 				t.Errorf("expected truncation indicator %q, got %q", sel, fe.Message)
 			}
-			if len([]rune(fe.Message)) > max+len([]rune(sel)) {
+			if len([]rune(fe.Message)) > maxContentRunes+len([]rune(sel)) {
 				t.Errorf("message too long after truncation (%d runes); %q", len([]rune(fe.Message)), fe.Message)
 			}
 		})
@@ -333,6 +437,7 @@ func TestBuildPaymentRequiredHeaderValue_MaxOmittedWhenEmpty(t *testing.T) {
 		t.Errorf("payload should not include maxAmountRequired when empty: %s", payload)
 	}
 }
+
 func TestVerify_NormalizesSchemeInOutgoingPayload(t *testing.T) {
 	var gotScheme string
 	var gotMax string

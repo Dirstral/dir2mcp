@@ -30,13 +30,13 @@ func TestParseUpOptions_X402TokenFlags(t *testing.T) {
 	// token when both are provided.
 	//
 	// wantDirectSet mirrors the post‑parse value of
-	// opts.x402FacilitatorTokenDirectSet.  Rather than signifying that the
-	// option "remains set" internally, it simply records whether the flag was
-	// supplied on the command line at all.  The parser may still clear the
-	// token value later if a file flag takes precedence; we keep the boolean
-	// for conflict detection and warning logic.  For example, in the "both"
-	// test case the direct token is wiped in favour of the file, but
-	// wantDirectSet is true because the user did pass the flag.
+	// opts.x402FacilitatorTokenDirectSet.  The parser only sets this boolean
+	// when both the direct token and the file flag are present.  In other
+	// words, it is used for conflict detection/warning logic rather than
+	// indicating that a flag was supplied in every successful parse.  When
+	// only --x402-facilitator-token is given, the value remains false; the
+	// field flips to true only if a conflicting --x402-facilitator-token-file
+	// is also provided (see the "both" and "both order reversed" cases).
 	tests := []struct {
 		name          string
 		args          []string

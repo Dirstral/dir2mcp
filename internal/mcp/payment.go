@@ -296,6 +296,10 @@ func (s *Server) lockForExecutionKey(key string) func() {
 		s.execKeyMu[key] = km
 	}
 	km.ref++
+	// wake any waiters observing ref counts
+	if s.execCond != nil {
+		s.execCond.Broadcast()
+	}
 	s.execMu.Unlock()
 
 	km.mu.Lock()
@@ -305,6 +309,9 @@ func (s *Server) lockForExecutionKey(key string) func() {
 		km.ref--
 		if km.ref == 0 {
 			delete(s.execKeyMu, key)
+		}
+		if s.execCond != nil {
+			s.execCond.Broadcast()
 		}
 		s.execMu.Unlock()
 	}
@@ -366,14 +373,41 @@ func (s *Server) markPaymentExecutionSettled(key, paymentResponse string) (payme
 	return outcome, true
 }
 
+// cloneRPCError returns a copy of the supplied rpcError.  callers may
+// hold on to the returned value and modify it without contaminating the
+// original error – the copy must not share any mutable state with `err`.
+//
+// Historically the implementation performed a shallow struct copy and then
+// duplicated the top‑level `Data` pointer value (see previous version below).
+// That was sufficient because rpcErrorData was a simple struct containing
+// only primitive fields.  If rpcErrorData is later extended with slices,
+// maps, or pointers a naive copy would allow the original and clone to share
+// substructures, leading to data races when both are modified concurrently.
+//
+// To guard against that future possibility we perform a deterministic
+// encoding round‑trip using encoding/json.  JSON serialization works with the
+// existing exported fields and will recursively copy any nested collections
+// or pointers.  The cost is negligible in this hot path (error cloning only
+// occurs during payment caching) and keeps the implementation simple.
 func cloneRPCError(err *rpcError) *rpcError {
 	if err == nil {
 		return nil
 	}
-	cloned := *err
-	if err.Data != nil {
-		data := *err.Data
-		cloned.Data = &data
+
+	// fast path: marshal/unmarshal to create a deep copy.  The error return
+	// from these calls is ignored because the types involved are known to be
+	// JSON‑encodable; in the unlikely event of a failure we fall back to a
+	// manual copy to avoid returning nil.
+	var cloned rpcError
+	if b, marshalErr := json.Marshal(err); marshalErr == nil {
+		_ = json.Unmarshal(b, &cloned)
+	} else {
+		// fallback to previous behaviour; copy top-level and data by value.
+		cloned = *err
+		if err.Data != nil {
+			data := *err.Data
+			cloned.Data = &data
+		}
 	}
 	return &cloned
 }

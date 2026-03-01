@@ -841,19 +841,19 @@ func (c *Config) ValidateX402(strict bool) error {
 
 	if rawURL := strings.TrimSpace(c.X402.FacilitatorURL); rawURL != "" {
 		parsed, err := url.Parse(rawURL)
-		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-			if err != nil {
-				return fmt.Errorf("invalid x402 facilitator URL %q: %w", rawURL, err)
-			}
+		if err != nil {
+			return fmt.Errorf("invalid x402 facilitator URL %q: %w", rawURL, err)
+		}
+		if parsed.Scheme == "" || parsed.Host == "" {
 			return fmt.Errorf("invalid x402 facilitator URL: %q", rawURL)
 		}
 	}
 	if rawURL := strings.TrimSpace(c.X402.ResourceBaseURL); rawURL != "" {
 		parsed, err := url.Parse(rawURL)
-		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-			if err != nil {
-				return fmt.Errorf("invalid x402 resource base URL %q: %w", rawURL, err)
-			}
+		if err != nil {
+			return fmt.Errorf("invalid x402 resource base URL %q: %w", rawURL, err)
+		}
+		if parsed.Scheme == "" || parsed.Host == "" {
 			return fmt.Errorf("invalid x402 resource base URL: %q", rawURL)
 		}
 	}
