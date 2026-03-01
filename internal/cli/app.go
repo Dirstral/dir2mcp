@@ -1679,7 +1679,7 @@ func isNumericPort(port string) bool {
 
 func buildConnectionPayload(cfg config.Config, url string, auth authMaterial) connectionPayload {
 	headers := map[string]string{
-		"MCP-Protocol-Version": cfg.ProtocolVersion,
+		protocol.MCPProtocolVersionHeader: cfg.ProtocolVersion,
 	}
 	if auth.mode != "none" {
 		headers["Authorization"] = auth.authorizationHint
@@ -2010,7 +2010,7 @@ func (a *App) printHumanConnection(cfg config.Config, connection connectionPaylo
 		writef(a.stdout, "  Token file: %s\n", auth.tokenFile)
 	}
 	writeln(a.stdout, "  Headers:")
-	writef(a.stdout, "    MCP-Protocol-Version: %s\n", cfg.ProtocolVersion)
+	writef(a.stdout, "    %s: %s\n", protocol.MCPProtocolVersionHeader, cfg.ProtocolVersion)
 	if auth.mode != "none" {
 		writeln(a.stdout, "    Authorization: Bearer <token>")
 	}
