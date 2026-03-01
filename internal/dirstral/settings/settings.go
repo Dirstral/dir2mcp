@@ -142,7 +142,10 @@ func (m model) handleBrowsingKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.errMsg = ""
 	case "enter":
 		m.startEditing()
-		return m, m.input.Focus()
+		if m.state == stateEditing {
+			return m, m.input.Focus()
+		}
+		return m, nil
 	case "r":
 		m.resetField()
 	case "s":
@@ -151,7 +154,17 @@ func (m model) handleBrowsingKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m model) hasValidCursorField() bool {
+	return len(m.fields) > 0 && m.cursor >= 0 && m.cursor < len(m.fields)
+}
+
 func (m *model) startEditing() {
+	if !m.hasValidCursorField() {
+		m.state = stateBrowsing
+		m.errMsg = "No editable field selected"
+		m.statusMsg = ""
+		return
+	}
 	f := m.fields[m.cursor]
 	m.state = stateEditing
 	m.errMsg = ""
@@ -179,6 +192,12 @@ func (m model) handleEditingKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
+	if !m.hasValidCursorField() {
+		m.state = stateBrowsing
+		m.input.Blur()
+		m.errMsg = "Selected field is no longer available"
+		return m, nil
+	}
 	// Live validation feedback.
 	val := m.input.Value()
 	if err := config.ValidateField(m.fields[m.cursor].Key, val); err != nil {
@@ -190,6 +209,13 @@ func (m model) handleEditingKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) commitEdit() (tea.Model, tea.Cmd) {
+	if !m.hasValidCursorField() {
+		m.state = stateBrowsing
+		m.input.Blur()
+		m.errMsg = "No editable field selected"
+		m.statusMsg = ""
+		return m, nil
+	}
 	key := m.fields[m.cursor].Key
 	val := m.input.Value()
 	changed := m.fields[m.cursor].Value != val
@@ -223,6 +249,11 @@ func (m model) commitEdit() (tea.Model, tea.Cmd) {
 }
 
 func (m *model) resetField() {
+	if !m.hasValidCursorField() {
+		m.errMsg = "No field selected"
+		m.statusMsg = ""
+		return
+	}
 	f := &m.fields[m.cursor]
 	def := config.DefaultValueForField(f.Key)
 	if def == "" && f.Sensitive {
@@ -542,6 +573,10 @@ func (m model) stateLines() []string {
 
 	switch m.state {
 	case stateEditing:
+		if !m.hasValidCursorField() {
+			lines = append(lines, ui.Red.Render("Selected field is out of range."))
+			break
+		}
 		lines = append(lines, settingsMutedStyle.Render("Editing "+m.fields[m.cursor].Key))
 		lines = append(lines, "  "+m.input.View())
 		if m.errMsg != "" {
