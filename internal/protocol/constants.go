@@ -30,6 +30,7 @@ const (
 	DefaultModel      = "mistral-small-latest"
 
 	MCPSessionHeader         = "MCP-Session-Id"
+	MCPSessionExpiredHeader  = "X-MCP-Session-Expired"
 	MCPProtocolVersionHeader = "MCP-Protocol-Version"
 )
 

@@ -1628,7 +1628,7 @@ security:
   secret_patterns:
     - 'AKIA[0-9A-Z]{16}'
     - '(?i)aws(.{0,20})?secret|([0-9a-zA-Z/+=]{40})'
-    - '(?i)(?:authorization\s*[:=]\s*bearer\s+|(?:access|id|refresh)_token\s*[:=]\s*)[A-Za-z0-9_.-]{8,}\.[A-Za-z0-9_.-]{8,}\.[A-Za-z0-9_.-]{8,}'
+    - '(?i)(?:authorization\s*[:=]\s*bearer\s+|(?:access|id|refresh)_token\s*[:=]\s*)[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}'
     - '(?i)token\s*[:=]\s*[A-Za-z0-9_.-]{20,}'
     - 'sk_[a-z0-9]{32}|api_[A-Za-z0-9]{32}'
 ```
@@ -1673,7 +1673,7 @@ security:
 * Paid retry requests MUST be validated from `PAYMENT-SIGNATURE` (x402 v2 semantics).
 * For paid requests, verification and settlement MUST be delegated to a facilitator (hosted or self-managed); dir2mcp remains non-custodial.
 * Successful paid responses SHOULD include facilitator settlement metadata via `PAYMENT-RESPONSE` when available.
-* x402 network identifiers MUST use CAIP-2 format (for example: `eip155:8453`, `eip155:84532`, `solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp`).
+* x402 network identifiers MUST use CAIP-2 format (for example: `eip155:8453`, `eip155:84532`, `solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d`).
 * Recommended paid scope: gate `tools/call` (or selected tool names); keep lifecycle (`initialize`, `tools/list`) ungated.
 * Payment failures MUST map to canonical tool/transport errors (`UNAUTHORIZED`, `MISTRAL_FAILED`, plus x402-specific payment failure metadata).
 * If enabled, server should emit payment telemetry in NDJSON (`payment_required|payment_verified|payment_settled|payment_failed`).

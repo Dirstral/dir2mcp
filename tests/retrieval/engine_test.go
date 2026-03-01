@@ -63,9 +63,24 @@ func newTestEngine(t *testing.T) *retrieval.Engine {
 	if err != nil {
 		t.Fatalf("NewEngine failed: %v", err)
 	}
-	t.Cleanup(engine.Close)
+	// call Close inside a closure; the method currently returns no error
+	t.Cleanup(func() {
+		engine.Close()
+	})
 
 	return engine
+}
+
+func TestEngineAsk_WithTODOContext(t *testing.T) {
+	engine := newTestEngine(t)
+
+	result, err := engine.AskWithContext(context.TODO(), "what changed?", retrieval.AskOptions{K: 1})
+	if err != nil {
+		t.Fatalf("AskWithContext(context.TODO()) failed: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil AskResult")
+	}
 }
 
 func TestEngineAsk_RejectsEmptyQuestion(t *testing.T) {

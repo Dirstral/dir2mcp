@@ -267,6 +267,13 @@ func SaveFile(path string, cfg Config) error {
 		return errors.New("config path is required")
 	}
 
+	// validate before persisting so callers don't accidentally write
+	// nonsensical values (negative durations, mismatched session
+	// lifetimes, etc.).  the error is wrapped to make the origin clear.
+	if err := cfg.Validate(); err != nil {
+		return fmt.Errorf("validate config: %w", err)
+	}
+
 	serializable := persistedConfig{
 		RootDir:              cfg.RootDir,
 		StateDir:             cfg.StateDir,

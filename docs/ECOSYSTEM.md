@@ -123,7 +123,7 @@ For concreteness, the Bazaar/CDP discovery metadata specification (https://docs.
 
 ```json
 {
-  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$schema": "https://json-schema.org/draft-07/schema#",
   "title": "MCP Endpoint Descriptor",
   "type": "object",
   "properties": {

@@ -220,4 +220,16 @@ func TestSpecYAMLSecretPatterns_Compile_JWTAndBearer(t *testing.T) {
 	if _, err := regexp.Compile(bearerFromSpec); err != nil {
 		t.Fatalf("bearer pattern from SPEC failed to compile: %v", err)
 	}
+
+	// Ensure our local constants stay in sync with the SPEC patterns
+	// Compare compiled string representations to avoid differences in
+	// escaping or formatting causing false negatives.
+	if regexp.MustCompile(jwtPattern).String() != regexp.MustCompile(jwtFromSpec).String() {
+		t.Fatalf("jwtPattern constant and SPEC pattern differ\nlocal: %s\nSPEC : %s",
+			jwtPattern, jwtFromSpec)
+	}
+	if regexp.MustCompile(bearerPattern).String() != regexp.MustCompile(bearerFromSpec).String() {
+		t.Fatalf("bearerPattern constant and SPEC pattern differ\nlocal: %s\nSPEC : %s",
+			bearerPattern, bearerFromSpec)
+	}
 }

@@ -11,6 +11,7 @@ import (
 
 	"dir2mcp/internal/config"
 	"dir2mcp/internal/mcp"
+	"dir2mcp/internal/protocol"
 )
 
 func postToolsListWithSession(serverURL, mcpPath, sessionID string) (*http.Response, error) {
@@ -37,7 +38,7 @@ func waitForSessionExpiry(t *testing.T, serverURL, mcpPath, sessionID, expectedR
 			t.Fatalf("tools/list request failed while waiting for expiry: %v", err)
 		}
 
-		reason := strings.TrimSpace(resp.Header.Get("X-MCP-Session-Expired"))
+		reason := strings.TrimSpace(resp.Header.Get(protocol.MCPSessionExpiredHeader))
 		if resp.StatusCode == http.StatusNotFound && reason == expectedReason {
 			return resp
 		}
@@ -127,8 +128,8 @@ func TestSessionExpiration_InactivityHeader(t *testing.T) {
 	if resp2.StatusCode != http.StatusNotFound {
 		t.Fatalf("expected 404 on expired session, got %d", resp2.StatusCode)
 	}
-	if resp2.Header.Get("X-MCP-Session-Expired") != "inactivity" {
-		t.Fatalf("expected inactivity header, got %q", resp2.Header.Get("X-MCP-Session-Expired"))
+	if resp2.Header.Get(protocol.MCPSessionExpiredHeader) != "inactivity" {
+		t.Fatalf("expected inactivity header, got %q", resp2.Header.Get(protocol.MCPSessionExpiredHeader))
 	}
 }
 

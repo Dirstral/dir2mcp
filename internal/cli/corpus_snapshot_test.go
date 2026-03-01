@@ -80,10 +80,16 @@ func TestBuildCorpusSnapshot_ComputesDocCountsAndCodeRatio(t *testing.T) {
 func TestBuildCorpusSnapshot_StatusCountsFallback(t *testing.T) {
 	store := &fakeCorpusStore{
 		docs: []model.Document{
+			// include one doc with a nonstandard 'ok' status so we exercise that
+			// branch; fallback logic treats it as indexed.
+			{DocType: "md", Status: "ok"},
 			{DocType: "code", Status: "indexed"},
 			{DocType: "md", Status: "skipped"},
 			{DocType: "txt", Status: "error"},
+			// unknown status should only bump Scanned and nothing else
 			{DocType: "other", Status: "whatever"},
+			// deleted docs count toward Scanned/Deleted but not Indexed even if
+			// status is 'indexed'.
 			{DocType: "code", Deleted: true, Status: "indexed"},
 		},
 	}
@@ -93,20 +99,25 @@ func TestBuildCorpusSnapshot_StatusCountsFallback(t *testing.T) {
 		t.Fatalf("buildCorpusSnapshot failed: %v", err)
 	}
 
-	// deleted doc should not count toward TotalDocs or DocCounts
-	if snap.TotalDocs != 4 {
-		t.Errorf("expected total_docs=4, got %d", snap.TotalDocs)
+	// deleted doc should not count toward TotalDocs or DocCounts; we
+	// have added an extra non-deleted document above so expect 5 here.
+	if snap.TotalDocs != 5 {
+		t.Errorf("expected total_docs=5, got %d", snap.TotalDocs)
 	}
 	if snap.DocCounts["code"] != 1 {
 		t.Errorf("expected code count=1, got %d", snap.DocCounts["code"])
 	}
 
 	// status-derived indexing snapshot should reflect our test documents
-	if snap.Indexing.Scanned != 5 {
-		t.Errorf("expected scanned=5, got %d", snap.Indexing.Scanned)
+	// we added six documents above, including one deleted one. scanned
+	// should reflect the raw number of records returned by the store.
+	if snap.Indexing.Scanned != 6 {
+		t.Errorf("expected scanned=6, got %d", snap.Indexing.Scanned)
 	}
-	if snap.Indexing.Indexed != 1 {
-		t.Errorf("expected indexed=1 (deleted docs excluded even if status 'indexed'; only explicit 'indexed' or 'ok' statuses count), got %d", snap.Indexing.Indexed)
+	// indexed count comes from explicit 'indexed' or 'ok' statuses; the
+	// unknown-status document only increments Scanned.
+	if snap.Indexing.Indexed != 2 {
+		t.Errorf("expected indexed=2 (deleted docs excluded even if status 'indexed'; 'ok' treated like 'indexed'), got %d", snap.Indexing.Indexed)
 	}
 	if snap.Indexing.Skipped != 1 {
 		t.Errorf("expected skipped=1, got %d", snap.Indexing.Skipped)

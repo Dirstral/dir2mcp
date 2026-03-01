@@ -780,8 +780,10 @@ func TestMCPToolsCallStats_UsesRetrieverStats(t *testing.T) {
 	if docCounts["code"] != float64(2) || docCounts["md"] != float64(1) {
 		t.Fatalf("unexpected doc_counts payload: %#v", docCounts)
 	}
-	if envelope.Result.StructuredContent["doc_counts_available"] != true {
-		t.Fatalf("expected doc_counts_available=true when retriever provided stats, got %#v", envelope.Result.StructuredContent["doc_counts_available"])
+	if got, ok := envelope.Result.StructuredContent["doc_counts_available"].(bool); !ok {
+		t.Fatalf("expected doc_counts_available boolean, got %#v", envelope.Result.StructuredContent["doc_counts_available"])
+	} else if !got {
+		t.Fatalf("expected doc_counts_available=true when retriever provided stats, got %v", got)
 	}
 
 	indexingRaw, ok := envelope.Result.StructuredContent["indexing"].(map[string]interface{})

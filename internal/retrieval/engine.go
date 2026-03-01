@@ -40,6 +40,12 @@ type Engine struct {
 }
 
 // NewEngine creates a retrieval engine backed by the on-disk state.
+//
+// If the provided ctx is nil, it will be replaced with
+// context.Background(). Callers may pass a non-nil context
+// (for example, context.Background() or context.TODO()) to
+// control cancellation or deadlines. The function is lenient
+// but documents this behavior explicitly so callers are aware.
 func NewEngine(ctx context.Context, stateDir, rootDir string, cfg *config.Config) (*Engine, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -95,8 +101,10 @@ func NewEngine(ctx context.Context, stateDir, rootDir string, cfg *config.Config
 
 	if source, ok := interface{}(metadataStore).(embeddedChunkMetadataSource); ok {
 		preloadCtx, cancel := context.WithTimeout(ctx, defaultEnginePreloadTimeout)
+		// ensure the cancel function is always called, even if
+		// preloadEngineChunkMetadata panics or returns early.
+		defer cancel()
 		total, err := preloadEngineChunkMetadata(preloadCtx, source, svc)
-		cancel()
 		if err != nil {
 			_ = metadataStore.Close()
 			_ = textIndex.Close()
@@ -231,6 +239,11 @@ type Citation struct {
 // context. The context is wrapped with the engine's configured timeout so callers may also
 // cancel early. This method replaces the old `Ask` which created its own background context
 // and therefore ignored client cancellation.
+//
+// The function is lenient about the provided context: if `ctx` is nil it will be
+// replaced with context.Background(), mirroring the policy used by NewEngine.
+// Callers are encouraged to pass a non-nil context (e.g. context.Background() or
+// context.TODO()) when possible.
 func (e *Engine) AskWithContext(ctx context.Context, question string, opts AskOptions) (*AskResult, error) {
 	if e == nil || e.retriever == nil {
 		return nil, fmt.Errorf("retrieval engine not initialized")
@@ -264,8 +277,10 @@ func (e *Engine) AskWithContext(ctx context.Context, question string, opts AskOp
 			return nil, fmt.Errorf("ask timed out after %s: %w", timeout, context.DeadlineExceeded)
 		}
 		if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
-			// return a clearer cancellation error instead of raw ctx.Err()
-			return nil, fmt.Errorf("ask canceled: %w", err)
+			// return a clearer cancellation error that wraps the sentinel
+			// value so callers can reliably use errors.Is(...,
+			// context.Canceled).
+			return nil, fmt.Errorf("ask canceled: %w", context.Canceled)
 		}
 		return nil, err
 	}

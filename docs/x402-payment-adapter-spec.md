@@ -55,7 +55,7 @@ The contract defines, at a minimum, the following elements:
 * **Authentication** – adapter-to-facilitator auth must be explicit (for example API key auth for hosted facilitator, mTLS or signed requests for self-managed deployments).  
 * **Payment state model** – canonical states `required -> verified -> settled` with failure branches (`invalid`, `rejected`, `expired`, `failed`). dir2mcp does not persist custodial payment state; facilitator is source of truth for verify/settle outcomes.  
 * **Error codes and retries** – standard HTTP handling (`402`, `4xx`, `5xx`), idempotent settle calls, bounded retry/backoff for transient failures, and explicit non-retryable classes for invalid signatures/requirements mismatch.  
-* **Network normalization** – CAIP-2 network identifiers are required at adapter boundaries (for example `eip155:8453`, `eip155:84532`, and Solana examples using the genesis hash as the reference, e.g. `solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp` (mainnet), `solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1` (devnet), `solana:4uhcVJyU9pJkvQyS88uRDiswHXSCkY3z` (testnet)).  
+* **Network normalization** – CAIP-2 network identifiers are required at adapter boundaries (for example `eip155:8453`, `eip155:84532`, and Solana examples using the genesis hash as the reference, e.g. `solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d` (mainnet), `solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG` (devnet), `solana:4uhcVJyU9pJkvQyS88uRDiswHXSCkY3zQawwpjk2NsNY` (testnet)).  
 * **Discovery passthrough (optional)** – if Bazaar is enabled, expose extension metadata to facilitator discovery ingestion rather than implementing a custom discovery protocol in dir2mcp.  
 
 ## Out of scope

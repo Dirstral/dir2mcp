@@ -205,6 +205,9 @@ type ndjsonEmitter struct {
 	out     io.Writer
 }
 
+// corpusSnapshot is a point-in-time summary of the indexed corpus written to
+// corpus.json in the state directory. See corpusIndexing for field semantics,
+// including the sentinel value used for unavailable counters.
 type corpusSnapshot struct {
 	Timestamp    string           `json:"ts"`
 	Indexing     corpusIndexing   `json:"indexing"`
@@ -214,6 +217,10 @@ type corpusSnapshot struct {
 	CacheableFor string           `json:"cacheable_for,omitempty"`
 }
 
+// corpusIndexing holds indexing progress counters. Representations,
+// ChunksTotal, and EmbeddedOK carry -1 when not available — for example on
+// the ListFiles-only fallback path where those metrics cannot be derived from
+// the store. Consumers should treat -1 as "unknown", not as an error.
 type corpusIndexing struct {
 	Mode            string `json:"mode"`
 	Running         bool   `json:"running"`

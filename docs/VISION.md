@@ -177,7 +177,7 @@ Required fields:
 - `model` (string): selected model identifier
 - `version` (string): connector or model version string
 - `latency_ms` (number; integer or float accepted): end-to-end latency in **milliseconds** (fractional values allowed to represent sub‑millisecond timings, e.g. `0.45`).  Implementations reporting sub‑ms precision should round or truncate consistently; values must be `>= 0`.
-- `trace_or_request_id` (string): request correlation or request identifier.  UUID‑v4 is **preferred** and should be used when available (e.g. `550e8400-e29b-41d4-a716-446655440000`), but arbitrary strings are allowed if a UUID cannot be generated (e.g. `req-12345`).  The connector **must** accept non‑UUID values and simply record them as provided; it may log or normalize the value but should not reject the metadata.  Consumers should tolerate non‑UUID identifiers but are encouraged to treat UUIDs specially for tracing and de‑duplication.
+- `trace_or_request_id` (string): request correlation or request identifier.  Connectors **should** generate UUID‑v4 identifiers when possible (e.g. `550e8400-e29b-41d4-a716-446655440000`) but **may** generate arbitrary strings if a UUID cannot be generated (e.g. `req-12345`).  Consumers **must** accept non‑UUID identifiers and record them as provided but are encouraged to treat UUIDs specially for tracing and de‑duplication.  Connectors may log or normalize the generated value for internal purposes but must include the final identifier in the returned metadata envelope.
 Optional fields:
 - `token_or_compute_usage` (object): usage counters
 	- `input_tokens` (number, `>= 0`) optional
@@ -403,7 +403,17 @@ Baseline requirements:
 - `--public` must enable configurable rate limits by default (requests/minute + burst), with explicit override only
 - retrieval-first outputs (no bulk export by default)
 - provenance and inspection tools (`open_file`)
-- secret-aware exclusions with concrete controls: pattern-based regex detection for API keys/tokens, optional `.gitignore`-style path excludes, and default exclusion patterns that users can override; `open_file` must honor these exclusions
+- secret-aware exclusions with concrete controls:
+    - pattern-based regex detection for API keys/tokens.  The spec should either reference an established secret-detection source (e.g. the pattern sets used by [truffleHog](https://github.com/trufflesecurity/trufflehog) or [gitleaks](https://github.com/zricethezav/gitleaks)) or ship a small starter list of regular expressions for common secret types.  Example starter patterns might include:
+        - AWS access keys: `AKIA[0-9A-Z]{16}` / `ASIA[0-9A-Z]{16}`
+        - OAuth/JWT-like tokens: `[A-Za-z0-9\-_]{20,}`
+        - Generic API keys: `(?i)(?:api[_-]?key)["'`]?\s*[:=]\s*[A-Za-z0-9\-_=]{16,}`
+        - Private key headers: `-----BEGIN (?:RSA|EC|DSA) PRIVATE KEY-----`
+      Implementers may extend, replace or override the provided patterns as needed; users must be able to supply their own regexes and completely disable the built‑in list if desired.
+    - optional `.gitignore`-style path excludes (directories or filenames that should never be readable).
+    - default exclusion patterns that users can override (e.g. `**/*.pem`, `**/*.env`, `**/node_modules/**`).
+  `open_file` must honor all of these exclusions when serving content.
+  Patterns and path filters are expected to be configurable at startup and modifiable via the API, so hosting software can layer additional rules.
 - basic request logging (optional) for debugging and metering later
 - optional immutable audit logging for regulated environments (accessor identity, timestamp, file/path, action), especially for use case #2.
 - immutability mechanism: append-only `AuditService` emits to pluggable `AuditSink` backends (local file with cryptographic chaining/Merkle roots, external SIEM, or WORM storage).
@@ -426,7 +436,11 @@ Baseline requirements:
 	- per-record integrity: HMAC-SHA256 (keyed chaining) or ECDSA P-256 signatures
 	- key management: keys generated/stored in KMS/HSM, offline root key for trust anchor, automated key rotation policy with key identifiers
 	- output record fields must include at least: `record`, `timestamp`, `identity`, `signature_or_hmac`, `parent_hash`, `merkle_root`
-	- verification tooling must support recomputing per-record HMAC/signatures and Merkle roots; provide CLI verification workflows (for example `dir2mcp audit verify --sink <sink> --from <ts> --to <ts>`) for forensics and compliance checks
+	- verification tooling must support recomputing per-record HMAC/signatures and Merkle roots; provide CLI verification workflows for forensics and compliance checks. Example:
+
+    ```bash
+    dir2mcp audit verify --sink <sink> --from <ts> --to <ts>
+    ```
 - regulated deployments (use case #2) must default to `audit.failMode=closed`; any exception allowing `queue` requires documented policy approval, strict `audit.queueSize`/`audit.retryPolicy` limits, and explicit operational sign-off.
 - prompt-injection posture: retrieved text is untrusted context, not instructions
 

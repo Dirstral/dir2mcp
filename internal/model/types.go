@@ -226,19 +226,22 @@ func (s Stats) MarshalJSON() ([]byte, error) {
 		s.DocCounts = make(map[string]int64)
 	}
 	// Use an alias to strip methods from CorpusStats, then anonymously embed it
-	// so json encoding flattens all corpus fields automatically.
-	type corpusStatsFields CorpusStats
+	// so json encoding flattens all corpus fields automatically.  The alias is
+	// exported (capitalized) to avoid any risk of encoding/json treating an
+	// unexported anonymous field as ignored when reflecting on the temporary
+	// struct.
+	type CorpusStatsFields CorpusStats
 	type plain struct {
 		Root            string `json:"root"`
 		StateDir        string `json:"state_dir"`
 		ProtocolVersion string `json:"protocol_version"`
-		corpusStatsFields
+		CorpusStatsFields
 	}
 	a := plain{
 		Root:              s.Root,
 		StateDir:          s.StateDir,
 		ProtocolVersion:   s.ProtocolVersion,
-		corpusStatsFields: corpusStatsFields(s.CorpusStats),
+		CorpusStatsFields: CorpusStatsFields(s.CorpusStats),
 	}
 	return json.Marshal(a)
 }

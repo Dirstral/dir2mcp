@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"dir2mcp/internal/config"
 	"dir2mcp/tests/testutil"
@@ -102,6 +103,29 @@ func TestSaveFile_WritesNonSecretYAML(t *testing.T) {
 	}
 	if strings.Contains(text, "super-secret") || strings.Contains(text, "another-secret") {
 		t.Fatalf("saved yaml must not include secret values, got:\n%s", text)
+	}
+}
+
+func TestSaveFile_RejectsInvalidConfig(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, ".dir2mcp.yaml")
+
+	cfg := config.Default()
+	cfg.SessionInactivityTimeout = -1 * time.Second
+	if err := config.SaveFile(path, cfg); err == nil {
+		t.Fatal("expected error saving invalid config, got nil")
+	} else if !strings.Contains(err.Error(), "validate config") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// also test that max lifetime shorter than inactivity triggers validation
+	cfg = config.Default()
+	cfg.SessionInactivityTimeout = 10 * time.Minute
+	cfg.SessionMaxLifetime = 5 * time.Minute
+	if err := config.SaveFile(path, cfg); err == nil {
+		t.Fatal("expected error when max lifetime < inactivity timeout")
+	} else if !strings.Contains(err.Error(), "validate config") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

@@ -62,8 +62,8 @@ func TestCORS_PreflightReturns204(t *testing.T) {
 	if !strings.Contains(aceh, protocol.MCPSessionHeader) {
 		t.Fatalf("Access-Control-Expose-Headers=%q must contain %s", aceh, protocol.MCPSessionHeader)
 	}
-	if !strings.Contains(aceh, "X-MCP-Session-Expired") {
-		t.Fatalf("Access-Control-Expose-Headers=%q must contain X-MCP-Session-Expired", aceh)
+	if !strings.Contains(aceh, protocol.MCPSessionExpiredHeader) {
+		t.Fatalf("Access-Control-Expose-Headers=%q must contain %s", aceh, protocol.MCPSessionExpiredHeader)
 	}
 }
 

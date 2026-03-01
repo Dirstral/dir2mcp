@@ -228,7 +228,7 @@ func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
 			w.Header().Set("Access-Control-Allow-Headers", fmt.Sprintf("Content-Type, Authorization, %s, %s, PAYMENT-SIGNATURE", protocol.MCPProtocolVersionHeader, protocol.MCPSessionHeader))
-			w.Header().Set("Access-Control-Expose-Headers", protocol.MCPSessionHeader+", PAYMENT-REQUIRED, PAYMENT-RESPONSE, X-MCP-Session-Expired")
+			w.Header().Set("Access-Control-Expose-Headers", protocol.MCPSessionHeader+", PAYMENT-REQUIRED, PAYMENT-RESPONSE, "+protocol.MCPSessionExpiredHeader)
 			w.Header().Set("Access-Control-Max-Age", "86400")
 			w.Header().Set("Vary", "Origin")
 		}
@@ -372,7 +372,7 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 		if ok, reason := s.hasActiveSession(sessionID, time.Now()); !ok {
 			// optional diagnostic header
 			if reason != "" {
-				w.Header().Set("X-MCP-Session-Expired", reason)
+				w.Header().Set(protocol.MCPSessionExpiredHeader, reason)
 			}
 			writeError(w, http.StatusNotFound, id, -32001, "session not found", protocol.ErrorCodeSessionNotFound, false)
 			return
