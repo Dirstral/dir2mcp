@@ -33,12 +33,15 @@ var requiredTools = []string{
 }
 
 var autoApprove = map[string]bool{
-	protocol.ToolNameSearch:    true,
-	protocol.ToolNameAsk:       true,
-	protocol.ToolNameAskAudio:  true,
-	protocol.ToolNameOpenFile:  true,
-	protocol.ToolNameListFiles: true,
-	protocol.ToolNameStats:     true,
+	protocol.ToolNameSearch:           true,
+	protocol.ToolNameAsk:              true,
+	protocol.ToolNameAskAudio:         true,
+	protocol.ToolNameOpenFile:         true,
+	protocol.ToolNameListFiles:        true,
+	protocol.ToolNameStats:            true,
+	protocol.ToolNameTranscribe:       true,
+	protocol.ToolNameAnnotate:         true,
+	protocol.ToolNameTranscribeAndAsk: true,
 }
 
 func Run(ctx context.Context, opts Options) error {
