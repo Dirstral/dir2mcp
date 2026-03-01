@@ -15,7 +15,13 @@ import (
 	"dir2mcp/internal/model"
 )
 
-var transcriptTimestampRe = regexp.MustCompile(`^\s*\[?(\d{1,2}):(\d{2})(?::(\d{2}))?\]?\s*(.*)$`)
+// transcriptTimestampBracketedRe matches leading timestamps in [mm:ss] or
+// [hh:mm:ss] form.
+var transcriptTimestampBracketedRe = regexp.MustCompile(`^\s*\[(\d{1,2}):(\d{2})(?::(\d{2}))?\]\s*(.*)$`)
+
+// transcriptTimestampBareRe matches leading timestamps in mm:ss or hh:mm:ss
+// form without brackets.
+var transcriptTimestampBareRe = regexp.MustCompile(`^\s*(\d{1,2}):(\d{2})(?::(\d{2}))?(?:\s+|$)(.*)$`)
 
 const (
 	// RepTypeRawText is the representation type for raw text content
@@ -242,7 +248,12 @@ func chunkOCRByPages(content string) []chunkSegment {
 }
 
 func chunkTranscriptByTime(content string) []chunkSegment {
-	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
+	// normalize line endings just like NormalizeUTF8 does; this ensures both
+	// "\r\n" and lone "\r" are converted to "\n" before we split.  we
+	// also salvage any invalid UTF-8 sequences, although the transcript
+	// generator normally produces valid UTF-8.
+	normalized := string(normalizeUTF8([]byte(content)))
+	lines := strings.Split(normalized, "\n")
 	type transcriptSegment struct {
 		startMS int
 		text    string
@@ -314,15 +325,25 @@ func chunkTranscriptByTime(content string) []chunkSegment {
 }
 
 func parseTranscriptTimestamp(line string) (int, string, bool) {
-	m := transcriptTimestampRe.FindStringSubmatch(line)
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" {
+		return 0, "", false
+	}
+
+	m := transcriptTimestampBracketedRe.FindStringSubmatch(trimmed)
+	if len(m) != 5 {
+		m = transcriptTimestampBareRe.FindStringSubmatch(trimmed)
+	}
 	if len(m) != 5 {
 		return 0, "", false
 	}
+
 	hours := 0
 	minutes := 0
 	seconds := 0
 	var err error
 	if m[3] == "" {
+		// format was mm:ss
 		minutes, err = strconv.Atoi(m[1])
 		if err != nil {
 			return 0, "", false
@@ -335,6 +356,7 @@ func parseTranscriptTimestamp(line string) (int, string, bool) {
 			return 0, "", false
 		}
 	} else {
+		// format was hh:mm:ss
 		hours, err = strconv.Atoi(m[1])
 		if err != nil {
 			return 0, "", false
@@ -487,6 +509,18 @@ func chunkTextByChars(content string, maxChars, overlapChars, minChars int) []ch
 // ChunkTextByChars splits text content using the same policy as ingestion.
 func ChunkTextByChars(content string, maxChars, overlapChars, minChars int) []ChunkSegment {
 	raw := chunkTextByChars(content, maxChars, overlapChars, minChars)
+	out := make([]ChunkSegment, 0, len(raw))
+	for _, seg := range raw {
+		out = append(out, ChunkSegment(seg))
+	}
+	return out
+}
+
+// ChunkTranscriptByTime is an exported helper wrapping chunkTranscriptByTime and
+// converting the unexported segment type to the public ChunkSegment.  It is
+// primarily provided so that tests can exercise the chunking logic directly.
+func ChunkTranscriptByTime(content string) []ChunkSegment {
+	raw := chunkTranscriptByTime(content)
 	out := make([]ChunkSegment, 0, len(raw))
 	for _, seg := range raw {
 		out = append(out, ChunkSegment(seg))

@@ -283,9 +283,18 @@ func (s *memoryStore) UpsertRepresentation(_ context.Context, rep model.Represen
 }
 
 func (s *memoryStore) InsertChunkWithSpans(_ context.Context, chunk model.Chunk, spans []model.Span) (int64, error) {
+	// assign a deterministic ID before storing, mirroring the behavior of
+	// UpsertRepresentation above. This ensures that any tests examining the
+	// returned identifier or verifying relationships between chunks and
+	// spans will see consistent values.
+	chunk.ChunkID = uint64(len(s.chunks) + 1)
+
+	// store the chunk with its ID and append spans in sequence; the span
+	// records themselves don’t hold the chunk ID, but callers may rely on the
+	// returned ID to correlate the two.
 	s.chunks = append(s.chunks, chunk)
 	s.spans = append(s.spans, spans...)
-	return int64(len(s.chunks)), nil
+	return int64(chunk.ChunkID), nil
 }
 
 func (s *memoryStore) SoftDeleteChunksFromOrdinal(_ context.Context, _ int64, _ int) error {

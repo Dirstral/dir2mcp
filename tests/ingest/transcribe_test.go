@@ -29,6 +29,7 @@ func (f *fakeTranscriber) Transcribe(_ context.Context, _ string, _ []byte) (str
 }
 
 func TestGenerateTranscriptRepresentation_PersistsTimeChunks(t *testing.T) {
+	t.Parallel()
 	stateDir := t.TempDir()
 	st := &fakeIngestStore{}
 	svc := ingest.NewService(config.Config{StateDir: stateDir}, st)
@@ -165,9 +166,14 @@ type staticEmbedder struct {
 	vec []float32
 }
 
-func (e *staticEmbedder) Embed(context.Context, string, []string) ([][]float32, error) {
-	out := make([][]float32, 1)
-	out[0] = append([]float32(nil), e.vec...)
+// Embed returns one fixed vector per input text. The method copies the
+// underlying vector for each element of texts so callers can safely modify
+// the returned slices without affecting the mock's stored vector.
+func (e *staticEmbedder) Embed(ctx context.Context, model string, texts []string) ([][]float32, error) {
+	out := make([][]float32, len(texts))
+	for i := range texts {
+		out[i] = append([]float32(nil), e.vec...)
+	}
 	return out, nil
 }
 
