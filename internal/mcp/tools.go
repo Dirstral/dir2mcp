@@ -1465,12 +1465,30 @@ func (s *Server) readDocumentContent(relPath string) ([]byte, error) {
 	if normalized == "." || normalized == ".." || strings.HasPrefix(normalized, "../") || filepath.IsAbs(relPath) {
 		return nil, model.ErrPathOutsideRoot
 	}
+func (s *Server) readDocumentContent(relPath string) ([]byte, error) {
+	rootAbs, err := filepath.Abs(strings.TrimSpace(s.cfg.RootDir))
+	if err != nil {
+		return nil, err
+	}
+	rootReal, err := filepath.EvalSymlinks(rootAbs)
+	if err != nil {
+		return nil, err
+	}
+	normalized := filepath.ToSlash(filepath.Clean(strings.TrimSpace(relPath)))
+	if normalized == "." || normalized == ".." || strings.HasPrefix(normalized, "../") || filepath.IsAbs(relPath) {
+		return nil, model.ErrPathOutsideRoot
+	}
 	absPath := filepath.Join(rootAbs, filepath.FromSlash(normalized))
-	rel, err := filepath.Rel(rootAbs, absPath)
+	targetReal, err := filepath.EvalSymlinks(absPath)
+	if err != nil {
+		return nil, err
+	}
+	rel, err := filepath.Rel(rootReal, targetReal)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return nil, model.ErrPathOutsideRoot
 	}
-	return os.ReadFile(absPath)
+	return os.ReadFile(targetReal)
+}
 }
 
 func (s *Server) newMistralClient() (*mistral.Client, *toolExecutionError) {
