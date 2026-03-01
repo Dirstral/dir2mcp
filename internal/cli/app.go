@@ -1128,7 +1128,12 @@ func parseAskOptions(args []string) (askOptions, error) {
 
 	fs := flag.NewFlagSet("ask", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	fs.IntVar(&opts.k, "k", opts.k, "number of results (1-50)")
+	fs.IntVar(
+		&opts.k,
+		"k",
+		opts.k,
+		fmt.Sprintf("number of results (<=0 defaults to %d, max %d)", mcp.DefaultSearchK, mcp.MaxSearchK),
+	)
 	fs.StringVar(&opts.mode, "mode", opts.mode, "answer|search_only")
 	fs.StringVar(&opts.index, "index", opts.index, "auto|text|code|both")
 	fs.StringVar(&opts.pathPrefix, "path-prefix", "", "optional path prefix filter")
@@ -1145,8 +1150,8 @@ func parseAskOptions(args []string) (askOptions, error) {
 	if opts.k <= 0 {
 		opts.k = mcp.DefaultSearchK
 	}
-	if opts.k > 50 {
-		return askOptions{}, errors.New("k must be <= 50")
+	if opts.k > mcp.MaxSearchK {
+		return askOptions{}, fmt.Errorf("k must be <= %d", mcp.MaxSearchK)
 	}
 
 	opts.mode = strings.ToLower(strings.TrimSpace(opts.mode))
