@@ -20,6 +20,13 @@ const (
 	DefaultGeminiEmbedModel = "gemini-embedding-001"
 	// DefaultOmniEmbedModel mirrors internal/omniembed.DefaultModel.
 	DefaultOmniEmbedModel = "omniembed"
+	// DefaultTEIModel mirrors internal/tei.DefaultModel. A TEI server serves
+	// exactly one model and its native requests carry no model field, so this
+	// is the identity label recorded when the profile names none; operators
+	// SHOULD set embed_text_model to the served model id so the identity
+	// (SPEC 8.1.4) names it. The endpoint is always in the identity for this
+	// kind (no shipped default base_url), which is the fence that matters.
+	DefaultTEIModel = "tei"
 )
 
 // KindDefaultEmbedModel returns the embed model an adapter of kind k sends on
@@ -36,6 +43,8 @@ func KindDefaultEmbedModel(k Kind) string {
 		return DefaultGeminiEmbedModel
 	case KindOmniEmbed:
 		return DefaultOmniEmbedModel
+	case KindTEI:
+		return DefaultTEIModel
 	default:
 		return ""
 	}

@@ -228,14 +228,17 @@ type TokenEmbedding struct {
 // context. The pipeline type-asserts the active Embedder against this interface,
 // mirroring the MultimodalEmbedder / StructuredTranscriber optional-capability
 // pattern; an embedder that does NOT implement it makes late chunking fall back
-// to today's chunk-then-embed (see latechunk.Decide). No shipped provider
-// (Mistral/OpenAI/Cohere/Gemini) returns token embeddings today — this interface
-// is the seam a future self-hosted token-embedding backend (e.g. TEI/Infinity)
-// plugs into.
+// to chunk-then-embed (see latechunk.Decide). The first shipped implementation
+// is internal/tei (a self-hosted Hugging Face Text Embeddings Inference server
+// on its native surface, SPEC 8.1.1/8.1.9); the hosted kinds (Mistral, OpenAI,
+// Cohere, Gemini) return pooled vectors only and do not implement it.
 //
 // Vectors returned here MUST be comparable to those from Embed (same provider/
 // model/dimension/vector space) so a late-chunked corpus and a query embedded via
-// Embed share one space.
+// Embed share one space. A transient failure (network, 429, 5xx) MUST surface as
+// a retryable error, never as a silently degraded result: the worker leaves the
+// chunks pending on a retryable error and falls back to chunk-then-embed only on
+// a non-retryable one (SPEC 8.1.9).
 type TokenEmbedder interface {
 	Embedder
 	// EmbedDocumentTokens returns the per-token contextualized embeddings for
@@ -389,4 +392,27 @@ type RepresentationStore interface {
 	InsertChunkWithSpans(ctx context.Context, chunk Chunk, spans []Span) (int64, error)
 	SoftDeleteChunksFromOrdinal(ctx context.Context, repID int64, fromOrdinal int) error
 	WithTx(ctx context.Context, fn func(tx RepresentationStore) error) error
+}
+
+// RepresentationTextStore is an OPTIONAL capability of a RepresentationStore:
+// it persists a representation's whole document text (SPEC §5.2
+// `representation_texts`, §8.1.9), the string every chunk's rune span
+// (Chunk.RuneStart/RuneEnd) indexes into. Ingest type-asserts the store (and
+// the transaction handle WithTx supplies) against it and writes the text only
+// while late chunking is enabled, so a corpus with the mode off carries no
+// duplicate of its text. A store that lacks the capability cannot serve the
+// late-chunking pooling path; the embedding worker reports that loudly rather
+// than embedding chunk-then-embed under an identity that says otherwise.
+type RepresentationTextStore interface {
+	UpsertRepresentationText(ctx context.Context, repID int64, text string) error
+}
+
+// RepresentationTextReader is the read half of the late-chunking inputs
+// (SPEC §8.1.9): the embedding worker type-asserts its chunk source against it
+// to fetch the document text of every representation in a batch. ok is false
+// when no text was persisted for repID (a representation written with the mode
+// off, or before the table existed), which the worker treats as a per-chunk
+// error with a reindex remediation, never as a reason to embed chunk-then-embed.
+type RepresentationTextReader interface {
+	RepresentationText(ctx context.Context, repID int64) (text string, ok bool, err error)
 }

@@ -109,6 +109,16 @@ func builtinProfiles() map[string]providerProfileYAML {
 		// rerank auto-selection over the hosted cohere path; reach it via
 		// rerank.provider: colbert.
 		"colbert": {Kind: "colbert", BaseURL: "${COLBERT_BASE_URL}"},
+		// tei: self-hosted Hugging Face Text Embeddings Inference on its NATIVE
+		// surface (dir2mcp#565, SPEC 8.1.1/8.1.9): the first embed kind that
+		// exposes token-level embeddings, so the only one that can serve
+		// ingest.late_chunking. Credential-less by default (no api_key);
+		// operators point base_url (and SHOULD set embed_text_model to the
+		// served model id, so the embed identity names it) via a providers:
+		// entry or the TEI_BASE_URL env default. Excluded from builtinPrecedence
+		// (like `local`/`omniembed`) so it never silently wins embed
+		// auto-selection; reach it via model.embed.provider: tei.
+		"tei": {Kind: "tei", BaseURL: "${TEI_BASE_URL}"},
 	}
 }
 

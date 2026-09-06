@@ -866,6 +866,11 @@ func NewService(cfg config.Config, store model.Store) (*Service, error) {
 		// The raw-text gate and read enforce the CONFIGURED cap, from the one
 		// resolver, not a hard-coded 10 MiB (#830).
 		svc.repGen.SetMaxFileBytes(ResolvedMaxFileBytes(cfg))
+		// Late chunking (SPEC §8.1.9): persist each text representation's
+		// document text so the embedding worker can pool chunks from one
+		// whole-document token embedding. Off by default; nothing extra is
+		// written then.
+		svc.repGen.SetLateChunking(cfg.IngestLateChunking)
 	} else {
 		// #398/#364: the shipped store always satisfies model.RepresentationStore
 		// (enforced by a compile-time guard in the cli package). If a
@@ -5927,7 +5932,7 @@ func (s *Service) StoreAnnotationRepresentations(ctx context.Context, doc model.
 		if upsertErr != nil {
 			return fmt.Errorf("upsert annotation json representation: %w", upsertErr)
 		}
-		if upsertErr := s.repGen.upsertChunksForRepresentationWithStore(ctx, tx, jsonRepID, "text", chunkTextByChars(jsonText, annotationChunkSize, annotationChunkOverlap, annotationChunkMinSize), quarantineDecision{}); upsertErr != nil {
+		if upsertErr := s.repGen.upsertChunksForRepresentationWithStoreDoc(ctx, tx, jsonRepID, "text", chunkTextByChars(jsonText, annotationChunkSize, annotationChunkOverlap, annotationChunkMinSize), quarantineDecision{}, jsonText); upsertErr != nil {
 			return fmt.Errorf("persist annotation json chunks: %w", upsertErr)
 		}
 
@@ -5952,7 +5957,7 @@ func (s *Service) StoreAnnotationRepresentations(ctx context.Context, doc model.
 		if upsertErr != nil {
 			return fmt.Errorf("upsert annotation text representation: %w", upsertErr)
 		}
-		if upsertErr := s.repGen.upsertChunksForRepresentationWithStore(ctx, tx, textRepID, "text", chunkTextByChars(flattened, annotationChunkSize, annotationChunkOverlap, annotationChunkMinSize), quarantineDecision{}); upsertErr != nil {
+		if upsertErr := s.repGen.upsertChunksForRepresentationWithStoreDoc(ctx, tx, textRepID, "text", chunkTextByChars(flattened, annotationChunkSize, annotationChunkOverlap, annotationChunkMinSize), quarantineDecision{}, flattened); upsertErr != nil {
 			return fmt.Errorf("persist annotation text chunks: %w", upsertErr)
 		}
 		return nil

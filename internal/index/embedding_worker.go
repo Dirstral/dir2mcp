@@ -53,22 +53,18 @@ type EmbeddingWorker struct {
 	// not text) are exempt; their size is governed by the provider's byte ceiling.
 	MaxInputRunes int
 
-	// LateChunking is the resolved value of config.IngestLateChunking (issue
-	// #332). It records the operator's intent to use the late-chunking path
-	// (embed whole documents, mean-pool token vectors per chunk span) when the
-	// configured Embedder implements model.TokenEmbedder.
-	//
-	// NOT-YET-WIRED (issue #446): the production embed loop does not yet run the
-	// pooling path — the whole-doc-embed + per-chunk mean-pool needs per-document
-	// rune spans and the source document text, neither of which the per-chunk
-	// ChunkTasks the worker leases from NextPending carry today. Until that
-	// plumbing lands the worker embeds chunk-by-chunk regardless of this flag, so
-	// the one-time decision log (logLateChunkDecisionOnce) says so honestly and
-	// never claims the path is "active". Default false: the worker behaves
-	// byte-for-byte as before. The pure embed/mean-pool step already lives in
-	// internal/latechunk; the worker holds the resolved capability gate
-	// (latechunk.Decide) so the decision and any fallback are observable
-	// end-to-end.
+	// LateChunking is the resolved value of config.IngestLateChunking (SPEC
+	// 8.1.9; issues #332/#446/#565). When it is on AND the configured Embedder
+	// implements model.TokenEmbedder (latechunk.Decide), EmbedAndIndex runs the
+	// pooling path: every text chunk of a batch is grouped by representation,
+	// the representation's document text (model.RepresentationTextReader on
+	// Source) is embedded ONCE through EmbedDocumentTokens, and each chunk's
+	// vector is the L2-normalized mean of the token vectors inside its rune span
+	// (latechunk.EmbedDocument). A chunk the path cannot place (no rune span, no
+	// document text) is marked failed with a reindex remediation rather than
+	// embedded chunk-then-embed under a "pooled" identity. Default false: the
+	// worker behaves byte-for-byte as before. With the flag on but a plain
+	// Embedder the decision falls back and the one-time log says so.
 	LateChunking bool
 
 	// lateChunkLogged guards the one-time late-chunking decision log so the
@@ -174,7 +170,12 @@ func buildEmbedBatch(tasks []model.ChunkTask) (validTasks []model.ChunkTask, inp
 // text chunks go through Embedder.Embed, media chunks (SPEC 8.1.7) through
 // MultimodalEmbedder.EmbedMedia after their bytes are read from RootDir.
 // Both kinds share one model + vector space.
-func (w *EmbeddingWorker) embedTasks(ctx context.Context, modelName string, validTasks []model.ChunkTask) ([][]float32, error) {
+//
+// lc is the batch's late-chunking state (SPEC 8.1.9), nil when the pooling path
+// is inactive. When set, text chunks are pooled per representation from one
+// whole-document token embedding first (poolLateChunkGroups), and only the
+// chunks that path hands back go through Embed.
+func (w *EmbeddingWorker) embedTasks(ctx context.Context, modelName string, validTasks []model.ChunkTask, lc *lateChunkBatch) ([][]float32, error) {
 	vectors := make([][]float32, len(validTasks))
 
 	// cache is scoped to this single embedTasks invocation so sibling chunks of
@@ -186,7 +187,6 @@ func (w *EmbeddingWorker) embedTasks(ctx context.Context, modelName string, vali
 	defer cache.cleanup()
 
 	textIdx := make([]int, 0, len(validTasks))
-	textInputs := make([]string, 0, len(validTasks))
 	mediaIdx := make([]int, 0)
 	mediaItems := make([]model.MediaInput, 0)
 	for i, t := range validTasks {
@@ -200,41 +200,13 @@ func (w *EmbeddingWorker) embedTasks(ctx context.Context, modelName string, vali
 			continue
 		}
 		textIdx = append(textIdx, i)
-		// EmbedInput, not Text: under contextual retrieval (SPEC §8.1.8) the
-		// embedder receives `context + "\n\n" + chunk` while the chunk's stored,
-		// displayed and CITED text stays raw (#403). With the feature off (the
-		// default) EmbedInput IS Text, byte-for-byte.
-		textInputs = append(textInputs, t.EmbedInput())
 	}
 
-	if len(textInputs) > 0 {
-		v, err := w.Embedder.Embed(ctx, modelName, model.EmbedDocument, textInputs)
-		if err != nil {
-			return nil, err
-		}
-		if len(v) != len(textInputs) {
-			return nil, fmt.Errorf("%w: embedding vector count mismatch", ErrFatal)
-		}
-		for k, idx := range textIdx {
-			vectors[idx] = v[k]
-		}
+	if err := w.embedTextTasks(ctx, modelName, validTasks, textIdx, vectors, lc); err != nil {
+		return nil, err
 	}
-
-	if len(mediaItems) > 0 {
-		me, ok := w.Embedder.(model.MultimodalEmbedder)
-		if !ok {
-			return nil, fmt.Errorf("%w: embedder %T does not support media (multimodal) embedding", ErrFatal, w.Embedder)
-		}
-		v, err := me.EmbedMedia(ctx, modelName, model.EmbedDocument, mediaItems)
-		if err != nil {
-			return nil, err
-		}
-		if len(v) != len(mediaItems) {
-			return nil, fmt.Errorf("%w: embedding vector count mismatch", ErrFatal)
-		}
-		for k, idx := range mediaIdx {
-			vectors[idx] = v[k]
-		}
+	if err := w.embedMediaTasks(ctx, modelName, mediaItems, mediaIdx, vectors); err != nil {
+		return nil, err
 	}
 	// Last gate before the index (issue #703). Every shipped adapter already
 	// validates its own response, but the worker accepts ANY model.Embedder —
@@ -247,6 +219,67 @@ func (w *EmbeddingWorker) embedTasks(ctx context.Context, modelName string, vali
 		return nil, err
 	}
 	return vectors, nil
+}
+
+// embedTextTasks fills vectors for the text tasks at textIdx. With the
+// late-chunking batch active (SPEC 8.1.9) the chunks are pooled per
+// representation first (poolLateChunkGroups) and only the ones that path hands
+// back (no token overlapped their span, or their document's token embedding
+// failed non-transiently) go through Embed; otherwise every text chunk goes
+// through Embed, byte-for-byte as before.
+func (w *EmbeddingWorker) embedTextTasks(ctx context.Context, modelName string, validTasks []model.ChunkTask, textIdx []int, vectors [][]float32, lc *lateChunkBatch) error {
+	if lc != nil && lc.dec.Active && len(textIdx) > 0 {
+		plainIdx, err := w.poolLateChunkGroups(ctx, modelName, lc, validTasks, textIdx, vectors)
+		if err != nil {
+			return err
+		}
+		textIdx = plainIdx
+	}
+	if len(textIdx) == 0 {
+		return nil
+	}
+	textInputs := make([]string, 0, len(textIdx))
+	for _, idx := range textIdx {
+		// EmbedInput, not Text: under contextual retrieval (SPEC §8.1.8) the
+		// embedder receives `context + "\n\n" + chunk` while the chunk's stored,
+		// displayed and CITED text stays raw (#403). With the feature off (the
+		// default) EmbedInput IS Text, byte-for-byte.
+		textInputs = append(textInputs, validTasks[idx].EmbedInput())
+	}
+	v, err := w.Embedder.Embed(ctx, modelName, model.EmbedDocument, textInputs)
+	if err != nil {
+		return err
+	}
+	if len(v) != len(textInputs) {
+		return fmt.Errorf("%w: embedding vector count mismatch", ErrFatal)
+	}
+	for k, idx := range textIdx {
+		vectors[idx] = v[k]
+	}
+	return nil
+}
+
+// embedMediaTasks fills vectors for the media tasks at mediaIdx through the
+// embedder's MultimodalEmbedder capability (SPEC 8.1.7). A no-op with no media.
+func (w *EmbeddingWorker) embedMediaTasks(ctx context.Context, modelName string, mediaItems []model.MediaInput, mediaIdx []int, vectors [][]float32) error {
+	if len(mediaItems) == 0 {
+		return nil
+	}
+	me, ok := w.Embedder.(model.MultimodalEmbedder)
+	if !ok {
+		return fmt.Errorf("%w: embedder %T does not support media (multimodal) embedding", ErrFatal, w.Embedder)
+	}
+	v, err := me.EmbedMedia(ctx, modelName, model.EmbedDocument, mediaItems)
+	if err != nil {
+		return err
+	}
+	if len(v) != len(mediaItems) {
+		return fmt.Errorf("%w: embedding vector count mismatch", ErrFatal)
+	}
+	for k, idx := range mediaIdx {
+		vectors[idx] = v[k]
+	}
+	return nil
 }
 
 // corpusFS resolves the active corpus filesystem, defaulting to a local
@@ -847,7 +880,17 @@ func (w *EmbeddingWorker) EmbedAndIndex(ctx context.Context, indexKind string, t
 	if len(validTasks) == 0 {
 		return 0, nil
 	}
-	return w.embedIndexBatch(ctx, indexKind, modelName, validTasks, labels)
+	// Late chunking (SPEC 8.1.9): resolve the pooling inputs once per batch and
+	// drop, with a reindex remediation, any text chunk the path cannot place. A
+	// nil batch means the mode is inactive and nothing below changes.
+	validTasks, labels, lc, err := w.prepareLateChunkBatch(ctx, validTasks, labels)
+	if err != nil {
+		return 0, err
+	}
+	if len(validTasks) == 0 {
+		return 0, nil
+	}
+	return w.embedIndexBatch(ctx, indexKind, modelName, validTasks, labels, lc)
 }
 
 // defaultMaxEmbedInputRunes is the built-in per-input rune cap used when
@@ -912,10 +955,11 @@ func (w *EmbeddingWorker) skipOversizeText(ctx context.Context, tasks []model.Ch
 // failure (not a provider input rejection) and keeps the existing whole-batch
 // behavior so genuine misconfiguration stays loud rather than degrading into a
 // silent per-chunk failure storm.
-func (w *EmbeddingWorker) embedIndexBatch(ctx context.Context, indexKind, modelName string, validTasks []model.ChunkTask, labels []uint64) (int, error) {
-	// Text chunks embed via Embed; media chunks (SPEC 8.1.7) embed via
-	// EmbedMedia. embedTasks returns vectors aligned 1:1 with validTasks.
-	vectors, err := w.embedTasks(ctx, modelName, validTasks)
+func (w *EmbeddingWorker) embedIndexBatch(ctx context.Context, indexKind, modelName string, validTasks []model.ChunkTask, labels []uint64, lc *lateChunkBatch) (int, error) {
+	// Text chunks embed via Embed (or the late-chunking pooling path when lc is
+	// set, SPEC 8.1.9); media chunks (SPEC 8.1.7) embed via EmbedMedia.
+	// embedTasks returns vectors aligned 1:1 with validTasks.
+	vectors, err := w.embedTasks(ctx, modelName, validTasks, lc)
 	if err != nil {
 		// A transient error could be a network timeout, rate-limit response, or
 		// context cancellation. Returning it without marking the chunks failed
@@ -933,7 +977,7 @@ func (w *EmbeddingWorker) embedIndexBatch(ctx context.Context, indexKind, modelN
 		// whole-batch failure behavior below.
 		if len(validTasks) > 1 && !errors.Is(err, ErrFatal) &&
 			store.ClassifyError(err) != store.ErrorCategoryAuth {
-			return w.bisectEmbedBatch(ctx, indexKind, modelName, validTasks, labels, err)
+			return w.bisectEmbedBatch(ctx, indexKind, modelName, validTasks, labels, lc, err)
 		}
 		// Single item, a fatal batch error, or an auth batch: mark failed
 		// (existing behavior).
@@ -996,12 +1040,12 @@ func (w *EmbeddingWorker) embedIndexBatch(ctx context.Context, indexKind, modelN
 // post-embed write failures from indexChunks/markEmbeddedWithRetry (the run loop
 // must see them or the affected chunks re-embed in a tight loop).
 // Returns the total number of chunks successfully indexed across both halves.
-func (w *EmbeddingWorker) bisectEmbedBatch(ctx context.Context, indexKind, modelName string, validTasks []model.ChunkTask, labels []uint64, batchErr error) (int, error) {
+func (w *EmbeddingWorker) bisectEmbedBatch(ctx context.Context, indexKind, modelName string, validTasks []model.ChunkTask, labels []uint64, lc *lateChunkBatch, batchErr error) (int, error) {
 	w.logf("embed batch of %d failed non-transiently (%s); bisecting to isolate poison chunk(s) so healthy siblings still embed [kind=%s]",
 		len(validTasks), store.SanitizeReason(batchErr.Error()), indexKind)
 	mid := len(validTasks) / 2
-	nLeft, errLeft := w.embedIndexBatch(ctx, indexKind, modelName, validTasks[:mid], labels[:mid])
-	nRight, errRight := w.embedIndexBatch(ctx, indexKind, modelName, validTasks[mid:], labels[mid:])
+	nLeft, errLeft := w.embedIndexBatch(ctx, indexKind, modelName, validTasks[:mid], labels[:mid], lc)
+	nRight, errRight := w.embedIndexBatch(ctx, indexKind, modelName, validTasks[mid:], labels[mid:], lc)
 	return nLeft + nRight, mergeBisectErrors(errLeft, errRight)
 }
 
@@ -1279,18 +1323,15 @@ func (w *EmbeddingWorker) LateChunkDecision() latechunk.Decision {
 // logLateChunkDecisionOnce emits a single informational line describing the
 // late-chunking decision the first time the worker runs with the feature
 // enabled, so an operator who turned on ingest.late_chunking can see whether it
-// actually engaged or fell back to chunk-then-embed (issue #332: never fail
-// silently). It is a no-op when late chunking is disabled (the default), so
-// stock runs log nothing new.
+// actually engaged or fell back to chunk-then-embed (SPEC 8.1.9: the fallback and
+// its reason are logged once per run; issue #332: never fail silently). It is a
+// no-op when late chunking is disabled (the default), so stock runs log nothing
+// new.
 //
-// Honesty note (issue #446): even when the capability gate is satisfied
-// (dec.Active — the embedder exposes token embeddings), the production embed
-// loop does NOT yet run the whole-doc-embed + mean-pool path, so the worker
-// still embeds chunk-then-embed. The log therefore MUST NOT claim the path is
-// "active" in that case (the previous message lied): it reports that the
-// capability is present but the pooling path is not yet wired, so the fallback
-// is in effect. When the token-pooling path is wired, restore an "enabled and
-// active" line here (and branch the embed loop on dec.Active).
+// The "active" line is earned, not asserted (issue #446): it is printed only
+// when the decision is Active, and an Active decision is exactly the condition
+// under which EmbedAndIndex runs the pooling path (prepareLateChunkBatch /
+// poolLateChunkGroups), so the log and the embed loop can no longer disagree.
 func (w *EmbeddingWorker) logLateChunkDecisionOnce() {
 	if !w.LateChunking || w.lateChunkLogged {
 		return
@@ -1298,7 +1339,7 @@ func (w *EmbeddingWorker) logLateChunkDecisionOnce() {
 	w.lateChunkLogged = true
 	dec := w.LateChunkDecision()
 	if dec.Active {
-		w.logf("late chunking: enabled and embedder %T exposes token embeddings, but the token-pooling path is not yet wired (issue #446); still embedding chunk-then-embed", w.Embedder)
+		w.logf("late chunking: enabled and active (embedder %T exposes token embeddings); embedding whole documents and mean-pooling each chunk's rune span (SPEC 8.1.9)", w.Embedder)
 		return
 	}
 	w.logf("late chunking: enabled but falling back to chunk-then-embed (%s; embedder %T)", dec.Fallback, w.Embedder)

@@ -251,6 +251,16 @@ type Chunk struct {
 	// (§8.1.4): it is per-chunk state within one contextual corpus. Empty
 	// normalizes to EmbeddingModeDisabled.
 	EmbeddingMode string
+	// RuneStart and RuneEnd are the chunk's half-open rune span
+	// [RuneStart, RuneEnd) in its representation's document text (SPEC §5.3
+	// `rune_start`/`rune_end`, §8.1.9; dir2mcp #565). Offsets count Unicode code
+	// points, so they line up with the []rune windows the ingest chunkers cut
+	// and with the rune offsets a model.TokenEmbedder reports. The late-chunking
+	// pooling step reads them to select the tokens of each chunk. A span is
+	// KNOWN when RuneStart >= 0 && RuneEnd > RuneStart; any other value (the zero
+	// value, or -1/-1 as persisted for pre-feature and media rows) means unknown.
+	RuneStart int
+	RuneEnd   int
 }
 
 // Per-chunk contextualization states (SPEC §5.3 `embedding_mode` / §8.1.8).
@@ -1069,6 +1079,34 @@ type ChunkTask struct {
 	// context can never leak into a quote (citation faithfulness, #403). Empty
 	// unless contextual retrieval produced a context for this chunk.
 	Context string
+	// RepID is the chunk's representation (SPEC §5.3 `rep_id`). The embedding
+	// worker groups a batch by it under late chunking (SPEC §8.1.9) so every
+	// chunk of one representation pools from ONE whole-document token embedding,
+	// and it keys the document-text fetch. 0 when the producer did not supply it.
+	RepID int64
+	// RuneStart and RuneEnd are the chunk's half-open rune span in its
+	// representation's document text (SPEC §5.3 `rune_start`/`rune_end`), the
+	// window the late-chunking pooling step selects token vectors from. Known
+	// iff HasRuneSpan; -1/-1 (or the zero value) means unknown, which under an
+	// active token embedder is a per-chunk error with a reindex remediation
+	// rather than a silent chunk-then-embed vector (SPEC §8.1.9).
+	RuneStart int
+	RuneEnd   int
+}
+
+// HasRuneSpan reports whether the task carries a known rune span into its
+// representation's document text: a non-negative start and an end past it. The
+// zero value and the persisted -1/-1 sentinel both report false.
+func (t ChunkTask) HasRuneSpan() bool {
+	return t.RuneStart >= 0 && t.RuneEnd > t.RuneStart
+}
+
+// RuneSpanKnown reports whether a chunk's persisted rune span is usable, with
+// the same rule ChunkTask.HasRuneSpan applies: a non-negative start and an end
+// past it. The store uses it to decide whether to persist a span or the -1/-1
+// "unknown" sentinel.
+func (c Chunk) RuneSpanKnown() bool {
+	return c.RuneStart >= 0 && c.RuneEnd > c.RuneStart
 }
 
 // contextualEmbedSeparator joins a generated context to its chunk in the embed

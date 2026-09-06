@@ -7,19 +7,20 @@
 //
 // The path is provider/model-dependent: it requires the configured embedder to
 // expose token-level embeddings via the optional model.TokenEmbedder capability.
-// No shipped provider implements that today, so Decide returns a fallback in the
-// stock build and the pipeline keeps chunk-then-embed. This package contains the
-// pure, deterministic, credential-free logic (capability gate + mean-pool) so a
-// future self-hosted token-embedding backend plugs in, and so the behavior is
+// The first shipped implementation is internal/tei (a self-hosted Hugging Face
+// Text Embeddings Inference server, SPEC 8.1.1/8.1.9); every hosted kind returns
+// pooled vectors only, so for them Decide returns a fallback and the pipeline
+// keeps chunk-then-embed. This package contains the pure, deterministic,
+// credential-free logic (capability gate + mean-pool) so the behavior is
 // unit-testable with a fake embedder.
 //
-// Wiring status (issue #446): this library is complete and tested, but the
-// embedding worker does NOT yet call EmbedDocument on the active path — doing so
-// needs the source document text and per-chunk rune spans that the worker's
-// per-chunk tasks do not carry today, so wiring it is more than a drop-in. Until
-// then the worker treats an Active decision as observability only (an honest
-// "not yet wired" log) and still embeds chunk-then-embed; it does not silently
-// claim the pooling path ran.
+// Wiring (issues #446/#565): the embedding worker (internal/index) calls
+// EmbedDocument on the active path. It groups a batch's text chunks by
+// representation, reads the representation's persisted document text and each
+// chunk's persisted rune span (SPEC §5.2 representation_texts, §5.3
+// rune_start/rune_end), and pools one whole-document token embedding per
+// representation. A chunk the worker cannot place is failed with a reindex
+// remediation, never embedded chunk-then-embed under a "pooled" identity.
 package latechunk
 
 import (

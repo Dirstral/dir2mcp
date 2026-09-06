@@ -25,6 +25,7 @@ import (
 	"github.com/dirstral/dir2mcp/internal/omniembed"
 	"github.com/dirstral/dir2mcp/internal/openai"
 	"github.com/dirstral/dir2mcp/internal/provider"
+	"github.com/dirstral/dir2mcp/internal/tei"
 	"github.com/dirstral/dir2mcp/internal/whisperapi"
 )
 
@@ -171,6 +172,15 @@ func Embedder(p provider.Profile) (model.Embedder, error) {
 		// model.MultimodalEmbedder so the embedding worker can embed media
 		// chunks (SPEC 8.1.7) off-API. Credential-optional (private box).
 		c := omniembed.NewClient(p.BaseURL, p.APIKey)
+		if p.EmbedTextModel != "" {
+			c.DefaultEmbedModel = p.EmbedTextModel
+		}
+		return c, nil
+	case provider.KindTEI:
+		// Self-hosted Hugging Face TEI on its native surface (dir2mcp#565).
+		// Returns a model.TokenEmbedder so the embedding worker can run the
+		// late-chunking pooling path (SPEC 8.1.9). Credential-optional.
+		c := tei.NewClient(p.BaseURL, p.APIKey)
 		if p.EmbedTextModel != "" {
 			c.DefaultEmbedModel = p.EmbedTextModel
 		}
