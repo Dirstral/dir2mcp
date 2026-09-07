@@ -172,9 +172,10 @@ func buildEmbedBatch(tasks []model.ChunkTask) (validTasks []model.ChunkTask, inp
 // Both kinds share one model + vector space.
 //
 // lc is the batch's late-chunking state (SPEC 8.1.9), nil when the pooling path
-// is inactive. When set, text chunks are pooled per representation from one
-// whole-document token embedding first (poolLateChunkGroups), and only the
-// chunks that path hands back go through Embed.
+// is inactive. When set it already holds the pooled vector of every chunk whose
+// document token-embedded successfully (prepareLateChunkBatch ran the token
+// embedding before anything was indexed), so only the chunks it has no vector
+// for — a span no token overlapped — go through Embed.
 func (w *EmbeddingWorker) embedTasks(ctx context.Context, modelName string, validTasks []model.ChunkTask, lc *lateChunkBatch) ([][]float32, error) {
 	vectors := make([][]float32, len(validTasks))
 
@@ -222,16 +223,21 @@ func (w *EmbeddingWorker) embedTasks(ctx context.Context, modelName string, vali
 }
 
 // embedTextTasks fills vectors for the text tasks at textIdx. With the
-// late-chunking batch active (SPEC 8.1.9) the chunks are pooled per
-// representation first (poolLateChunkGroups) and only the ones that path hands
-// back (no token overlapped their span, or their document's token embedding
-// failed non-transiently) go through Embed; otherwise every text chunk goes
-// through Embed, byte-for-byte as before.
+// late-chunking batch active (SPEC 8.1.9) each chunk takes the pooled vector
+// prepareLateChunkBatch already produced for it, and only a chunk that has none
+// — its span overlapped no token — goes through Embed; a document whose token
+// embedding failed non-transiently is not in the batch at all (its chunks were
+// marked failed). Without the batch every text chunk goes through Embed,
+// byte-for-byte as before.
 func (w *EmbeddingWorker) embedTextTasks(ctx context.Context, modelName string, validTasks []model.ChunkTask, textIdx []int, vectors [][]float32, lc *lateChunkBatch) error {
 	if lc != nil && lc.dec.Active && len(textIdx) > 0 {
-		plainIdx, err := w.poolLateChunkGroups(ctx, modelName, lc, validTasks, textIdx, vectors)
-		if err != nil {
-			return err
+		plainIdx := make([]int, 0, len(textIdx))
+		for _, idx := range textIdx {
+			if v, ok := lc.pooledVector(validTasks[idx].Metadata.ChunkID); ok {
+				vectors[idx] = v
+				continue
+			}
+			plainIdx = append(plainIdx, idx)
 		}
 		textIdx = plainIdx
 	}
@@ -883,7 +889,7 @@ func (w *EmbeddingWorker) EmbedAndIndex(ctx context.Context, indexKind string, t
 	// Late chunking (SPEC 8.1.9): resolve the pooling inputs once per batch and
 	// drop, with a reindex remediation, any text chunk the path cannot place. A
 	// nil batch means the mode is inactive and nothing below changes.
-	validTasks, labels, lc, err := w.prepareLateChunkBatch(ctx, validTasks, labels)
+	validTasks, labels, lc, err := w.prepareLateChunkBatch(ctx, modelName, validTasks, labels)
 	if err != nil {
 		return 0, err
 	}
@@ -1330,8 +1336,8 @@ func (w *EmbeddingWorker) LateChunkDecision() latechunk.Decision {
 //
 // The "active" line is earned, not asserted (issue #446): it is printed only
 // when the decision is Active, and an Active decision is exactly the condition
-// under which EmbedAndIndex runs the pooling path (prepareLateChunkBatch /
-// poolLateChunkGroups), so the log and the embed loop can no longer disagree.
+// under which EmbedAndIndex runs the pooling path (prepareLateChunkBatch), so
+// the log and the embed loop can no longer disagree.
 func (w *EmbeddingWorker) logLateChunkDecisionOnce() {
 	if !w.LateChunking || w.lateChunkLogged {
 		return

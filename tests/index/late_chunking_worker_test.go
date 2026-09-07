@@ -92,6 +92,10 @@ type lcWordEmbedder struct {
 	tokenCalls  int
 	tokenDocs   []string
 	tokenErr    error
+	// failRepText, when set, makes EmbedDocumentTokens fail non-transiently for
+	// exactly that document text, so a test can fail ONE representation of a
+	// batch and watch its siblings still pool.
+	failRepText string
 }
 
 func (e *lcWordEmbedder) Embed(_ context.Context, _ string, _ model.EmbedRole, inputs []string) ([][]float32, error) {
@@ -109,6 +113,11 @@ func (e *lcWordEmbedder) EmbedDocumentTokens(_ context.Context, _ string, _ mode
 	e.tokenDocs = append(e.tokenDocs, inputs...)
 	if e.tokenErr != nil {
 		return nil, e.tokenErr
+	}
+	for _, doc := range inputs {
+		if e.failRepText != "" && doc == e.failRepText {
+			return nil, &model.ProviderError{Code: "TEI_FAILED", Message: "Validation: rejected", Retryable: false, StatusCode: http.StatusUnprocessableEntity}
+		}
 	}
 	out := make([]model.TokenEmbedding, len(inputs))
 	for i, doc := range inputs {
@@ -383,10 +392,13 @@ func TestWorker_LateChunkActive_TransientTokenErrorLeavesPending(t *testing.T) {
 	}
 }
 
-// TestWorker_LateChunkActive_NonTransientTokenErrorFallsBackPerDocument pins
-// the sanctioned fallback: a NON-transient token-embedding failure (a 422 for
-// this document) embeds that document's chunks chunk-then-embed and logs it.
-func TestWorker_LateChunkActive_NonTransientTokenErrorFallsBackPerDocument(t *testing.T) {
+// TestWorker_LateChunkActive_NonTransientTokenErrorFailsTheDocument pins SPEC
+// 8.1.9 "Failure classification" as revised: a NON-transient token-embedding
+// failure of one document is a TERMINAL failure of every chunk of that document,
+// never a fall back to chunk-then-embed. No chunk of it may be embedded by any
+// path, no vector may reach the index, and the recorded reason names the cause
+// and the remediation so the chunks can be requeued once it is fixed.
+func TestWorker_LateChunkActive_NonTransientTokenErrorFailsTheDocument(t *testing.T) {
 	emb := &lcWordEmbedder{tokenErr: &model.ProviderError{Code: "TEI_FAILED", Message: "Validation: too long", Retryable: false, StatusCode: http.StatusUnprocessableEntity}}
 	src := &lcTextSource{
 		fakeChunkSource: fakeChunkSource{tasks: []model.ChunkTask{
@@ -401,17 +413,115 @@ func TestWorker_LateChunkActive_NonTransientTokenErrorFallsBackPerDocument(t *te
 	if err != nil {
 		t.Fatalf("RunOnce: %v", err)
 	}
-	if n != 2 || len(src.embedded) != 2 {
-		t.Fatalf("n=%d embedded=%v, want both chunks embedded via the fallback", n, src.embedded)
+	if n != 0 {
+		t.Fatalf("indexed = %d, want 0 (the whole document failed)", n)
 	}
-	if emb.embedCalls != 1 || len(emb.embedInputs) != 2 {
-		t.Fatalf("both chunks must go through one Embed call: calls=%d inputs=%q", emb.embedCalls, emb.embedInputs)
+	if emb.embedCalls != 0 {
+		t.Fatalf("a failed document must NOT fall back to chunk-then-embed: embedInputs=%q", emb.embedInputs)
 	}
-	if !vecClose(ix.vectors[1], []float32{0, 1}) {
-		t.Fatalf("fallback chunk must carry the Embed vector, got %v", ix.vectors[1])
+	if len(ix.vectors) != 0 {
+		t.Fatalf("no vector may reach the index for a failed document: %v", ix.vectors)
 	}
-	if !strings.Contains(buf.String(), "chunk-then-embed") {
-		t.Fatalf("the per-document fallback must be logged: %q", buf.String())
+	if len(src.embedded) != 0 {
+		t.Fatalf("no chunk may be marked embedded: %v", src.embedded)
+	}
+	if len(src.failedLabels) != 2 || src.failedLabels[0] != 1 || src.failedLabels[1] != 2 {
+		t.Fatalf("every chunk of the document must be marked failed, got %v", src.failedLabels)
+	}
+	if !strings.Contains(src.failedReason, "token embedding") || !strings.Contains(src.failedReason, "dir2mcp reindex") {
+		t.Fatalf("reason must name the cause and the remediation: %q", src.failedReason)
+	}
+	if strings.Contains(src.failedReason, "falling back") {
+		t.Fatalf("reason must not describe a fallback: %q", src.failedReason)
+	}
+	if src.failedCategory == "" {
+		t.Fatal("the failure must carry a category (store.ClassifyError)")
+	}
+	if !strings.Contains(buf.String(), "marking its 2 chunk(s) failed") {
+		t.Fatalf("the terminal document failure must be logged: %q", buf.String())
+	}
+}
+
+// TestWorker_LateChunkActive_OneDocumentFailureLeavesSiblingsPooled pins that a
+// document's terminal failure is scoped to that document: another
+// representation in the same batch still pools and indexes normally.
+func TestWorker_LateChunkActive_OneDocumentFailureLeavesSiblingsPooled(t *testing.T) {
+	emb := &lcWordEmbedder{failRepText: "bad document here"}
+	src := &lcTextSource{
+		fakeChunkSource: fakeChunkSource{tasks: []model.ChunkTask{
+			lcTask(1, 7, "alpha beta", 0, 10),
+			lcTask(2, 8, "bad document", 0, 12),
+		}},
+		texts: map[int64]string{7: "alpha beta gamma", 8: "bad document here"},
+	}
+	ix := newCapturingIndex()
+	var buf bytes.Buffer
+	n, err := lcWorker(src, ix, emb, &buf).RunOnce(context.Background(), "text")
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("indexed = %d, want 1 (the healthy document)", n)
+	}
+	if got, want := ix.vectors[1], unit(1.5, 1); !vecClose(got, want) {
+		t.Fatalf("healthy chunk = %v, want pooled %v", got, want)
+	}
+	if _, indexed := ix.vectors[2]; indexed {
+		t.Fatal("the failed document's chunk must not be indexed")
+	}
+	if len(src.failedLabels) != 1 || src.failedLabels[0] != 2 {
+		t.Fatalf("only the failed document's chunk may be marked failed: %v", src.failedLabels)
+	}
+	if emb.embedCalls != 0 {
+		t.Fatalf("no chunk-then-embed fallback anywhere: %q", emb.embedInputs)
+	}
+}
+
+// TestWorker_LateChunkActive_RepresentationsOfOneFilePoolIndependently pins SPEC
+// 8.1.9 "Pooling": the unit is the text REPRESENTATION. Two representations of
+// one file (a raw_text and an extracted_markdown, same rel_path) each embed their
+// OWN persisted text once and pool only their own chunks, so a chunk is never
+// pooled against another representation's text.
+func TestWorker_LateChunkActive_RepresentationsOfOneFilePoolIndependently(t *testing.T) {
+	// rep 7: "alpha beta" -> tokens [1,1] [2,1]; rep 8: "x y z" -> [1,1] [2,1] [3,1].
+	const rawText = "alpha beta"
+	const mdText = "x y z"
+	emb := &lcWordEmbedder{}
+	taskA := lcTask(1, 7, "alpha beta", 0, 10)
+	taskA.Metadata.RepType = "raw_text"
+	taskB := lcTask(2, 8, "y z", 2, 5)
+	taskB.Metadata.RepType = "extracted_markdown"
+	src := &lcTextSource{
+		fakeChunkSource: fakeChunkSource{tasks: []model.ChunkTask{taskA, taskB}},
+		texts:           map[int64]string{7: rawText, 8: mdText},
+	}
+	ix := newCapturingIndex()
+	var buf bytes.Buffer
+	if _, err := lcWorker(src, ix, emb, &buf).RunOnce(context.Background(), "text"); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if emb.tokenCalls != 2 {
+		t.Fatalf("each representation must be token-embedded once: tokenCalls=%d docs=%q", emb.tokenCalls, emb.tokenDocs)
+	}
+	seen := map[string]bool{}
+	for _, d := range emb.tokenDocs {
+		seen[d] = true
+	}
+	if !seen[rawText] || !seen[mdText] {
+		t.Fatalf("each representation must embed its OWN text, got %q", emb.tokenDocs)
+	}
+	// Chunk 1 pools rep 7's tokens 1..2 -> mean [1.5,1]; chunk 2 pools rep 8's
+	// tokens 2..3 -> mean [2.5,1]. Pooling chunk 2 against rep 7's text would
+	// yield [2,1] (only its second token overlaps), so the values separate the
+	// per-representation unit from a shared-document one.
+	if got, want := ix.vectors[1], unit(1.5, 1); !vecClose(got, want) {
+		t.Fatalf("raw_text chunk = %v, want %v from its own text", got, want)
+	}
+	if got, want := ix.vectors[2], unit(2.5, 1); !vecClose(got, want) {
+		t.Fatalf("extracted_markdown chunk = %v, want %v from ITS own text (never the other representation's)", got, want)
+	}
+	if emb.embedCalls != 0 {
+		t.Fatalf("both chunks must pool, not embed: %q", emb.embedInputs)
 	}
 }
 
