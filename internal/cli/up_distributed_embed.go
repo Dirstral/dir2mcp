@@ -116,6 +116,8 @@ func startDistributedEmbedding(
 		CorpusID:      corpusID,
 		SourceKind:    cfg.Source.Kind,
 		EmbedIdentity: identityStr,
+		// One job per document representation under late chunking (SPEC 8.1.9).
+		LateChunking: cfg.IngestLateChunking,
 	}
 
 	workerCfg := embedqueue.Config{
@@ -131,6 +133,7 @@ func startDistributedEmbedding(
 		// being re-enqueued on the next coordinator tick (#709).
 		Status:        chunkSource,
 		EmbedIdentity: identityStr,
+		LateChunking:  cfg.IngestLateChunking,
 		// Lease/embed up to distributedEmbedBatchSize chunks per iteration so the
 		// distributed path batches through the provider like the in-process loop
 		// (one embed call per batch, not per chunk — issue #435). Kept in lockstep

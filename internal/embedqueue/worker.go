@@ -74,6 +74,15 @@ type Config struct {
 	// can never disagree (#708).
 	CorpusID string
 
+	// LateChunking is THIS worker's resolved ingest.late_chunking flag (SPEC
+	// §8.1.9 "Distributed workers"). On, the worker pools per document and MUST
+	// fail a per-chunk job (Job.RepID == 0): token-embedding a whole document for
+	// one chunk would break document ownership and cost one document embed per
+	// chunk. Such a job is returned for redelivery and, on its final delivery,
+	// recorded against the chunk with the reason, so an old per-chunk coordinator
+	// paired with a pooling worker is visible rather than a silent stall.
+	LateChunking bool
+
 	// EmbedIdentity is THIS worker's configured embed identity (SPEC §8.1.4). A
 	// job whose EmbedIdentity differs is rejected (Nacked for redelivery /
 	// dead-lettering) rather than embedded, preserving the single-space invariant
@@ -160,8 +169,11 @@ func (c Config) logf(format string, args ...any) {
 // preparedJob is a leased job that passed per-job validation/identity/kind checks
 // and had its authoritative task loaded — ready to be embedded as part of a batch.
 type preparedJob struct {
-	lease     Lease
-	task      model.ChunkTask
+	lease Lease
+	// tasks holds one task for a per-chunk job and every live chunk of the
+	// representation for a document job (SPEC §8.1.9); they are embedded as one
+	// unit so a document is token-embedded once and its chunks pooled together.
+	tasks     []model.ChunkTask
 	indexKind string
 	embedder  Embedder
 }
@@ -332,6 +344,16 @@ func (cfg Config) servesCorpus(ctx context.Context, lease Lease) bool {
 // the broker's budget, is recorded against the chunk so it stops being re-made.
 func (cfg Config) acceptsJob(ctx context.Context, lease Lease) bool {
 	job := lease.Job
+	// A row that names a representation but no chunk ids is a corrupt document
+	// job (an unreadable chunk_ids column): the coordinator is fine, the row is
+	// not. Name that, rather than the coordinator-upgrade reason a genuine
+	// per-chunk job gets below, so an operator reads the right remediation.
+	if job.RepID > 0 && len(job.ChunkIDs) == 0 {
+		cfg.logf("embedqueue: corrupt document job row for chunk %d (rep %d names no chunk ids); rejecting", job.ChunkID, job.RepID)
+		cfg.rejectJob(ctx, lease, string(store.ErrorCategoryParseError),
+			"corrupt document job row: rep_id is set but chunk_ids is empty or unreadable; the chunk stays pending and the coordinator re-enqueues it after `dir2mcp reindex`")
+		return false
+	}
 	if err := job.Validate(); err != nil {
 		cfg.logf("embedqueue: invalid job for chunk %d: %v", job.ChunkID, err)
 		cfg.rejectJob(ctx, lease, string(store.ErrorCategoryEmbeddingFailure), "invalid embedding job: "+err.Error())
@@ -345,6 +367,16 @@ func (cfg Config) acceptsJob(ctx context.Context, lease Lease) bool {
 			job.ChunkID, job.EmbedIdentity, cfg.EmbedIdentity)
 		cfg.rejectJob(ctx, lease, string(store.ErrorCategoryEmbeddingFailure),
 			"embed identity mismatch: job was enqueued for a different embedding space than any worker in the pool provides")
+		return false
+	}
+	// Document ownership (SPEC §8.1.9 "Distributed workers"): a pooling worker
+	// serves document jobs only. A per-chunk job for a late-chunked corpus came
+	// from a coordinator that does not group, and executing it would token-embed
+	// the whole document for one chunk while another worker may hold the rest.
+	if cfg.LateChunking && !job.IsDocument() {
+		cfg.logf("embedqueue: per-chunk job for chunk %d under late chunking; rejecting (document jobs required, SPEC 8.1.9)", job.ChunkID)
+		cfg.rejectJob(ctx, lease, string(store.ErrorCategoryEmbeddingFailure),
+			"per-chunk embedding job for a late-chunked representation: late chunking requires one job per document representation (SPEC 8.1.9); upgrade the coordinator, then run `dir2mcp reindex`")
 		return false
 	}
 	return true
@@ -364,6 +396,9 @@ func (cfg Config) acceptsJob(ctx context.Context, lease Lease) bool {
 // form (#710).
 func (cfg Config) routeToCurrentAxis(ctx context.Context, lease Lease) (preparedJob, bool) {
 	job := lease.Job
+	if job.IsDocument() {
+		return cfg.routeDocumentJob(ctx, lease)
+	}
 	// A tombstoned/missing chunk is a safe skip (tombstone safety, §8.7.3 / §6.6):
 	// Ack so the job is not redelivered for a chunk that no longer exists.
 	task, hash, err := cfg.Fetcher.ChunkTaskByID(ctx, job.ChunkID)
@@ -384,20 +419,57 @@ func (cfg Config) routeToCurrentAxis(ctx context.Context, lease Lease) (prepared
 		_ = cfg.Broker.Ack(ctx, lease.Token)
 		return preparedJob{}, false
 	}
+	return cfg.withEmbedder(ctx, lease, []model.ChunkTask{task})
+}
 
-	// The axis comes from the TASK, never from the job: the two agree by the time
-	// we get here (supersededReason just proved it), and taking it from the task
-	// is what makes that guarantee structural rather than a convention a later
-	// edit could quietly drop.
-	indexKind := normalizeIndexKind(task.IndexKind)
+// routeDocumentJob loads every chunk a document job names (SPEC §8.1.9
+// "Distributed workers"). A chunk that is gone (tombstoned) or whose
+// representation was rewritten since enqueue (index_kind changed) is skipped:
+// the coordinator will enqueue its current form. A document whose every chunk is
+// gone is Acked as a no-op. A store read error redelivers the whole job, so a
+// transient hiccup never pools a partial document.
+func (cfg Config) routeDocumentJob(ctx context.Context, lease Lease) (preparedJob, bool) {
+	job := lease.Job
+	tasks := make([]model.ChunkTask, 0, len(job.ChunkIDs))
+	for _, id := range job.ChunkIDs {
+		task, _, err := cfg.Fetcher.ChunkTaskByID(ctx, id)
+		if errors.Is(err, model.ErrNotFound) {
+			cfg.logf("embedqueue: chunk %d of rep %d not found / tombstoned; skipping it", id, job.RepID)
+			continue
+		}
+		if err != nil {
+			cfg.logf("embedqueue: fetch chunk %d of rep %d: %v; redelivering the document job", id, job.RepID, err)
+			cfg.rejectJob(ctx, lease, string(store.ClassifyError(err)),
+				"could not read chunk from the shared metadata store: "+err.Error())
+			return preparedJob{}, false
+		}
+		if normalizeIndexKind(task.IndexKind) != normalizeIndexKind(job.IndexKind) {
+			cfg.logf("embedqueue: chunk %d of rep %d is now index_kind %s, job names %s; skipping it", id, job.RepID, task.IndexKind, job.IndexKind)
+			continue
+		}
+		tasks = append(tasks, task)
+	}
+	if len(tasks) == 0 {
+		cfg.logf("embedqueue: document job for rep %d names no live chunk; acking (no-op)", job.RepID)
+		_ = cfg.Broker.Ack(ctx, lease.Token)
+		return preparedJob{}, false
+	}
+	return cfg.withEmbedder(ctx, lease, tasks)
+}
+
+// withEmbedder resolves the axis from the TASKS, never from the job: the two
+// agree by the time we get here, and taking it from the task is what makes that
+// guarantee structural rather than a convention a later edit could quietly drop.
+func (cfg Config) withEmbedder(ctx context.Context, lease Lease, tasks []model.ChunkTask) (preparedJob, bool) {
+	indexKind := normalizeIndexKind(tasks[0].IndexKind)
 	emb, ok := cfg.Embedders[indexKind]
 	if !ok {
-		cfg.logf("embedqueue: no embedder for index_kind %q (chunk %d); rejecting", indexKind, job.ChunkID)
+		cfg.logf("embedqueue: no embedder for index_kind %q (chunk %d); rejecting", indexKind, lease.Job.ChunkID)
 		cfg.rejectJob(ctx, lease, string(store.ErrorCategoryEmbeddingFailure),
 			"no embedder configured for index_kind "+indexKind)
 		return preparedJob{}, false
 	}
-	return preparedJob{lease: lease, task: task, indexKind: indexKind, embedder: emb}, true
+	return preparedJob{lease: lease, tasks: tasks, indexKind: indexKind, embedder: emb}, true
 }
 
 // supersededReason reports whether a leased job still describes the chunk the
@@ -466,7 +538,8 @@ func (cfg Config) failChunk(ctx context.Context, lease Lease, category, reason s
 			"it stays pending and will be re-enqueued", chunkID, lease.Attempts, category)
 		return
 	}
-	if err := cfg.Status.MarkFailedWithCategory(ctx, []uint64{chunkID}, category, store.SanitizeReason(reason)); err != nil {
+	// A document job fails every chunk it names: the failure is the document's.
+	if err := cfg.Status.MarkFailedWithCategory(ctx, lease.Job.AllChunkIDs(), category, store.SanitizeReason(reason)); err != nil {
 		cfg.logf("embedqueue: record terminal failure for chunk %d: %v", chunkID, err)
 		return
 	}
@@ -497,9 +570,9 @@ func (cfg Config) embedGroup(ctx context.Context, indexKind string, group []prep
 	if len(group) == 0 {
 		return
 	}
-	tasks := make([]model.ChunkTask, len(group))
-	for i, pj := range group {
-		tasks[i] = pj.task
+	tasks := make([]model.ChunkTask, 0, len(group))
+	for _, pj := range group {
+		tasks = append(tasks, pj.tasks...)
 	}
 	if _, err := group[0].embedder.EmbedAndIndex(ctx, indexKind, tasks); err != nil {
 		if len(group) == 1 {
@@ -550,7 +623,7 @@ func (cfg Config) liveLeases(group []preparedJob) []preparedJob {
 // chunk still lands (and its store status is corrected) while only the genuinely
 // failing chunk is redelivered / dead-lettered.
 func (cfg Config) embedOne(ctx context.Context, indexKind string, pj preparedJob) {
-	if _, err := pj.embedder.EmbedAndIndex(ctx, indexKind, []model.ChunkTask{pj.task}); err != nil {
+	if _, err := pj.embedder.EmbedAndIndex(ctx, indexKind, pj.tasks); err != nil {
 		cfg.logf("embedqueue: embed chunk %d (%s): %v; redelivering",
 			pj.lease.Job.ChunkID, indexKind, err)
 		cfg.rejectJob(ctx, pj.lease, string(store.ClassifyError(err)), "embedding failed: "+err.Error())

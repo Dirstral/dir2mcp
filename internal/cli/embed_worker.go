@@ -236,6 +236,7 @@ func (a *App) runEmbedWorkerLoop(ctx context.Context, cfg config.Config, global 
 		CorpusID:      corpusID,
 		Status:        chunkSource,
 		EmbedIdentity: identityStr,
+		LateChunking:  cfg.IngestLateChunking,
 		LeaseDuration: opts.leaseDuration,
 		PollInterval:  opts.pollInterval,
 		RetryAfter:    opts.retryAfter,

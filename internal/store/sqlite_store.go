@@ -2929,10 +2929,20 @@ func (s *SQLiteStore) CorpusStats(ctx context.Context) (model.CorpusStats, error
 // idx_chunks_embedded_kind_seek (embedding_status, deleted, index_kind,
 // chunk_id), added by #742, already covers this access path, so no new index.
 func nextPendingQuery(indexKind string, limit int) (string, []any) {
+	return pendingQuery(indexKind, limit, 0)
+}
+
+// pendingQuery is nextPendingQuery with an optional representation filter:
+// repID > 0 restricts the selection to that representation's pending chunks
+// (PendingChunkTasksByRep, SPEC §8.1.9 document jobs). 0 means no filter.
+func pendingQuery(indexKind string, limit int, repID int64) (string, []any) {
 	args := []any{"pending"}
 	kindPredicate := ""
 	if strings.TrimSpace(indexKind) != "" {
 		kindPredicate = " AND c.index_kind = ?"
+	}
+	if repID > 0 {
+		kindPredicate += " AND c.rep_id = ?"
 	}
 	query := `WITH filtered_chunks AS (
 	            SELECT c.chunk_id, c.rel_path, c.doc_type, c.rep_type, c.text, c.text_hash, c.index_kind, c.modality, c.media_ref, c.language,
@@ -2953,11 +2963,32 @@ func nextPendingQuery(indexKind string, limit int) (string, []any) {
 	            SELECT MIN(s.span_id) FROM spans s WHERE s.chunk_id = fc.chunk_id
 	          )
 	          ORDER BY fc.chunk_id`
-	if kindPredicate != "" {
+	if strings.TrimSpace(indexKind) != "" {
 		args = append(args, indexKind)
+	}
+	if repID > 0 {
+		args = append(args, repID)
 	}
 	args = append(args, limit)
 	return query, args
+}
+
+// PendingChunkTasksByRep returns EVERY pending, live chunk of one representation
+// on the given axis ("" for any), ordered by chunk_id, in the same task shape
+// NextPending returns. It is the read the distributed coordinator needs under
+// late chunking (SPEC §8.1.9 "Distributed workers"): one job per representation
+// carrying every pending chunk, not the page NextPending happens to return.
+func (s *SQLiteStore) PendingChunkTasksByRep(ctx context.Context, repID int64, indexKind string) ([]model.ChunkTask, error) {
+	if repID <= 0 {
+		return nil, errors.New("rep_id must be > 0")
+	}
+	db, err := s.ensureDB(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer s.ReleaseDB()
+	query, args := pendingQuery(indexKind, 1<<31-1, repID)
+	return scanPendingTasks(ctx, db, query, args)
 }
 
 // NextPendingQueryForTest returns the SQL one embed batch runs.
@@ -3016,14 +3047,20 @@ func (s *SQLiteStore) NextPending(ctx context.Context, limit int, indexKind stri
 	}
 
 	query, args := nextPendingQuery(indexKind, limit)
+	return scanPendingTasks(ctx, db, query, args)
+}
 
+// scanPendingTasks runs a pendingQuery and projects its rows into ChunkTasks;
+// shared by NextPending and PendingChunkTasksByRep so both load byte-identical
+// tasks.
+func scanPendingTasks(ctx context.Context, db *sql.DB, query string, args []any) ([]model.ChunkTask, error) {
 	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = rows.Close() }()
 
-	tasks := make([]model.ChunkTask, 0, limit)
+	tasks := make([]model.ChunkTask, 0, 32)
 	for rows.Next() {
 		var (
 			chunkID   int64

@@ -93,8 +93,18 @@ func (b *MemBroker) Enqueue(_ context.Context, job Job) error {
 
 // sameJobKey reports whether two jobs name the same unit of work: the same
 // vector axis of the same chunk of the SAME corpus (SPEC §8.7.2).
+//
+// Two DOCUMENT jobs (SPEC §8.1.9) name the same unit of work when they name the
+// same representation on the same axis of the same corpus, whatever their first
+// chunk id: document ownership means one live job per representation.
 func sameJobKey(a, b Job) bool {
-	return a.CorpusID == b.CorpusID && a.ChunkID == b.ChunkID && a.IndexKind == b.IndexKind
+	if a.CorpusID != b.CorpusID || a.IndexKind != b.IndexKind {
+		return false
+	}
+	if a.IsDocument() && b.IsDocument() {
+		return a.RepID == b.RepID
+	}
+	return a.ChunkID == b.ChunkID
 }
 
 // Lease reclaims any expired in-flight jobs, then claims the first pending job

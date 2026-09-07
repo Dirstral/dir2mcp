@@ -5,8 +5,10 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite" // pure-Go SQLite driver (CGO_ENABLED=0, SPEC §6.5)
@@ -111,6 +113,8 @@ CREATE TABLE IF NOT EXISTS embed_jobs (
   span_start_ms INTEGER NOT NULL,
   span_end_ms   INTEGER NOT NULL,
   embed_identity TEXT NOT NULL,
+  rep_id        INTEGER NOT NULL DEFAULT 0,
+  chunk_ids     TEXT NOT NULL DEFAULT '',
   attempts      INTEGER NOT NULL DEFAULT 0,
   state         TEXT NOT NULL DEFAULT 'pending',  -- pending | inflight | dead
   token         TEXT,
@@ -127,7 +131,51 @@ CREATE INDEX IF NOT EXISTS idx_embed_jobs_dedup ON embed_jobs(corpus_id, chunk_i
 	if _, err := b.db.ExecContext(ctx, ddl); err != nil {
 		return fmt.Errorf("embedqueue: migrate broker schema: %w", err)
 	}
+	// Additive columns for document jobs (SPEC §8.1.9); a queue file written by
+	// an earlier build gains them with their defaults, and its rows read back as
+	// per-chunk jobs.
+	for _, stmt := range []string{
+		`ALTER TABLE embed_jobs ADD COLUMN rep_id INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE embed_jobs ADD COLUMN chunk_ids TEXT NOT NULL DEFAULT ''`,
+	} {
+		if _, err := b.db.ExecContext(ctx, stmt); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return fmt.Errorf("embedqueue: migrate broker schema: %w", err)
+		}
+	}
+	// Serves the per-representation dedup probe document jobs run (below); it
+	// must come after the ALTERs because rep_id does not exist on a legacy file
+	// until they ran.
+	if _, err := b.db.ExecContext(ctx,
+		`CREATE INDEX IF NOT EXISTS idx_embed_jobs_rep_dedup ON embed_jobs(corpus_id, rep_id, index_kind, state)`); err != nil {
+		return fmt.Errorf("embedqueue: migrate broker schema: %w", err)
+	}
 	return nil
+}
+
+// encodeChunkIDs renders a document job's chunk ids for the chunk_ids column;
+// empty for a per-chunk job.
+func encodeChunkIDs(ids []uint64) string {
+	if len(ids) == 0 {
+		return ""
+	}
+	raw, err := json.Marshal(ids)
+	if err != nil {
+		return ""
+	}
+	return string(raw)
+}
+
+// decodeChunkIDs parses the chunk_ids column; empty or malformed reads as a
+// per-chunk job (nil).
+func decodeChunkIDs(raw string) []uint64 {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	var ids []uint64
+	if err := json.Unmarshal([]byte(raw), &ids); err != nil {
+		return nil
+	}
+	return ids
 }
 
 // newLeaseToken builds a globally unique lease token: a random 128-bit suffix so
@@ -159,17 +207,35 @@ func (b *SQLiteBroker) Enqueue(ctx context.Context, job Job) error {
 	// rowids: two corpora pointed at one broker file both have a chunk 1, and
 	// without the corpus term the second corpus's enqueue was silently swallowed
 	// by the first corpus's live job (#708).
-	_, err := b.db.ExecContext(ctx, `
-INSERT INTO embed_jobs(corpus_id, source, chunk_id, index_kind, text_hash, modality,
-  rel_path, span_kind, span_page, span_start_ms, span_end_ms, embed_identity, state)
-SELECT ?,?,?,?,?,?,?,?,?,?,?,?, 'pending'
-WHERE NOT EXISTS (
-  SELECT 1 FROM embed_jobs
-   WHERE corpus_id = ? AND chunk_id = ? AND index_kind = ? AND state IN ('pending','inflight')
-)`,
+	//
+	// A DOCUMENT job (SPEC §8.1.9) dedups per REPRESENTATION, not per first
+	// chunk id: the document-ownership rule says no two workers pool chunks of
+	// one representation concurrently, and a job's first chunk can leave pending
+	// while the job is in flight (tombstoned, or failed by a fallback path), so a
+	// second document job for the same representation with a different first
+	// chunk id would otherwise insert and a second worker would token-embed the
+	// same document. The remaining pending chunks are picked up by the next tick
+	// once the live job completes.
+	dedup := `corpus_id = ? AND chunk_id = ? AND index_kind = ?`
+	dedupArgs := []any{job.CorpusID, int64(job.ChunkID), job.IndexKind}
+	if job.IsDocument() {
+		dedup = `corpus_id = ? AND rep_id = ? AND index_kind = ?`
+		dedupArgs = []any{job.CorpusID, job.RepID, job.IndexKind}
+	}
+	args := []any{
 		job.CorpusID, job.Source, int64(job.ChunkID), job.IndexKind, job.TextHash, job.Modality,
 		job.RelPath, job.Span.Kind, job.Span.Page, job.Span.StartMS, job.Span.EndMS, job.EmbedIdentity,
-		job.CorpusID, int64(job.ChunkID), job.IndexKind)
+		job.RepID, encodeChunkIDs(job.ChunkIDs),
+	}
+	args = append(args, dedupArgs...)
+	_, err := b.db.ExecContext(ctx, `
+INSERT INTO embed_jobs(corpus_id, source, chunk_id, index_kind, text_hash, modality,
+  rel_path, span_kind, span_page, span_start_ms, span_end_ms, embed_identity, rep_id, chunk_ids, state)
+SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'pending'
+WHERE NOT EXISTS (
+  SELECT 1 FROM embed_jobs
+   WHERE `+dedup+` AND state IN ('pending','inflight')
+)`, args...)
 	if err != nil {
 		return fmt.Errorf("embedqueue: enqueue: %w", err)
 	}
@@ -268,7 +334,7 @@ func (b *SQLiteBroker) LeaseForCorpus(ctx context.Context, corpusID string, visi
 // cyclomatic budget and the two SELECT variants sit next to each other.
 func (b *SQLiteBroker) claimableJob(ctx context.Context, tx *sql.Tx, corpusID string, nowNS int64) (int64, Job, int, error) {
 	const columns = `id, attempts, corpus_id, source, chunk_id, index_kind, text_hash, modality, rel_path,
-       span_kind, span_page, span_start_ms, span_end_ms, embed_identity`
+       span_kind, span_page, span_start_ms, span_end_ms, embed_identity, rep_id, chunk_ids`
 	query := `SELECT ` + columns + `
   FROM embed_jobs
  WHERE state='pending' AND not_before_ns <= ?
@@ -287,16 +353,18 @@ func (b *SQLiteBroker) claimableJob(ctx context.Context, tx *sql.Tx, corpusID st
 		attempts int
 		job      Job
 		chunkID  int64
+		chunkIDs string
 	)
 	if err := tx.QueryRowContext(ctx, query, args...).Scan(&id, &attempts, &job.CorpusID, &job.Source, &chunkID,
 		&job.IndexKind, &job.TextHash, &job.Modality, &job.RelPath, &job.Span.Kind, &job.Span.Page,
-		&job.Span.StartMS, &job.Span.EndMS, &job.EmbedIdentity); err != nil {
+		&job.Span.StartMS, &job.Span.EndMS, &job.EmbedIdentity, &job.RepID, &chunkIDs); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return 0, Job{}, 0, ErrNoJob
 		}
 		return 0, Job{}, 0, fmt.Errorf("embedqueue: lease select: %w", err)
 	}
 	job.ChunkID = uint64(chunkID)
+	job.ChunkIDs = decodeChunkIDs(chunkIDs)
 	return id, job, attempts, nil
 }
 
