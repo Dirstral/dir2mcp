@@ -706,13 +706,13 @@ PDFs and images are converted to text by an **extractor**, selected with `ingest
 
 | Mode | Behavior |
 |---|---|
-| `auto` (default) | Prefer the local `docling` CLI; else a reachable `docling-serve`; else Mistral OCR; else disabled. |
+| `auto` (default) | Prefer the local `docling` CLI; else a reachable `docling-serve`; else Mistral OCR; else a functional `pandoc` (born-digital formats only); else disabled. |
 | `docling` | Local docling CLI only (fails if not on `PATH`). |
 | `docling-serve` | docling-serve HTTP only; requires a reachable `serve_url` (no fallback). |
 | `mistral` | Mistral OCR only (requires `MISTRAL_API_KEY`). |
 | `off` | No extraction (PDFs/images contribute no extracted text). |
 
-Under `auto`, the fallback cascade is **docling CLI → docling-serve → Mistral OCR → disabled**. The chosen extractor is reported at startup and by `dir2mcp doctor` (e.g. `OCR: mistral-ocr (fallback; docling not found on PATH)`), so the active path is visible rather than inferred per document. Under `auto` the banner also lists the secondary `pandoc` engine on its own `Pandoc:` row, with the reason when it is unavailable (e.g. `Pandoc: unavailable (pandoc not found on PATH; T2 engine for .docx/.odt/.rtf/.epub)`), because a missing pandoc is what leaves those formats uncovered.
+Under `auto`, the fallback cascade is **docling CLI → docling-serve → Mistral OCR → pandoc → disabled**. `pandoc` is normally the *secondary* T2 engine, additive to whichever primary resolves; it becomes the **primary** only when none of the three resolve and a functional pandoc is on `PATH` (`OCR: pandoc (no docling/OCR; pandoc covers born-digital formats)`). That state still leaves PDFs and images uncovered, because pandoc reads born-digital formats only. The chosen extractor is reported at startup and by `dir2mcp doctor` (e.g. `OCR: mistral-ocr (fallback; docling not found on PATH)`), so the active path is visible rather than inferred per document. Under `auto` the banner also lists the `pandoc` engine on its own `Pandoc:` row whenever it is secondary, with the reason when it is unavailable (e.g. `Pandoc: unavailable (pandoc not found on PATH; T2 engine for .docx/.odt/.rtf/.epub)`), because a missing pandoc is what leaves those formats uncovered.
 
 **Best-available *per format* (§7.4.B.1).** Selection is capability-aware: for each format, `auto` picks the highest-fidelity *active* engine that can actually read it, so no document is silently handed to an engine that can't (e.g. `.docx`/`.tiff` go to docling but are never routed to Mistral OCR, which can't import them), and a higher-fidelity engine is never bypassed. HTML is a dual-path format: when a structured engine (docling) is active it is routed there to preserve headings/tables/links (`extracted_markdown` with structured spans); otherwise it falls back to flat `raw_text` — so HTML is never dropped and never regresses when docling is absent.
 
@@ -723,7 +723,8 @@ Under `auto`, the fallback cascade is **docling CLI → docling-serve → Mistra
 An extractor counts as *available* only when it can actually **run**, not merely when it is configured (spec 0.15.0 §7.4). The `docling` CLI is functional-checked (a quick `docling --version` probe, cached for the run); a binary that is present but broken — e.g. a venv with ABI-incompatible dependencies — is treated as **unavailable**, exactly as an unreachable `serve_url` makes `docling-serve` unavailable. Under `auto` a broken docling is skipped and the cascade continues; under explicit `docling` it disables extraction (no silent fallback). `dir2mcp doctor` reports the real state instead of a false "healthy".
 
 **Troubleshooting:**
-- *`OCR: disabled`* — no extractor is available: install docling (or use the `-full` track), point `serve_url` at a docling-serve container, or set `MISTRAL_API_KEY`.
+- *`OCR: disabled`* — no extractor is available, and no functional pandoc either: install docling (or use the `-full` track), point `serve_url` at a docling-serve container, or set `MISTRAL_API_KEY`.
+- *`OCR: pandoc (no docling/OCR; ...)`* — the cascade found no docling and no Mistral OCR, so pandoc became the primary. `.docx/.odt/.rtf/.epub` are covered; PDFs and images are not, and the `Coverage` section names them.
 - *docling-serve rejected at startup (`CONFIG_INVALID`)* — `extractor: docling-serve` needs a non-empty, reachable `serve_url`; it never silently falls back to the CLI.
 - *Switching extractors across re-indexes* is safe — docling and Mistral OCR both produce the same `extracted_markdown` representation; only the richness of span provenance (structured `region` spans vs. `page` spans) differs.
 - *docling import errors / "two versions" of a Python package* — the docling CLI subprocess runs with a sanitized environment (`PYTHONPATH`/`PYTHONHOME` removed, `PYTHONNOUSERSITE=1`), so a conda install or stray `PYTHONPATH` in your shell can't shadow the bundled venv's pinned packages. With the `-full` track the venv is fully version-locked.

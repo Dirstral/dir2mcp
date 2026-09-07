@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/dirstral/dir2mcp/internal/cli"
+	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/model"
 	"github.com/dirstral/dir2mcp/internal/store"
 )
@@ -311,5 +313,63 @@ func TestRoutingDecisions_NoDuplicateRowWhenPandocIsPrimary(t *testing.T) {
 	}
 	if ocr != 1 || pandocRows != 0 {
 		t.Fatalf("rows: OCR=%d Pandoc=%d, want OCR=1 Pandoc=0: %+v", ocr, pandocRows, decisions)
+	}
+}
+
+// A daemon CHILD prints no banner, so the coverage probe must not run there at
+// all (#949 review). Two harms if it does: the count is spent on output nobody
+// reads, and a failed count writes "warning: extraction coverage unavailable"
+// to the child's stderr, which the parent has redirected into server.log, where
+// it reads as a server fault rather than as the missing banner line it is.
+// The counter records whether it was asked, which is what discriminates: the
+// banner is absent in a child either way.
+type askCountingCounter struct {
+	counts map[string]int64
+	asked  int
+}
+
+func (c *askCountingCounter) ExtractableExtensionCounts(_ context.Context, _ string) (map[string]int64, error) {
+	c.asked++
+	return c.counts, nil
+}
+
+func TestStartupCoverage_DaemonChildNeverRunsTheProbe_949(t *testing.T) {
+	cfg := config.Config{}
+	cfg.IngestExtractor = "mistral" // reads no .odt, so the counts below are uncovered
+
+	// Foreground: the probe runs and the verdict names the gap.
+	fg := &askCountingCounter{counts: map[string]int64{".odt": 2}}
+	app := cli.NewAppWithIO(io.Discard, io.Discard)
+	got := app.StartupExtractionCoverageForTest(context.Background(), fg, cfg, false, false, io.Discard)
+	if fg.asked != 1 {
+		t.Fatalf("foreground: store asked %d time(s), want 1", fg.asked)
+	}
+	if len(got) == 0 {
+		t.Fatal("foreground: the verdict must name the uncovered format")
+	}
+
+	// Daemon child: a verified handshake makes this process the child, and the
+	// probe must not touch the store.
+	stateDir := t.TempDir()
+	childEnv, cleanup, err := cli.DaemonChildHandshakeEnvForTest(stateDir)
+	if err != nil {
+		t.Fatalf("prepare daemon handshake: %v", err)
+	}
+	defer cleanup()
+	for _, entry := range childEnv {
+		name, value, ok := strings.Cut(entry, "=")
+		if !ok {
+			t.Fatalf("malformed child env entry %q", entry)
+		}
+		t.Setenv(name, value)
+	}
+	child := &askCountingCounter{counts: map[string]int64{".odt": 2}}
+	childApp := cli.NewAppWithIO(io.Discard, io.Discard)
+	got = childApp.StartupExtractionCoverageForTest(context.Background(), child, cfg, false, false, io.Discard)
+	if child.asked != 0 {
+		t.Fatalf("daemon child: store asked %d time(s), want 0: the child prints no banner", child.asked)
+	}
+	if len(got) != 0 {
+		t.Fatalf("daemon child: verdict = %v, want empty", got)
 	}
 }

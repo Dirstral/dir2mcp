@@ -274,7 +274,7 @@ func (a *App) runUp(ctx context.Context, opts upOptions) int {
 	// §7.7 startup coverage: what the durable record already knows is uncovered.
 	// Read before the ingest worker starts so the banner reflects the store as it
 	// stood at start (the scan may be re-recording those rows concurrently).
-	coverage := startupExtractionCoverage(runCtx, st, cfg, opts, logSink)
+	coverage := a.startupExtractionCoverage(runCtx, st, cfg, opts, logSink)
 	stdinQuitCh := a.installInteractionForUp(cancel, cfg, connection, auth, opts, nonInteractiveMode, coverage)
 
 	ingestErrCh := make(chan error, 1)

@@ -87,8 +87,13 @@ func computeExtractionCoverage(ctx context.Context, counter extractableExtension
 // store cannot count extensions; a read failure is reported on stderr rather
 // than swallowed, because a coverage report that fails quietly is the silence
 // §7.7 forbids.
-func startupExtractionCoverage(ctx context.Context, st interface{}, cfg config.Config, opts upOptions, stderr io.Writer) extractionCoverage {
-	if opts.jsonOutput || opts.quiet {
+//
+// It is skipped entirely in a daemon CHILD, which prints no banner at all:
+// running the count there would spend a query on output nobody reads and would
+// write its failure warning into the redirected server.log, where it reads as a
+// server fault rather than as the missing banner line it actually is.
+func (a *App) startupExtractionCoverage(ctx context.Context, st interface{}, cfg config.Config, opts upOptions, stderr io.Writer) extractionCoverage {
+	if opts.jsonOutput || opts.quiet || a.isDaemonChild() {
 		return extractionCoverage{}
 	}
 	counter, ok := st.(extractableExtensionCounter)
@@ -121,4 +126,14 @@ func printCoverageSection(out io.Writer, s styles, cov extractionCoverage) {
 		s.dim(fmt.Sprintf("(%d document(s); no active engine reads them; recorded as skipped or error, never as indexed)", cov.Docs)))))
 	writeln(out, s.kv("Fix", cov.Remedy))
 	writeln(out)
+}
+
+// StartupExtractionCoverageForTest exposes the banner's coverage probe to the
+// external `tests/cli` package, which cannot call an unexported method. It
+// returns the uncovered extensions of the verdict; an empty result means the
+// probe was skipped or found nothing. Whether the store was queried at all is
+// observable on the caller's counter, which is the point for the daemon-child
+// case (#949 review).
+func (a *App) StartupExtractionCoverageForTest(ctx context.Context, st interface{}, cfg config.Config, jsonOutput, quiet bool, stderr io.Writer) []string {
+	return a.startupExtractionCoverage(ctx, st, cfg, upOptions{globalOptions: globalOptions{jsonOutput: jsonOutput, quiet: quiet}}, stderr).Uncovered
 }
