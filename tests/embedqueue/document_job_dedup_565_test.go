@@ -146,6 +146,23 @@ func TestBroker_IncomingJobChoosesTheDedupKey(t *testing.T) {
 			if st, _ = broker.Stats(ctx); st.Pending != 2 {
 				t.Fatalf("a second document job for rep 7 must dedup: %+v", st)
 			}
+			if err := broker.Enqueue(ctx, documentJob(8, 9)); err != nil {
+				t.Fatalf("enqueue document job rep 8: %v", err)
+			}
+			if st, _ = broker.Stats(ctx); st.Pending != 3 {
+				t.Fatalf("rep 8 document job must enqueue: %+v", st)
+			}
+			// Reverse order: a live DOCUMENT job whose first chunk is 9 must swallow an
+			// incoming per-chunk job for chunk 9 on both brokers, because the SQLite
+			// probe compares chunk_id against every live row and a document job's
+			// chunk_id column is its first chunk id. Rep 8 (first chunk 9) is live
+			// from above.
+			if err := broker.Enqueue(ctx, embedqueue.Job{CorpusID: "c", Source: "local", ChunkID: 9, IndexKind: "text", EmbedIdentity: lcIdentity}); err != nil {
+				t.Fatalf("enqueue per-chunk 9: %v", err)
+			}
+			if st, _ = broker.Stats(ctx); st.Pending != 3 {
+				t.Fatalf("a per-chunk job for the first chunk of a live document job must dedup on both brokers: %+v", st)
+			}
 		})
 	}
 }

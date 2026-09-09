@@ -98,11 +98,14 @@ func (b *MemBroker) Enqueue(_ context.Context, job Job) error {
 // same representation on the same axis of the same corpus, whatever their first
 // chunk id: document ownership means one live job per representation.
 //
-// The INCOMING job (b) chooses the key, exactly as the SQLite broker's dedup
-// probe does: a document job is keyed by its representation, a per-chunk job by
-// its chunk id. Keying on the existing job instead let a live per-chunk job for
-// chunk 5 swallow a document job for the representation whose first chunk is 5,
-// so the two brokers disagreed and the memory broker deferred the document.
+// The INCOMING job chooses the key, exactly as the SQLite broker's dedup probe
+// does: a document job is keyed by its representation (against live document
+// jobs only), a per-chunk job by its chunk id against ANY live job, because a
+// document job's chunk_id column is its first chunk id and the SQLite probe does
+// not exclude it. Keying on the existing job instead let a live per-chunk job for
+// chunk 5 swallow a document job whose first chunk is 5, so the two brokers
+// disagreed and the memory broker deferred the document; excluding document jobs
+// from the per-chunk probe made them disagree the other way round.
 func sameJobKey(existing, incoming Job) bool {
 	if existing.CorpusID != incoming.CorpusID || existing.IndexKind != incoming.IndexKind {
 		return false
@@ -110,7 +113,7 @@ func sameJobKey(existing, incoming Job) bool {
 	if incoming.IsDocument() {
 		return existing.IsDocument() && existing.RepID == incoming.RepID
 	}
-	return !existing.IsDocument() && existing.ChunkID == incoming.ChunkID
+	return existing.ChunkID == incoming.ChunkID
 }
 
 // Lease reclaims any expired in-flight jobs, then claims the first pending job
