@@ -235,18 +235,37 @@ type TokenEmbedding struct {
 //
 // Vectors returned here MUST be comparable to those from Embed (same provider/
 // model/dimension/vector space) so a late-chunked corpus and a query embedded via
-// Embed share one space. A transient failure (network, 429, 5xx) MUST surface as
-// a retryable error, never as a silently degraded result: the worker leaves the
-// chunks pending on a retryable error and falls back to chunk-then-embed only on
-// a non-retryable one (SPEC 8.1.9).
+// Embed share one space. Failure contract (SPEC 8.1.9 "Failure classification"):
+// a transient failure (network, 429, 5xx) MUST surface as a retryable error, and
+// the worker leaves the chunks pending; a NON-retryable failure is a terminal
+// failure of every chunk of that representation, recorded with its category and
+// reason, never a per-document fall back to chunk-then-embed. The only fall back
+// is corpus-wide and decided before any document is embedded: an embedder that
+// does not implement this interface, or whose TokenEmbeddingProbe says the served
+// model cannot provide comparable token embeddings.
 type TokenEmbedder interface {
 	Embedder
 	// EmbedDocumentTokens returns the per-token contextualized embeddings for
 	// each input document, aligned 1:1 with inputs. role is EmbedDocument at
-	// index time. An input that exceeds the model's context window is the
-	// implementation's concern (it MAY window/error); callers treat an error as
-	// "fall back to chunk-then-embed".
+	// index time. An input that exceeds the model's context window MUST be
+	// windowed by the implementation (SPEC 8.1.9 "Long documents"); an error is
+	// classified by the caller as transient (chunks stay pending) or terminal
+	// (the representation's chunks are marked failed).
 	EmbedDocumentTokens(ctx context.Context, model string, role EmbedRole, inputs []string) ([]TokenEmbedding, error)
+}
+
+// TokenEmbeddingProbe is an OPTIONAL capability of a TokenEmbedder: it answers,
+// once per run and before any document is embedded, whether the SERVED model can
+// provide token embeddings that share a space with Embed's pooled vectors (SPEC
+// 8.1.9: a tei server must pool with `mean`). available=false with a reason is a
+// definitive refusal, and the worker takes the corpus-wide fall back to
+// chunk-then-embed with that reason logged once, exactly as for an embedder that
+// lacks the interface. A non-nil err means the answer is unknown (the server was
+// unreachable); the worker then keeps late chunking active and lets the
+// per-document transient failures leave chunks pending, because a transient
+// probe failure must not flip a pooled corpus to unpooled vectors.
+type TokenEmbeddingProbe interface {
+	TokenEmbeddingsAvailable(ctx context.Context) (available bool, reason string, err error)
 }
 
 // MediaInput is one non-text item to embed (SPEC 8.1.7): the media bytes
@@ -405,6 +424,13 @@ type RepresentationStore interface {
 // than embedding chunk-then-embed under an identity that says otherwise.
 type RepresentationTextStore interface {
 	UpsertRepresentationText(ctx context.Context, repID int64, text string) error
+	// DeleteRepresentationText removes the persisted text of a representation.
+	// Ingest calls it when it rewrites a representation's chunks with late
+	// chunking OFF: rep_id is stable per (document, rep_type), so a text left
+	// from an earlier late-chunking run would otherwise be paired with the new
+	// chunks' spans by a later late-chunking run and pool the wrong runes
+	// without any error. Deleting a text that does not exist is not an error.
+	DeleteRepresentationText(ctx context.Context, repID int64) error
 }
 
 // RepresentationTextReader is the read half of the late-chunking inputs

@@ -283,12 +283,39 @@ func (c *Client) ServerInfo(ctx context.Context) (Info, error) {
 	return info, nil
 }
 
+// TokenEmbeddingsAvailable implements model.TokenEmbeddingProbe (SPEC 8.1.9):
+// it reads the served pooling from GET /info (cached for the client's lifetime)
+// and answers whether this server can provide token embeddings that share a
+// space with Embed's pooled vectors, which only a `mean`-pooling model does. A
+// non-mean pooling, or an /info the client cannot accept (no max_input_length),
+// is a definitive refusal with the reason; the worker then falls back
+// corpus-wide, logged once, before any document is embedded. A retryable /info
+// failure (the server is unreachable) is returned as err: the answer is unknown
+// and the worker keeps the pooled path.
+func (c *Client) TokenEmbeddingsAvailable(ctx context.Context) (bool, string, error) {
+	info, err := c.ServerInfo(ctx)
+	if err != nil {
+		var pErr *model.ProviderError
+		if errors.As(err, &pErr) && !pErr.Retryable {
+			return false, err.Error(), nil
+		}
+		return false, "", err
+	}
+	if info.Pooling != PoolingMean {
+		return false, fmt.Sprintf("late chunking requires a mean-pooling model; %q serves pooling %q", info.ModelID, info.Pooling), nil
+	}
+	return true, "", nil
+}
+
 // EmbedDocumentTokens implements model.TokenEmbedder (SPEC 8.1.9). For each
 // input it returns one contextualized vector per token with the token's RUNE
 // span in the input, special tokens excluded (they have no span). It refuses to
 // serve a model whose pooling is not "mean", because only then do these vectors
-// and Embed's pooled query vectors share one space; the worker treats that
-// non-retryable error as a reason to fall back to chunk-then-embed.
+// and Embed's pooled query vectors share one space. The worker normally learns
+// that through TokenEmbeddingsAvailable before any document is embedded and
+// falls back corpus-wide; this per-call check is the defence in depth for a
+// server whose model changed under a running worker, and its non-retryable
+// error then fails the affected representation's chunks with a reason.
 //
 // A document longer than the server's max_input_length is split into
 // consecutive, non-overlapping token windows (SPEC 8.1.9 "Long documents"),

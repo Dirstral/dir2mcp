@@ -70,6 +70,9 @@ type EmbeddingWorker struct {
 	// lateChunkLogged guards the one-time late-chunking decision log so the
 	// message is emitted once per worker, not on every RunOnce cycle.
 	lateChunkLogged bool
+	// lateChunkProbe caches the one-time TokenEmbeddingProbe verdict (see
+	// LateChunkDecision).
+	lateChunkProbe lateChunkProbeState
 
 	// RootDir is the corpus root used to resolve a media chunk's MediaRef
 	// (a corpus rel_path) to bytes for multimodal embedding (SPEC 8.1.7).
@@ -1322,8 +1325,53 @@ func (w *EmbeddingWorker) modelForKind(indexKind string) string {
 // (enabled AND the embedder exposes token-level embeddings via
 // model.TokenEmbedder) and, when not, the fallback reason. It is the single
 // routing point so the embed step and tests agree on the decision.
+//
+// The pure capability check is refined once by the embedder's
+// model.TokenEmbeddingProbe when it has one (SPEC 8.1.9: a tei server must pool
+// with `mean`, read from /info). A definitive refusal is cached for the worker's
+// lifetime and becomes the corpus-wide FallbackProviderRefused; an unknown
+// answer (the server was unreachable) is NOT cached, the decision stays Active,
+// and the per-document transient failures leave chunks pending until the probe
+// can answer, so a transient outage never flips a pooled corpus to unpooled
+// vectors.
 func (w *EmbeddingWorker) LateChunkDecision() latechunk.Decision {
-	return latechunk.Decide(w.LateChunking, w.Embedder)
+	dec := latechunk.Decide(w.LateChunking, w.Embedder)
+	if !dec.Active {
+		return dec
+	}
+	if w.lateChunkProbe.refused {
+		return latechunk.Decision{Active: false, Fallback: latechunk.FallbackProviderRefused, Detail: w.lateChunkProbe.detail}
+	}
+	if w.lateChunkProbe.confirmed {
+		return dec
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), lateChunkProbeTimeout)
+	defer cancel()
+	refined, err := latechunk.Probe(ctx, dec)
+	if err != nil {
+		w.logf("late chunking: token-embedding probe could not answer (%v); keeping the pooled path and retrying the probe next batch", err)
+		return dec
+	}
+	if refined.Active {
+		w.lateChunkProbe.confirmed = true
+		return refined
+	}
+	w.lateChunkProbe.refused = true
+	w.lateChunkProbe.detail = refined.Detail
+	return refined
+}
+
+// lateChunkProbeTimeout bounds the one-time capability probe (GET /info on a tei
+// server). It is generous because the answer is cached for the run.
+const lateChunkProbeTimeout = 15 * time.Second
+
+// lateChunkProbeState caches the TokenEmbeddingProbe verdict for the worker's
+// lifetime: confirmed (the served model can pool), or refused with the
+// provider's reason. Neither set means the probe has not answered yet.
+type lateChunkProbeState struct {
+	confirmed bool
+	refused   bool
+	detail    string
 }
 
 // logLateChunkDecisionOnce emits a single informational line describing the
@@ -1346,6 +1394,10 @@ func (w *EmbeddingWorker) logLateChunkDecisionOnce() {
 	dec := w.LateChunkDecision()
 	if dec.Active {
 		w.logf("late chunking: enabled and active (embedder %T exposes token embeddings); embedding whole documents and mean-pooling each chunk's rune span (SPEC 8.1.9)", w.Embedder)
+		return
+	}
+	if dec.Detail != "" {
+		w.logf("late chunking: enabled but falling back to chunk-then-embed (%s: %s; embedder %T)", dec.Fallback, dec.Detail, w.Embedder)
 		return
 	}
 	w.logf("late chunking: enabled but falling back to chunk-then-embed (%s; embedder %T)", dec.Fallback, w.Embedder)

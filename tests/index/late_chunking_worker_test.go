@@ -674,3 +674,105 @@ func TestWorker_LateChunkTask_HasRuneSpan(t *testing.T) {
 		t.Fatal("sanity: rune counting")
 	}
 }
+
+// lcProbedEmbedder is a token embedder whose model.TokenEmbeddingProbe answers
+// as configured: refuse with a reason, fail transiently, or accept. It counts
+// probe calls so a test can pin "once per run".
+type lcProbedEmbedder struct {
+	lcWordEmbedder
+	refuseReason string
+	probeErr     error
+	probeCalls   int
+}
+
+func (e *lcProbedEmbedder) TokenEmbeddingsAvailable(_ context.Context) (bool, string, error) {
+	e.probeCalls++
+	if e.probeErr != nil {
+		return false, "", e.probeErr
+	}
+	if e.refuseReason != "" {
+		return false, e.refuseReason, nil
+	}
+	return true, "", nil
+}
+
+// TestWorker_LateChunkProbe_RefusalFallsBackCorpusWide pins SPEC 8.1.9 for a
+// served model that cannot pool (a tei server with cls pooling): the probe's
+// refusal is the CORPUS-WIDE fall back, decided before any document is embedded.
+// Nothing is token-embedded, nothing is marked failed, every chunk embeds
+// chunk-then-embed, the once-per-run log names the provider's reason, and the
+// probe is asked once, not once per batch (#951 review: the README promised
+// this, the code marked chunks failed instead).
+func TestWorker_LateChunkProbe_RefusalFallsBackCorpusWide(t *testing.T) {
+	emb := &lcProbedEmbedder{refuseReason: `late chunking requires a mean-pooling model; "bge-small" serves pooling "cls"`}
+	src := &lcTextSource{
+		fakeChunkSource: fakeChunkSource{tasks: []model.ChunkTask{
+			lcTask(1, 7, "alpha beta", 0, 10),
+			lcTask(2, 7, "gamma delta", 11, 22),
+		}},
+		texts: map[int64]string{7: "alpha beta gamma delta"},
+	}
+	ix := newCapturingIndex()
+	var buf bytes.Buffer
+	w := lcWorker(src, ix, emb, &buf)
+	dec := w.LateChunkDecision()
+	if dec.Active || dec.Fallback != latechunk.FallbackProviderRefused || !strings.Contains(dec.Detail, "cls") {
+		t.Fatalf("decision = %+v, want inactive, %s, detail naming cls", dec, latechunk.FallbackProviderRefused)
+	}
+	n, err := w.RunOnce(context.Background(), "text")
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("indexed = %d, want 2 (chunk-then-embed for the whole corpus)", n)
+	}
+	if emb.tokenCalls != 0 {
+		t.Fatal("a refused provider must never be asked for token embeddings")
+	}
+	if emb.embedCalls == 0 {
+		t.Fatal("the chunks must embed chunk-then-embed")
+	}
+	if len(src.failedLabels) != 0 {
+		t.Fatalf("a corpus-wide fall back marks nothing failed, got %v", src.failedLabels)
+	}
+	if emb.probeCalls != 1 {
+		t.Fatalf("probe calls = %d, want exactly 1 (cached for the run)", emb.probeCalls)
+	}
+	logged := buf.String()
+	if !strings.Contains(logged, "falling back to chunk-then-embed") || !strings.Contains(logged, "cls") {
+		t.Fatalf("the once-per-run log must name the fall back and the served pooling: %q", logged)
+	}
+	if strings.Contains(logged, "enabled and active") {
+		t.Fatalf("the log must not claim the pooled path is active: %q", logged)
+	}
+}
+
+// TestWorker_LateChunkProbe_UnknownKeepsThePooledPath pins the other half: a
+// probe that cannot answer (the server is unreachable) is NOT a refusal. The
+// decision stays Active, the probe is retried on the next decision, and the
+// batch is neither degraded to chunk-then-embed nor marked failed: a transient
+// outage must never flip a pooled corpus to unpooled vectors.
+func TestWorker_LateChunkProbe_UnknownKeepsThePooledPath(t *testing.T) {
+	emb := &lcProbedEmbedder{probeErr: &model.ProviderError{Code: "TEI_UNAVAILABLE", Message: "connection refused", Retryable: true, StatusCode: http.StatusServiceUnavailable}}
+	var buf bytes.Buffer
+	w := lcWorker(&lcTextSource{}, newCapturingIndex(), emb, &buf)
+	if dec := w.LateChunkDecision(); !dec.Active {
+		t.Fatalf("an unknown probe answer must keep the pooled path, got %+v", dec)
+	}
+	if dec := w.LateChunkDecision(); !dec.Active {
+		t.Fatalf("still active on the second decision, got %+v", dec)
+	}
+	if emb.probeCalls != 2 {
+		t.Fatalf("probe calls = %d, want 2: an unknown answer is not cached", emb.probeCalls)
+	}
+	// Once the server answers, the verdict is cached and the probe stops.
+	emb.probeErr = nil
+	for i := 0; i < 3; i++ {
+		if dec := w.LateChunkDecision(); !dec.Active {
+			t.Fatalf("decision %d: %+v", i, dec)
+		}
+	}
+	if emb.probeCalls != 3 {
+		t.Fatalf("probe calls = %d, want 3: a confirmed answer is cached", emb.probeCalls)
+	}
+}

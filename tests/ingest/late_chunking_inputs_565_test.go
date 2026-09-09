@@ -52,7 +52,7 @@ func TestChunkTextByChars_RuneSpansAreExactWindows(t *testing.T) {
 	assertExactWindows(t, content, segs)
 	// Overlap means neighbouring windows share source runes; the second chunk
 	// must start before the first ends and after it starts.
-	if !(segs[1].RuneStart > segs[0].RuneStart && segs[1].RuneStart < segs[0].RuneEnd) {
+	if segs[1].RuneStart <= segs[0].RuneStart || segs[1].RuneStart >= segs[0].RuneEnd {
 		t.Fatalf("chunks must overlap in the source: %+v / %+v", segs[0], segs[1])
 	}
 }
@@ -86,7 +86,8 @@ func TestChunkCodeByLines_RuneSpansAreExactWindows(t *testing.T) {
 // model.RepresentationTextStore, recording what the chunk writer persisted.
 type textRepStore struct {
 	fakeRepStore
-	texts map[int64]string
+	texts   map[int64]string
+	deleted []int64
 }
 
 func (s *textRepStore) UpsertRepresentationText(_ context.Context, repID int64, text string) error {
@@ -94,6 +95,12 @@ func (s *textRepStore) UpsertRepresentationText(_ context.Context, repID int64, 
 		s.texts = make(map[int64]string)
 	}
 	s.texts[repID] = text
+	return nil
+}
+
+func (s *textRepStore) DeleteRepresentationText(_ context.Context, repID int64) error {
+	s.deleted = append(s.deleted, repID)
+	delete(s.texts, repID)
 	return nil
 }
 
@@ -218,5 +225,54 @@ func TestPersistSummary_JoinFallbackKeepsSpansExact(t *testing.T) {
 		if got := string(runes[c.RuneStart:c.RuneEnd]); got != c.Text {
 			t.Fatalf("chunk %d: text[%d:%d] = %q, want %q", i, c.RuneStart, c.RuneEnd, got, c.Text)
 		}
+	}
+}
+
+// TestGenerateRawText_LateChunkingOffDeletesStaleText pins the #951 review
+// finding: a representation rewritten with late chunking OFF must not keep the
+// document text an earlier late-chunking run persisted under the same rep_id,
+// or a later late-chunking run pairs that stale text with the new chunks' spans
+// and pools the wrong runes without any error. Off, the writer deletes the
+// text through the same store handle that rewrites the chunks.
+func TestGenerateRawText_LateChunkingOffDeletesStaleText(t *testing.T) {
+	st := newTextRepStore()
+	rg := ingest.NewRepresentationGenerator(st)
+	doc := model.Document{DocID: 1, RelPath: "notes.md", DocType: "md"}
+
+	// An earlier run with the mode on persisted the text.
+	rg.SetLateChunking(true)
+	if err := rg.GenerateRawTextFromContent(context.Background(), doc, []byte("alpha beta gamma delta")); err != nil {
+		t.Fatalf("on: %v", err)
+	}
+	if len(st.texts) != 1 {
+		t.Fatalf("the on run must persist one text, got %v", st.texts)
+	}
+	var repID int64
+	for id := range st.texts {
+		repID = id
+	}
+
+	// The rewrite with the mode off must delete the text under the rep_id it
+	// writes the new chunks to. The fake mints a fresh rep_id per upsert (the real
+	// store reuses it per document and rep_type, which is exactly why the stale
+	// text is dangerous; the store-level delete is pinned in tests/store), so the
+	// assertion is on the delete call: exactly one, for the representation the
+	// off run wrote, issued through the same handle as the chunks.
+	rg.SetLateChunking(false)
+	if err := rg.GenerateRawTextFromContent(context.Background(), doc, []byte("alpha beta gamma delta epsilon")); err != nil {
+		t.Fatalf("off: %v", err)
+	}
+	if len(st.chunks) == 0 {
+		t.Fatal("the off run must have written chunks")
+	}
+	offRep := st.chunks[len(st.chunks)-1].RepID
+	if offRep == repID {
+		t.Fatalf("test fixture: the fake must mint a fresh rep id per upsert, got %d twice", repID)
+	}
+	if len(st.deleted) != 1 || st.deleted[0] != offRep {
+		t.Fatalf("the off run must delete the representation text of rep %d exactly once, deletes=%v", offRep, st.deleted)
+	}
+	if _, still := st.texts[offRep]; still {
+		t.Fatalf("no text may remain under the rewritten representation: %v", st.texts)
 	}
 }

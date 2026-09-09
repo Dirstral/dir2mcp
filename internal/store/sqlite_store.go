@@ -1538,6 +1538,27 @@ func (s *SQLiteStore) UpsertRepresentationText(ctx context.Context, repID int64,
 	return upsertRepresentationTextWith(ctx, db, repID, text)
 }
 
+// DeleteRepresentationText implements model.RepresentationTextStore: it removes
+// the persisted text of a representation, so a rewrite of its chunks with late
+// chunking off cannot leave a stale text for a later late-chunking run to pair
+// with the new spans. Deleting a text that was never persisted is a no-op.
+func (s *SQLiteStore) DeleteRepresentationText(ctx context.Context, repID int64) error {
+	db, err := s.ensureDB(ctx)
+	if err != nil {
+		return err
+	}
+	defer s.ReleaseDB()
+	return deleteRepresentationTextWith(ctx, db, repID)
+}
+
+func deleteRepresentationTextWith(ctx context.Context, exec dbExecutor, repID int64) error {
+	if repID <= 0 {
+		return errors.New("rep_id must be > 0")
+	}
+	_, err := exec.ExecContext(ctx, `DELETE FROM representation_texts WHERE rep_id = ?`, repID)
+	return err
+}
+
 func upsertRepresentationTextWith(ctx context.Context, exec dbExecutor, repID int64, text string) error {
 	if repID <= 0 {
 		return errors.New("rep_id must be > 0")
@@ -1612,6 +1633,13 @@ func (t *txSQLiteStore) InsertChunkWithSpans(ctx context.Context, chunk model.Ch
 // the rune spans that index into it commit together or not at all.
 func (t *txSQLiteStore) UpsertRepresentationText(ctx context.Context, repID int64, text string) error {
 	return upsertRepresentationTextWith(ctx, t.tx, repID, text)
+}
+
+// DeleteRepresentationText implements model.RepresentationTextStore inside the
+// transaction that rewrites the representation's chunks (late chunking off), so
+// the stale text goes away with the chunks it described.
+func (t *txSQLiteStore) DeleteRepresentationText(ctx context.Context, repID int64) error {
+	return deleteRepresentationTextWith(ctx, t.tx, repID)
 }
 
 func (t *txSQLiteStore) SoftDeleteChunksFromOrdinal(ctx context.Context, repID int64, fromOrdinal int) error {

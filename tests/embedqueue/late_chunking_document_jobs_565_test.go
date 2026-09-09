@@ -331,3 +331,49 @@ func TestJob_DocumentValidation(t *testing.T) {
 		t.Fatalf("per-chunk AllChunkIDs = %v", ids)
 	}
 }
+
+// staleHeadSource returns a page whose task is no longer pending by the time the
+// coordinator asks for its representation's pending chunks: the shape of a
+// worker acking (or failing) the chunk between the two reads.
+type staleHeadSource struct {
+	pagedRepSource
+}
+
+func (s *staleHeadSource) PendingChunkTasksByRep(ctx context.Context, repID int64, kind string) ([]model.ChunkTask, error) {
+	s.mu.Lock()
+	s.repCall++
+	s.mu.Unlock()
+	return nil, nil
+}
+
+// TestCoordinator_LateChunkingSkipsAStaleHead pins the #951 review finding: when
+// the per-representation read returns no pending chunk, the coordinator must
+// enqueue NOTHING, not a document job built from the stale task it holds. Such a
+// job would be served by routeDocumentJob, which reloads chunks by id without a
+// pending predicate, so a completed chunk would be re-embedded and a failed one
+// flipped back to ok by MarkEmbedded.
+func TestCoordinator_LateChunkingSkipsAStaleHead(t *testing.T) {
+	broker := embedqueue.NewMemBroker(3)
+	src := &staleHeadSource{pagedRepSource: pagedRepSource{pending: []model.ChunkTask{repTask(1, 7, "alpha")}}}
+	c := &embedqueue.Coordinator{
+		Source: src, Broker: broker, CorpusID: "corpus-x", SourceKind: "local",
+		EmbedIdentity: lcIdentity, LateChunking: true, BatchSize: 2,
+	}
+	n, err := c.EnqueuePending(context.Background(), "text")
+	if err != nil {
+		t.Fatalf("EnqueuePending: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("enqueued = %d, want 0: a head with no pending chunk is not work", n)
+	}
+	st, err := broker.Stats(context.Background())
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	if st.Pending != 0 || st.InFlight != 0 {
+		t.Fatalf("no job may be queued for a stale head, got %+v", st)
+	}
+	if src.repCall != 1 {
+		t.Fatalf("PendingChunkTasksByRep calls = %d, want 1", src.repCall)
+	}
+}

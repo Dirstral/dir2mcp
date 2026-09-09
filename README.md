@@ -1068,7 +1068,7 @@ ingest:
 
 Notes:
 
-- The served model must use **mean** pooling (`GET /info` reports it). With any other pooling the adapter refuses token embeddings and the corpus embeds chunk-then-embed, logged once per run; a TEI model that pools with `cls` (many `bge` models) is not a late-chunking model.
+- The served model must use **mean** pooling (`GET /info` reports it). The adapter checks it once per run, before any document is embedded; with any other pooling it refuses token embeddings and the whole corpus embeds chunk-then-embed, logged once with the served pooling named. A TEI model that pools with `cls` (many `bge` models) is not a late-chunking model.
 - A document longer than the server's `max_input_length` is split into consecutive token windows and embedded window by window; the split is deterministic. Small models (256 tokens) work, but a long-context model gives each chunk more context.
 - `ingest.late_chunking` and `retrieval.contextual.enabled` are mutually exclusive (`CONFIG_INVALID`): both put document context into a chunk vector, by incompatible means.
 - Every other embedder (Mistral, OpenAI, Cohere, Gemini, `kind: openai`, `omniembed`) falls back to chunk-then-embed with the flag on; the fallback and its reason are logged once per run.

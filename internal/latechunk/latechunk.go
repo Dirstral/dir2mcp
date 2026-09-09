@@ -44,6 +44,13 @@ const (
 	// model.TokenEmbedder, so token-level embeddings are unavailable. This is the
 	// reason every shipped provider hits today.
 	FallbackNoTokenEmbedder FallbackReason = "embedder_lacks_token_embeddings"
+	// FallbackProviderRefused: the embedder exposes token embeddings but its
+	// model.TokenEmbeddingProbe reported that the SERVED model cannot provide
+	// vectors comparable to Embed's (a tei server pooling with `cls`, for
+	// example). Decision.Detail carries the provider's reason. Corpus-wide, like
+	// FallbackNoTokenEmbedder (SPEC 8.1.9: "the mode then falls back to
+	// chunk-then-embed with a logged reason").
+	FallbackProviderRefused FallbackReason = "provider_refuses_token_embeddings"
 	// FallbackEmbedError means the token-embedding call failed at runtime, so the
 	// caller must fall back to chunk-then-embed for this document.
 	FallbackEmbedError FallbackReason = "token_embed_error"
@@ -60,6 +67,34 @@ type Decision struct {
 	Embedder model.TokenEmbedder
 	// Fallback explains why late chunking is inactive; empty iff Active.
 	Fallback FallbackReason
+	// Detail is the provider's own reason when Fallback is
+	// FallbackProviderRefused; empty otherwise.
+	Detail string
+}
+
+// Probe refines an Active decision with the embedder's model.TokenEmbeddingProbe,
+// when it implements one. A definitive refusal (available=false, err=nil) turns
+// the decision into the corpus-wide FallbackProviderRefused with the provider's
+// reason in Detail. An unknown answer (err != nil) leaves the decision Active and
+// returns the error, so the caller can retry the probe later rather than flip a
+// pooled corpus to unpooled vectors on a transient failure. A decision that is
+// not Active, or an embedder without a probe, is returned unchanged.
+func Probe(ctx context.Context, dec Decision) (Decision, error) {
+	if !dec.Active {
+		return dec, nil
+	}
+	probe, ok := dec.Embedder.(model.TokenEmbeddingProbe)
+	if !ok {
+		return dec, nil
+	}
+	available, reason, err := probe.TokenEmbeddingsAvailable(ctx)
+	if err != nil {
+		return dec, err
+	}
+	if !available {
+		return Decision{Active: false, Fallback: FallbackProviderRefused, Detail: reason}, nil
+	}
+	return dec, nil
 }
 
 // Decide resolves the late-chunking capability gate for the configured embedder.

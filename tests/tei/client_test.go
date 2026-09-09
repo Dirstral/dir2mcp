@@ -267,8 +267,12 @@ func TestEmbedDocumentTokens_RuneOffsetsAndSpecials(t *testing.T) {
 
 // TestEmbedDocumentTokens_RefusesNonMeanPooling pins SPEC 8.1.9: only a
 // mean-pooling model puts the pooled query vector and the per-token vectors in
-// one space, so a CLS-pooling server gets a NON-retryable error (the worker then
-// falls back to chunk-then-embed) and no /embed_all call is made.
+// one space, so a CLS-pooling server gets a NON-retryable error and no
+// /embed_all call is made. The worker normally never reaches this: the probe
+// (TokenEmbeddingsAvailable, tested below) refuses the server before any
+// document is embedded and the corpus falls back as a whole; this per-call
+// refusal is the defence in depth, and a worker that does hit it fails the
+// representation's chunks rather than embedding them chunk-then-embed.
 func TestEmbedDocumentTokens_RefusesNonMeanPooling(t *testing.T) {
 	f, c := newFake(t, &fakeTEI{pooling: "cls"})
 	_, err := c.EmbedDocumentTokens(context.Background(), "", model.EmbedDocument, []string{"a b"})
@@ -347,8 +351,8 @@ func TestEmbedDocumentTokens_AlignmentMismatchIsNonRetryable(t *testing.T) {
 
 // TestEmbedDocumentTokens_ValidationErrorIsNonRetryable pins TEI's 422
 // Validation rejection (an input the server refuses) as non-retryable: the
-// worker treats it as a per-document fallback to chunk-then-embed, never as a
-// reason to retry forever.
+// worker fails that representation's chunks with a reason (SPEC 8.1.9), never
+// embeds them chunk-then-embed, and never retries them forever.
 func TestEmbedDocumentTokens_ValidationErrorIsNonRetryable(t *testing.T) {
 	f, c := newFake(t, &fakeTEI{embedAllStatus: http.StatusUnprocessableEntity})
 	_, err := c.EmbedDocumentTokens(context.Background(), "", model.EmbedDocument, []string{"a b"})
@@ -454,5 +458,58 @@ func TestServerInfo_CachedOnce(t *testing.T) {
 	info, err := c.ServerInfo(context.Background())
 	if err != nil || info.Pooling != "mean" || info.MaxInputLength != 256 || info.ModelID != "fake/mini" {
 		t.Fatalf("ServerInfo = %+v, %v", info, err)
+	}
+}
+
+// TestTokenEmbeddingsAvailable_ProbesPoolingOnce pins the model.TokenEmbeddingProbe
+// contract (SPEC 8.1.9): a mean-pooling server is available; a cls-pooling
+// server is a DEFINITIVE refusal that names the served pooling, with err == nil,
+// so the worker falls back corpus-wide before any document is embedded; neither
+// answer makes a token call. The answer comes from the cached /info.
+func TestTokenEmbeddingsAvailable_ProbesPoolingOnce(t *testing.T) {
+	_, ok := any(&tei.Client{}).(model.TokenEmbeddingProbe)
+	if !ok {
+		t.Fatal("tei.Client must implement model.TokenEmbeddingProbe")
+	}
+	f, c := newFake(t, &fakeTEI{pooling: "mean"})
+	avail, reason, err := c.TokenEmbeddingsAvailable(context.Background())
+	if err != nil || !avail || reason != "" {
+		t.Fatalf("mean pooling: avail=%v reason=%q err=%v, want true, \"\", nil", avail, reason, err)
+	}
+	if len(f.embedAllReqs) != 0 || len(f.tokenizeReqs) != 0 {
+		t.Fatal("the probe must not make a token call")
+	}
+
+	f2, c2 := newFake(t, &fakeTEI{pooling: "cls"})
+	avail, reason, err = c2.TokenEmbeddingsAvailable(context.Background())
+	if err != nil || avail {
+		t.Fatalf("cls pooling: avail=%v err=%v, want a definitive refusal (false, nil)", avail, err)
+	}
+	if !strings.Contains(reason, "mean") || !strings.Contains(reason, "cls") {
+		t.Fatalf("the reason must name the required and the served pooling: %q", reason)
+	}
+	if len(f2.embedAllReqs) != 0 || len(f2.tokenizeReqs) != 0 {
+		t.Fatal("a refused probe must not make a token call")
+	}
+}
+
+// TestTokenEmbeddingsAvailable_UnreachableIsUnknown pins the other half: a
+// server that cannot be reached is not a refusal. The probe returns err, the
+// worker keeps the pooled path, and a transient outage never flips a pooled
+// corpus to unpooled vectors.
+func TestTokenEmbeddingsAvailable_UnreachableIsUnknown(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(srv.Close)
+	c := tei.NewClient(srv.URL, "")
+	c.InitialBackoff = time.Millisecond
+	c.MaxBackoff = time.Millisecond
+	avail, reason, err := c.TokenEmbeddingsAvailable(context.Background())
+	if err == nil {
+		t.Fatalf("an unreachable server must be an UNKNOWN answer (err), got avail=%v reason=%q", avail, reason)
+	}
+	if avail {
+		t.Fatal("unknown must not report available")
 	}
 }

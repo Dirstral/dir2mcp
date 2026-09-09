@@ -462,12 +462,24 @@ func (rg *RepresentationGenerator) upsertChunksForRepresentationWithStoreDoc(ctx
 // persistRepresentationText writes the representation's document text while
 // late chunking is on (SPEC §5.2 `representation_texts`), in the SAME store
 // handle (transaction) the chunks were written through, so the text and the
-// rune spans that index into it commit together. Off, it writes nothing. A store
-// that cannot persist the text while the mode is on is an error, not a silent
-// skip: the embedding worker would otherwise find no text under an identity that
-// says the corpus is pooled (SPEC §8.1.9 "Pre-feature rows").
+// rune spans that index into it commit together. A store that cannot persist the
+// text while the mode is on is an error, not a silent skip: the embedding worker
+// would otherwise find no text under an identity that says the corpus is pooled
+// (SPEC §8.1.9 "Pre-feature rows").
+//
+// OFF (or a representation with no chunks) it DELETES any text the representation
+// still carries. rep_id is stable per (document, rep_type) across rewrites, so a
+// text left from an earlier late-chunking run would otherwise survive this
+// rewrite and a later late-chunking run would pair it with the new chunks' rune
+// spans, pooling the wrong runes without any error (#951 review). A store
+// without the capability never wrote a text, so there is nothing to delete.
 func (rg *RepresentationGenerator) persistRepresentationText(ctx context.Context, st model.RepresentationStore, repID int64, docText string, nSegments int) error {
 	if !rg.lateChunking || nSegments == 0 {
+		if ts, ok := st.(model.RepresentationTextStore); ok {
+			if err := ts.DeleteRepresentationText(ctx, repID); err != nil {
+				return fmt.Errorf("delete stale representation text: %w", err)
+			}
+		}
 		return nil
 	}
 	ts, ok := st.(model.RepresentationTextStore)

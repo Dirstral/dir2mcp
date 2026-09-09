@@ -109,3 +109,43 @@ VALUES ('c', 'local', 5, 'text', '', 'text', '', '', 0, 0, 0, ?, 7, 'not-json', 
 		t.Fatalf("reason must not blame the coordinator for a corrupt row: %q", reason)
 	}
 }
+
+// TestBroker_IncomingJobChoosesTheDedupKey pins the #951 review finding on the
+// memory broker: the INCOMING job picks the key, as the SQLite probe does. A live
+// per-chunk job for chunk 5 must not swallow a document job for representation
+// 7 whose first chunk happens to be 5, and a live document job must not swallow
+// an unrelated per-chunk job that shares its first chunk id. Both brokers must
+// agree, or the memory broker defers document processing across ticks.
+func TestBroker_IncomingJobChoosesTheDedupKey(t *testing.T) {
+	ctx := context.Background()
+	sqlBroker, err := embedqueue.NewSQLiteBroker(ctx, filepath.Join(t.TempDir(), "queue.sqlite"), 3)
+	if err != nil {
+		t.Fatalf("NewSQLiteBroker: %v", err)
+	}
+	t.Cleanup(func() { _ = sqlBroker.Close() })
+	for name, broker := range map[string]embedqueue.Broker{"mem": embedqueue.NewMemBroker(3), "sqlite": sqlBroker} {
+		t.Run(name, func(t *testing.T) {
+			perChunk5 := embedqueue.Job{CorpusID: "c", Source: "local", ChunkID: 5, IndexKind: "text", EmbedIdentity: lcIdentity}
+			if err := broker.Enqueue(ctx, perChunk5); err != nil {
+				t.Fatalf("enqueue per-chunk 5: %v", err)
+			}
+			if err := broker.Enqueue(ctx, documentJob(7, 5, 6, 7)); err != nil {
+				t.Fatalf("enqueue document job: %v", err)
+			}
+			st, err := broker.Stats(ctx)
+			if err != nil {
+				t.Fatalf("Stats: %v", err)
+			}
+			if st.Pending != 2 {
+				t.Fatalf("a document job keyed by its representation must not be swallowed by a per-chunk job sharing its first chunk id: %+v", st)
+			}
+			// And the same document job again IS a duplicate (keyed by rep).
+			if err := broker.Enqueue(ctx, documentJob(7, 6, 7)); err != nil {
+				t.Fatalf("enqueue second document job: %v", err)
+			}
+			if st, _ = broker.Stats(ctx); st.Pending != 2 {
+				t.Fatalf("a second document job for rep 7 must dedup: %+v", st)
+			}
+		})
+	}
+}

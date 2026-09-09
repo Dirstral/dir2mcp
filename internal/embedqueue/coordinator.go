@@ -104,9 +104,15 @@ func (c *Coordinator) EnqueuePending(ctx context.Context, indexKind string) (int
 			if _, dup := seen[id]; dup {
 				continue
 			}
-			job, err := c.jobFor(ctx, t, indexKind)
+			job, ok, err := c.jobFor(ctx, t, indexKind)
 			if err != nil {
 				return total, err
+			}
+			if !ok {
+				// The task left pending between the page read and the
+				// per-representation read; it is not work any more.
+				seen[id] = struct{}{}
+				continue
 			}
 			if err := c.Broker.Enqueue(ctx, job); err != nil {
 				return total, fmt.Errorf("embedqueue: enqueue chunk %d: %w", id, err)
@@ -132,13 +138,21 @@ func (c *Coordinator) EnqueuePending(ctx context.Context, indexKind string) (int
 // workers"). A pending chunk that belongs to no representation (a legacy row)
 // cannot be grouped and is enqueued per chunk; a pooling worker then fails it
 // with a reason rather than token-embedding a document for one chunk.
-func (c *Coordinator) jobFor(ctx context.Context, t model.ChunkTask, indexKind string) (Job, error) {
+//
+// ok=false means "no job": the representation has no pending chunk any more.
+// The page read and the per-representation read are two reads, and a chunk can
+// leave pending between them (a worker acked it, or it was marked failed). The
+// task we hold is then stale, and a document job built from it would be served
+// by routeDocumentJob, which reloads chunks by id WITHOUT a pending predicate,
+// so a completed chunk would be re-embedded and a failed chunk flipped back to
+// ok by MarkEmbedded. Stale work is skipped, not enqueued.
+func (c *Coordinator) jobFor(ctx context.Context, t model.ChunkTask, indexKind string) (Job, bool, error) {
 	if !c.LateChunking || t.RepID <= 0 {
-		return c.jobFromTask(t), nil
+		return c.jobFromTask(t), true, nil
 	}
 	src, ok := c.Source.(RepPendingSource)
 	if !ok {
-		return Job{}, fmt.Errorf("embedqueue: late chunking is on but the pending source %T cannot list a representation's pending chunks (SPEC 8.1.9)", c.Source)
+		return Job{}, false, fmt.Errorf("embedqueue: late chunking is on but the pending source %T cannot list a representation's pending chunks (SPEC 8.1.9)", c.Source)
 	}
 	kind := strings.TrimSpace(t.IndexKind)
 	if kind == "" {
@@ -146,14 +160,12 @@ func (c *Coordinator) jobFor(ctx context.Context, t model.ChunkTask, indexKind s
 	}
 	repTasks, err := src.PendingChunkTasksByRep(ctx, t.RepID, kind)
 	if err != nil {
-		return Job{}, fmt.Errorf("embedqueue: read pending chunks of rep %d: %w", t.RepID, err)
+		return Job{}, false, fmt.Errorf("embedqueue: read pending chunks of rep %d: %w", t.RepID, err)
 	}
 	if len(repTasks) == 0 {
-		// The head moved under us (the chunk left pending between the two reads);
-		// enqueue the one we hold so the pass still makes progress.
-		repTasks = []model.ChunkTask{t}
+		return Job{}, false, nil
 	}
-	return c.documentJob(t.RepID, repTasks), nil
+	return c.documentJob(t.RepID, repTasks), true, nil
 }
 
 // documentJob projects every pending chunk of one representation into ONE job

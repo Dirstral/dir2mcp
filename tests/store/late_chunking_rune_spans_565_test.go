@@ -170,3 +170,52 @@ func TestRuneSpans_LegacyDatabaseMigratesInPlace(t *testing.T) {
 		t.Fatalf("the companion table must exist after migration: %v", err)
 	}
 }
+
+// TestDeleteRepresentationText_RemovesTheStaleText pins the store half of the
+// #951 review finding: rep_id is stable per (document, rep_type) across
+// rewrites, so a rewrite with late chunking OFF must be able to remove the text
+// an earlier late-chunking run persisted, on both the store and the transaction
+// handle, and deleting a text that does not exist is not an error.
+func TestDeleteRepresentationText_RemovesTheStaleText(t *testing.T) {
+	ctx := context.Background()
+	st, relPath := newContextStore(t)
+	insertChunk(t, st, relPath, 0, model.Chunk{Text: "alpha", TextHash: "h", RuneStart: 0, RuneEnd: 5})
+	tasks, err := st.NextPending(ctx, 1, "text")
+	if err != nil || len(tasks) != 1 {
+		t.Fatalf("NextPending: %v (%d tasks)", err, len(tasks))
+	}
+	repID := tasks[0].RepID
+	if err := st.UpsertRepresentationText(ctx, repID, "alpha beta"); err != nil {
+		t.Fatalf("UpsertRepresentationText: %v", err)
+	}
+	if err := st.DeleteRepresentationText(ctx, repID); err != nil {
+		t.Fatalf("DeleteRepresentationText: %v", err)
+	}
+	if _, ok, err := st.RepresentationText(ctx, repID); err != nil || ok {
+		t.Fatalf("after delete: ok=%v err=%v, want gone", ok, err)
+	}
+	if err := st.DeleteRepresentationText(ctx, repID); err != nil {
+		t.Fatalf("deleting a missing text must be a no-op, got %v", err)
+	}
+	if err := st.DeleteRepresentationText(ctx, 0); err == nil {
+		t.Fatal("rep_id 0 must be rejected")
+	}
+	// The transaction handle has the same capability, so ingest can delete the
+	// stale text in the SAME transaction that rewrites the chunks.
+	if err := st.UpsertRepresentationText(ctx, repID, "again"); err != nil {
+		t.Fatalf("re-upsert: %v", err)
+	}
+	err = st.WithTx(ctx, func(tx model.RepresentationStore) error {
+		ts, ok := tx.(model.RepresentationTextStore)
+		if !ok {
+			t.Fatalf("transaction handle %T must implement model.RepresentationTextStore", tx)
+		}
+		return ts.DeleteRepresentationText(ctx, repID)
+	})
+	if err != nil {
+		t.Fatalf("WithTx delete: %v", err)
+	}
+	if _, ok, _ := st.RepresentationText(ctx, repID); ok {
+		t.Fatal("the transactional delete must remove the text")
+	}
+}
