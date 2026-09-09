@@ -4159,16 +4159,24 @@ func (s *Service) generateRepresentations(ctx context.Context, doc model.Documen
 func (s *Service) recognizeAndFinalizeMedia(ctx context.Context, doc model.Document, secretPatterns []*regexp.Regexp, noVideoRep, transcriptSoftFailed bool) (bool, error) {
 	recognized, err := s.generateRecognitionRepresentation(ctx, doc)
 	if err != nil {
-		if !errors.Is(err, ErrRecognizeTimeout) {
+		// The daemon itself is going away (shutdown, an outer deadline): that says
+		// nothing about this document, so it keeps the hard path and the run's own
+		// abort handling (#894 parent-context rule).
+		if ctx.Err() != nil {
 			return transcriptSoftFailed, err
 		}
-		// Recognition ran out of its wall-clock budget (#894). Degrade ONLY when this
-		// document has something to lose. status="error" hides every chunk a document
-		// has (store.liveParentDocument), so on a document that already carries
-		// representations the stamp destroys working retrieval and must not be
-		// applied; returning no error here is what keeps them live, and returning
-		// BEFORE the noVideoRep verdict below is what stops that verdict from
-		// stamping the same status by another road.
+		// Recognition failed: it ran out of its wall-clock budget (#894) or the
+		// backend refused or broke (#950: a 502 on a periodic re-scan). Degrade ONLY
+		// when this document has something to lose. status="error" hides every
+		// chunk a document has (store.liveParentDocument), so on a document that
+		// already carries representations the stamp destroys working retrieval and
+		// must not be applied, whatever the failure was; returning no error here
+		// is what keeps them live, and returning BEFORE the noVideoRep verdict
+		// below is what stops that verdict from stamping the same status by
+		// another road. #894 applied this to the timeout only; #950 measured the
+		// same harm from a backend 5xx on a live pilot: one failed re-scan hid 1570
+		// indexed moments for 60 hours, with the chunks still marked embedded and
+		// nothing logged above info, until a restart happened to retry.
 		//
 		// A document with NOTHING indexed is the opposite case: the stamp hides
 		// nothing, and it is the honest, DURABLE record that this document is not
@@ -4200,8 +4208,10 @@ func (s *Service) recognizeAndFinalizeMedia(ctx context.Context, doc model.Docum
 	return transcriptSoftFailed, nil
 }
 
-// degradeIncompleteRecognition settles a document whose recognition ran out of its
-// wall-clock budget (#894) WITHOUT failing the document.
+// degradeIncompleteRecognition settles a document whose recognition FAILED (it ran
+// out of its wall-clock budget, #894, or the backend refused or broke, #950) while
+// the document already carries indexed representations, WITHOUT failing the
+// document.
 //
 // It is the whole point of the #894 fix, so the reasoning is spelled out. A
 // per-document status="error" is not a neutral diagnostic: store.liveParentDocument
@@ -4250,9 +4260,12 @@ func (s *Service) degradeIncompleteRecognition(
 	// Redact once, then use the same message for both sinks. The recognizer contract
 	// does not promise a secret-free error, so the log must not carry the raw one.
 	message := RedactSecretsInMessage(cause.Error(), secretPatterns)
-	s.getLogger().Printf("recognition incomplete for %s: %s; keeping the representations already indexed "+
-		"and retrying on the next scan (raise recognize.timeout / recognize.timeout_per_media_second)",
-		doc.RelPath, message)
+	remedy := "check the recognition backend; the failure is counted and this document is retried on the next scan"
+	if errors.Is(cause, ErrRecognizeTimeout) {
+		remedy = "raise recognize.timeout / recognize.timeout_per_media_second"
+	}
+	s.getLogger().Printf("recognition failed for %s: %s; keeping the representations already indexed "+
+		"and retrying on the next scan (%s)", doc.RelPath, message, remedy)
 	s.recognizeIncompleteThisDoc = true
 	if !alreadyCounted {
 		s.addErrors(1)
