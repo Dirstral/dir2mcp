@@ -101,7 +101,7 @@ func startDistributedEmbedding(
 
 	// Build a per-kind embedder reusing the in-process embedding path so the
 	// distributed worker shares all embed/media-load/index/mark logic.
-	embedders := buildAxisEmbedders(chunkSource, textIndex, codeIndex, embedder, ret, indexingState, embeddedGuard, textModel, codeModel, rootDir, corpusFS, logger, ingest.ResolvedMaxFileBytes(cfg))
+	embedders := buildAxisEmbedders(chunkSource, textIndex, codeIndex, embedder, ret, indexingState, embeddedGuard, textModel, codeModel, rootDir, corpusFS, logger, ingest.ResolvedMaxFileBytes(cfg), cfg.IngestLateChunking)
 	if len(embedders) == 0 {
 		// Post-open abort: close the broker and release the lock so its SQLite
 		// handle and the coordinator lock are not leaked.
@@ -116,6 +116,8 @@ func startDistributedEmbedding(
 		CorpusID:      corpusID,
 		SourceKind:    cfg.Source.Kind,
 		EmbedIdentity: identityStr,
+		// One job per document representation under late chunking (SPEC 8.1.9).
+		LateChunking: cfg.IngestLateChunking,
 	}
 
 	workerCfg := embedqueue.Config{
@@ -131,6 +133,7 @@ func startDistributedEmbedding(
 		// being re-enqueued on the next coordinator tick (#709).
 		Status:        chunkSource,
 		EmbedIdentity: identityStr,
+		LateChunking:  cfg.IngestLateChunking,
 		// Lease/embed up to distributedEmbedBatchSize chunks per iteration so the
 		// distributed path batches through the provider like the in-process loop
 		// (one embed call per batch, not per chunk — issue #435). Kept in lockstep
@@ -276,9 +279,15 @@ func newEmbedStep(
 	corpusFS corpusfs.CorpusFS,
 	logger *log.Logger,
 	maxFileBytes int64,
+	lateChunking bool,
 	kind string,
 ) *index.EmbeddingWorker {
 	return &index.EmbeddingWorker{
+		// The SAME resolved ingest.late_chunking flag the in-process loop gets
+		// (SPEC 8.1.9): a distributed worker whose identity says the corpus is
+		// pooled must pool, or it would write chunk-then-embed vectors into a
+		// pooled corpus under a matching identity (8.7.3).
+		LateChunking: lateChunking,
 		// Source provides the MarkEmbedded/MarkFailed* status writes EmbedAndIndex
 		// performs (the in-process loop's exact write path). NextPending is unused
 		// here — the distributed worker feeds tasks from leased jobs instead.
@@ -325,13 +334,14 @@ func buildAxisEmbedders(
 	corpusFS corpusfs.CorpusFS,
 	logger *log.Logger,
 	maxFileBytes int64,
+	lateChunking bool,
 ) map[string]embedqueue.Embedder {
 	embedders := make(map[string]embedqueue.Embedder)
 	if textIndex != nil {
-		embedders["text"] = newEmbedStep(chunkSource, textIndex, embedder, ret, indexingState, embeddedGuard, textModel, codeModel, rootDir, corpusFS, logger, maxFileBytes, "text")
+		embedders["text"] = newEmbedStep(chunkSource, textIndex, embedder, ret, indexingState, embeddedGuard, textModel, codeModel, rootDir, corpusFS, logger, maxFileBytes, lateChunking, "text")
 	}
 	if codeIndex != nil {
-		embedders["code"] = newEmbedStep(chunkSource, codeIndex, embedder, ret, indexingState, embeddedGuard, textModel, codeModel, rootDir, corpusFS, logger, maxFileBytes, "code")
+		embedders["code"] = newEmbedStep(chunkSource, codeIndex, embedder, ret, indexingState, embeddedGuard, textModel, codeModel, rootDir, corpusFS, logger, maxFileBytes, lateChunking, "code")
 	}
 	return embedders
 }

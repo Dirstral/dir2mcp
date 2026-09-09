@@ -7,19 +7,20 @@
 //
 // The path is provider/model-dependent: it requires the configured embedder to
 // expose token-level embeddings via the optional model.TokenEmbedder capability.
-// No shipped provider implements that today, so Decide returns a fallback in the
-// stock build and the pipeline keeps chunk-then-embed. This package contains the
-// pure, deterministic, credential-free logic (capability gate + mean-pool) so a
-// future self-hosted token-embedding backend plugs in, and so the behavior is
+// The first shipped implementation is internal/tei (a self-hosted Hugging Face
+// Text Embeddings Inference server, SPEC 8.1.1/8.1.9); every hosted kind returns
+// pooled vectors only, so for them Decide returns a fallback and the pipeline
+// keeps chunk-then-embed. This package contains the pure, deterministic,
+// credential-free logic (capability gate + mean-pool) so the behavior is
 // unit-testable with a fake embedder.
 //
-// Wiring status (issue #446): this library is complete and tested, but the
-// embedding worker does NOT yet call EmbedDocument on the active path — doing so
-// needs the source document text and per-chunk rune spans that the worker's
-// per-chunk tasks do not carry today, so wiring it is more than a drop-in. Until
-// then the worker treats an Active decision as observability only (an honest
-// "not yet wired" log) and still embeds chunk-then-embed; it does not silently
-// claim the pooling path ran.
+// Wiring (issues #446/#565): the embedding worker (internal/index) calls
+// EmbedDocument on the active path. It groups a batch's text chunks by
+// representation, reads the representation's persisted document text and each
+// chunk's persisted rune span (SPEC §5.2 representation_texts, §5.3
+// rune_start/rune_end), and pools one whole-document token embedding per
+// representation. A chunk the worker cannot place is failed with a reindex
+// remediation, never embedded chunk-then-embed under a "pooled" identity.
 package latechunk
 
 import (
@@ -43,6 +44,13 @@ const (
 	// model.TokenEmbedder, so token-level embeddings are unavailable. This is the
 	// reason every shipped provider hits today.
 	FallbackNoTokenEmbedder FallbackReason = "embedder_lacks_token_embeddings"
+	// FallbackProviderRefused: the embedder exposes token embeddings but its
+	// model.TokenEmbeddingProbe reported that the SERVED model cannot provide
+	// vectors comparable to Embed's (a tei server pooling with `cls`, for
+	// example). Decision.Detail carries the provider's reason. Corpus-wide, like
+	// FallbackNoTokenEmbedder (SPEC 8.1.9: "the mode then falls back to
+	// chunk-then-embed with a logged reason").
+	FallbackProviderRefused FallbackReason = "provider_refuses_token_embeddings"
 	// FallbackEmbedError means the token-embedding call failed at runtime, so the
 	// caller must fall back to chunk-then-embed for this document.
 	FallbackEmbedError FallbackReason = "token_embed_error"
@@ -59,6 +67,34 @@ type Decision struct {
 	Embedder model.TokenEmbedder
 	// Fallback explains why late chunking is inactive; empty iff Active.
 	Fallback FallbackReason
+	// Detail is the provider's own reason when Fallback is
+	// FallbackProviderRefused; empty otherwise.
+	Detail string
+}
+
+// Probe refines an Active decision with the embedder's model.TokenEmbeddingProbe,
+// when it implements one. A definitive refusal (available=false, err=nil) turns
+// the decision into the corpus-wide FallbackProviderRefused with the provider's
+// reason in Detail. An unknown answer (err != nil) leaves the decision Active and
+// returns the error, so the caller can retry the probe later rather than flip a
+// pooled corpus to unpooled vectors on a transient failure. A decision that is
+// not Active, or an embedder without a probe, is returned unchanged.
+func Probe(ctx context.Context, dec Decision) (Decision, error) {
+	if !dec.Active {
+		return dec, nil
+	}
+	probe, ok := dec.Embedder.(model.TokenEmbeddingProbe)
+	if !ok {
+		return dec, nil
+	}
+	available, reason, err := probe.TokenEmbeddingsAvailable(ctx)
+	if err != nil {
+		return dec, err
+	}
+	if !available {
+		return Decision{Active: false, Fallback: FallbackProviderRefused, Detail: reason}, nil
+	}
+	return dec, nil
 }
 
 // Decide resolves the late-chunking capability gate for the configured embedder.

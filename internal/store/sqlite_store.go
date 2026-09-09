@@ -367,10 +367,17 @@ func languageFromRepMeta(metaJSON string) string {
 }
 
 func insertChunkWithSpansWith(ctx context.Context, exec dbExecutor, chunk model.Chunk, spans []model.Span, relPath, docType, repType, language string) (int64, error) {
+	// A span is persisted only when it is well-formed; anything else is the
+	// -1/-1 "unknown" sentinel (SPEC §5.3), so a half-set span can never be
+	// read back as a real window.
+	runeStart, runeEnd := runeSpanUnknown, runeSpanUnknown
+	if chunk.RuneSpanKnown() {
+		runeStart, runeEnd = chunk.RuneStart, chunk.RuneEnd
+	}
 	_, err := exec.ExecContext(
 		ctx,
-		`INSERT INTO chunks(rep_id, ordinal, rel_path, doc_type, rep_type, text, text_hash, tokens_est, index_kind, modality, media_ref, language, embedding_status, embedding_error, error_category, embedding_failed_unix, chunk_context, embedding_mode, deleted)
-		 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO chunks(rep_id, ordinal, rel_path, doc_type, rep_type, text, text_hash, tokens_est, index_kind, modality, media_ref, language, embedding_status, embedding_error, error_category, embedding_failed_unix, chunk_context, embedding_mode, rune_start, rune_end, deleted)
+		 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(rep_id, ordinal) DO UPDATE SET
 		   rel_path=excluded.rel_path,
 		   doc_type=excluded.doc_type,
@@ -388,6 +395,8 @@ func insertChunkWithSpansWith(ctx context.Context, exec dbExecutor, chunk model.
 		   embedding_failed_unix=excluded.embedding_failed_unix,
 		   chunk_context=excluded.chunk_context,
 		   embedding_mode=excluded.embedding_mode,
+		   rune_start=excluded.rune_start,
+		   rune_end=excluded.rune_end,
 		   deleted=excluded.deleted`,
 		chunk.RepID,
 		chunk.Ordinal,
@@ -411,6 +420,8 @@ func insertChunkWithSpansWith(ctx context.Context, exec dbExecutor, chunk model.
 		embeddingFailureStamp(normalizeEmbeddingStatus(chunk.EmbeddingStatus), time.Now()),
 		chunk.Context,
 		model.NormalizeEmbeddingMode(chunk.EmbeddingMode),
+		runeStart,
+		runeEnd,
 		boolToInt(chunk.Deleted),
 	)
 	if err != nil {
@@ -763,6 +774,17 @@ func applyAdditiveColumnMigrations(ctx context.Context, db *sql.DB) error {
 		// credential and made no request at all. Existing rows default to 0,
 		// which the aggregate reports as "unknown age" rather than as 1970.
 		`ALTER TABLE chunks ADD COLUMN embedding_failed_unix INTEGER NOT NULL DEFAULT 0`,
+		// rune_start / rune_end are the chunk's half-open rune span in its
+		// representation's document text (SPEC §5.3, §8.1.9; dir2mcp #565): the
+		// window the late-chunking pooling step selects token vectors from.
+		// Additive and reindex-free: a pre-feature row reads -1/-1 (unknown),
+		// which is only consulted when late chunking is on AND the embedder
+		// exposes token embeddings, and there it is a per-chunk error with a
+		// `dir2mcp reindex` remediation, never a silent chunk-then-embed vector
+		// inside a pooled corpus. The embed identity is unchanged (its
+		// late_chunking component predates these columns).
+		`ALTER TABLE chunks ADD COLUMN rune_start INTEGER NOT NULL DEFAULT -1`,
+		`ALTER TABLE chunks ADD COLUMN rune_end INTEGER NOT NULL DEFAULT -1`,
 		// expires_unix stores the nonce-aligned lifetime of a persisted x402
 		// payment outcome (issue #697). The in-memory outcome already carried
 		// this time, but the row did not, so a restart fell back to the fixed
@@ -859,8 +881,16 @@ CREATE TABLE IF NOT EXISTS chunks (
   embedding_failed_unix INTEGER NOT NULL DEFAULT 0,
   chunk_context TEXT NOT NULL DEFAULT '',
   embedding_mode TEXT NOT NULL DEFAULT 'disabled',
+  rune_start INTEGER NOT NULL DEFAULT -1,
+  rune_end INTEGER NOT NULL DEFAULT -1,
   deleted INTEGER NOT NULL DEFAULT 0,
   UNIQUE(rep_id, ordinal),
+  FOREIGN KEY (rep_id) REFERENCES representations(rep_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS representation_texts (
+  rep_id INTEGER PRIMARY KEY,
+  text TEXT NOT NULL,
   FOREIGN KEY (rep_id) REFERENCES representations(rep_id) ON DELETE CASCADE
 );
 
@@ -1489,6 +1519,82 @@ func (s *SQLiteStore) WithTx(ctx context.Context, fn func(tx model.Representatio
 	return tx.Commit()
 }
 
+// runeSpanUnknown is the persisted value of chunks.rune_start / rune_end when
+// the chunk has no known rune span (SPEC §5.3): a pre-feature row, a media
+// chunk, or a chunk whose producer supplied a malformed span.
+const runeSpanUnknown = -1
+
+// UpsertRepresentationText implements model.RepresentationTextStore (SPEC §5.2
+// `representation_texts`, §8.1.9): it persists the representation's whole
+// document text, the string the chunks' rune spans index into, replacing any
+// earlier text for the same rep_id. Ingest calls it only while late chunking is
+// enabled.
+func (s *SQLiteStore) UpsertRepresentationText(ctx context.Context, repID int64, text string) error {
+	db, err := s.ensureDB(ctx)
+	if err != nil {
+		return err
+	}
+	defer s.ReleaseDB()
+	return upsertRepresentationTextWith(ctx, db, repID, text)
+}
+
+// DeleteRepresentationText implements model.RepresentationTextStore: it removes
+// the persisted text of a representation, so a rewrite of its chunks with late
+// chunking off cannot leave a stale text for a later late-chunking run to pair
+// with the new spans. Deleting a text that was never persisted is a no-op.
+func (s *SQLiteStore) DeleteRepresentationText(ctx context.Context, repID int64) error {
+	db, err := s.ensureDB(ctx)
+	if err != nil {
+		return err
+	}
+	defer s.ReleaseDB()
+	return deleteRepresentationTextWith(ctx, db, repID)
+}
+
+func deleteRepresentationTextWith(ctx context.Context, exec dbExecutor, repID int64) error {
+	if repID <= 0 {
+		return errors.New("rep_id must be > 0")
+	}
+	_, err := exec.ExecContext(ctx, `DELETE FROM representation_texts WHERE rep_id = ?`, repID)
+	return err
+}
+
+func upsertRepresentationTextWith(ctx context.Context, exec dbExecutor, repID int64, text string) error {
+	if repID <= 0 {
+		return errors.New("rep_id must be > 0")
+	}
+	_, err := exec.ExecContext(ctx,
+		`INSERT INTO representation_texts(rep_id, text) VALUES(?, ?)
+		 ON CONFLICT(rep_id) DO UPDATE SET text=excluded.text`,
+		repID, text)
+	return err
+}
+
+// RepresentationText implements model.RepresentationTextReader: it returns the
+// persisted document text of a representation and ok=false when none was
+// persisted (the representation was written with late chunking off, or before
+// the table existed). The embedding worker turns ok=false under an active token
+// embedder into a per-chunk error with a reindex remediation (SPEC §8.1.9).
+func (s *SQLiteStore) RepresentationText(ctx context.Context, repID int64) (string, bool, error) {
+	if repID <= 0 {
+		return "", false, nil
+	}
+	db, err := s.ensureDB(ctx)
+	if err != nil {
+		return "", false, err
+	}
+	defer s.ReleaseDB()
+	var text string
+	err = db.QueryRowContext(ctx, `SELECT text FROM representation_texts WHERE rep_id = ?`, repID).Scan(&text)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return text, true, nil
+}
+
 // txSQLiteStore is a lightweight wrapper around SQLiteStore that routes all
 // operations through a specific *sql.Tx.  Only the methods needed by
 // representationStore are implemented.
@@ -1520,6 +1626,20 @@ func (t *txSQLiteStore) InsertChunkWithSpans(ctx context.Context, chunk model.Ch
 		return 0, err
 	}
 	return insertChunkWithSpansWith(ctx, t.tx, chunk, spans, relPath, docType, repType, language)
+}
+
+// UpsertRepresentationText implements model.RepresentationTextStore inside the
+// transaction that writes the representation's chunks, so the document text and
+// the rune spans that index into it commit together or not at all.
+func (t *txSQLiteStore) UpsertRepresentationText(ctx context.Context, repID int64, text string) error {
+	return upsertRepresentationTextWith(ctx, t.tx, repID, text)
+}
+
+// DeleteRepresentationText implements model.RepresentationTextStore inside the
+// transaction that rewrites the representation's chunks (late chunking off), so
+// the stale text goes away with the chunks it described.
+func (t *txSQLiteStore) DeleteRepresentationText(ctx context.Context, repID int64) error {
+	return deleteRepresentationTextWith(ctx, t.tx, repID)
 }
 
 func (t *txSQLiteStore) SoftDeleteChunksFromOrdinal(ctx context.Context, repID int64, fromOrdinal int) error {
@@ -1975,7 +2095,8 @@ func (s *SQLiteStore) ChunkTaskByID(ctx context.Context, chunkID uint64) (task m
 
 	row := db.QueryRowContext(ctx, `
 WITH the_chunk AS (
-  SELECT chunk_id, rel_path, doc_type, rep_type, text, text_hash, index_kind, modality, media_ref, language, chunk_context
+  SELECT chunk_id, rel_path, doc_type, rep_type, text, text_hash, index_kind, modality, media_ref, language, chunk_context,
+         COALESCE(rep_id, 0) AS rep_id, rune_start, rune_end
   FROM chunks
   WHERE chunk_id = ? AND deleted = 0
 ),
@@ -1986,6 +2107,7 @@ ranked_spans AS (
   JOIN the_chunk tc ON tc.chunk_id = s.chunk_id
 )
 SELECT tc.chunk_id, tc.rel_path, tc.doc_type, tc.rep_type, tc.text, tc.text_hash, tc.index_kind, tc.modality, tc.media_ref, tc.language, tc.chunk_context,
+       tc.rep_id, tc.rune_start, tc.rune_end,
        COALESCE(sp.span_kind, ''), COALESCE(sp.start, 0), COALESCE(sp.end, 0), COALESCE(sp.extra_json, ''), COALESCE(d.mtime_unix, 0)
 FROM the_chunk tc
 LEFT JOIN ranked_spans sp ON sp.chunk_id = tc.chunk_id AND sp.rn = 1
@@ -2004,6 +2126,9 @@ WHERE `+liveParentDocument, int64(chunkID))
 		mediaRef  string
 		language  string
 		chunkCtx  string
+		repID     int64
+		runeStart int
+		runeEnd   int
 		spanK     string
 		spanS     int
 		spanE     int
@@ -2011,7 +2136,7 @@ WHERE `+liveParentDocument, int64(chunkID))
 		mtimeUnix int64
 	)
 	if scanErr := row.Scan(&cid, &relPath, &docType, &repType, &text, &thash, &idxKind, &modality, &mediaRef, &language, &chunkCtx,
-		&spanK, &spanS, &spanE, &spanExtra, &mtimeUnix); scanErr != nil {
+		&repID, &runeStart, &runeEnd, &spanK, &spanS, &spanE, &spanExtra, &mtimeUnix); scanErr != nil {
 		if errors.Is(scanErr, sql.ErrNoRows) {
 			return model.ChunkTask{}, "", model.ErrNotFound
 		}
@@ -2045,6 +2170,12 @@ WHERE `+liveParentDocument, int64(chunkID))
 	// (reranking, liveness) can never surface it (SPEC §8.1.8, #403). Only the
 	// embed path reads it, via ChunkTask.EmbedInput.
 	t.Context = chunkCtx
+	// Late chunking inputs (SPEC §8.1.9), identical to what NextPending loads,
+	// so a distributed worker pools a leased chunk exactly like the in-process
+	// loop does.
+	t.RepID = repID
+	t.RuneStart = runeStart
+	t.RuneEnd = runeEnd
 	return t, thash, nil
 }
 
@@ -2826,14 +2957,24 @@ func (s *SQLiteStore) CorpusStats(ctx context.Context) (model.CorpusStats, error
 // idx_chunks_embedded_kind_seek (embedding_status, deleted, index_kind,
 // chunk_id), added by #742, already covers this access path, so no new index.
 func nextPendingQuery(indexKind string, limit int) (string, []any) {
+	return pendingQuery(indexKind, limit, 0)
+}
+
+// pendingQuery is nextPendingQuery with an optional representation filter:
+// repID > 0 restricts the selection to that representation's pending chunks
+// (PendingChunkTasksByRep, SPEC §8.1.9 document jobs). 0 means no filter.
+func pendingQuery(indexKind string, limit int, repID int64) (string, []any) {
 	args := []any{"pending"}
 	kindPredicate := ""
 	if strings.TrimSpace(indexKind) != "" {
 		kindPredicate = " AND c.index_kind = ?"
 	}
+	if repID > 0 {
+		kindPredicate += " AND c.rep_id = ?"
+	}
 	query := `WITH filtered_chunks AS (
 	            SELECT c.chunk_id, c.rel_path, c.doc_type, c.rep_type, c.text, c.text_hash, c.index_kind, c.modality, c.media_ref, c.language,
-	                   c.chunk_context,
+	                   c.chunk_context, COALESCE(c.rep_id, 0) AS rep_id, c.rune_start, c.rune_end,
 	                   COALESCE(d.mtime_unix, 0) AS mtime_unix
 	            FROM chunks c
 	            LEFT JOIN documents d ON d.rel_path = c.rel_path
@@ -2843,18 +2984,39 @@ func nextPendingQuery(indexKind string, limit int) (string, []any) {
 	            LIMIT ?
 	          )
 	          SELECT fc.chunk_id, fc.rel_path, fc.doc_type, fc.rep_type, fc.text, fc.text_hash, fc.index_kind, fc.modality, fc.media_ref, fc.language,
-	                 fc.chunk_context,
+	                 fc.chunk_context, fc.rep_id, fc.rune_start, fc.rune_end,
 	                 COALESCE(sp.span_kind, ''), COALESCE(sp.start, 0), COALESCE(sp."end", 0), COALESCE(sp.extra_json, ''), fc.mtime_unix
 	          FROM filtered_chunks fc
 	          LEFT JOIN spans sp ON sp.span_id = (
 	            SELECT MIN(s.span_id) FROM spans s WHERE s.chunk_id = fc.chunk_id
 	          )
 	          ORDER BY fc.chunk_id`
-	if kindPredicate != "" {
+	if strings.TrimSpace(indexKind) != "" {
 		args = append(args, indexKind)
+	}
+	if repID > 0 {
+		args = append(args, repID)
 	}
 	args = append(args, limit)
 	return query, args
+}
+
+// PendingChunkTasksByRep returns EVERY pending, live chunk of one representation
+// on the given axis ("" for any), ordered by chunk_id, in the same task shape
+// NextPending returns. It is the read the distributed coordinator needs under
+// late chunking (SPEC §8.1.9 "Distributed workers"): one job per representation
+// carrying every pending chunk, not the page NextPending happens to return.
+func (s *SQLiteStore) PendingChunkTasksByRep(ctx context.Context, repID int64, indexKind string) ([]model.ChunkTask, error) {
+	if repID <= 0 {
+		return nil, errors.New("rep_id must be > 0")
+	}
+	db, err := s.ensureDB(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer s.ReleaseDB()
+	query, args := pendingQuery(indexKind, 1<<31-1, repID)
+	return scanPendingTasks(ctx, db, query, args)
 }
 
 // NextPendingQueryForTest returns the SQL one embed batch runs.
@@ -2913,14 +3075,20 @@ func (s *SQLiteStore) NextPending(ctx context.Context, limit int, indexKind stri
 	}
 
 	query, args := nextPendingQuery(indexKind, limit)
+	return scanPendingTasks(ctx, db, query, args)
+}
 
+// scanPendingTasks runs a pendingQuery and projects its rows into ChunkTasks;
+// shared by NextPending and PendingChunkTasksByRep so both load byte-identical
+// tasks.
+func scanPendingTasks(ctx context.Context, db *sql.DB, query string, args []any) ([]model.ChunkTask, error) {
 	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = rows.Close() }()
 
-	tasks := make([]model.ChunkTask, 0, limit)
+	tasks := make([]model.ChunkTask, 0, 32)
 	for rows.Next() {
 		var (
 			chunkID   int64
@@ -2934,13 +3102,16 @@ func (s *SQLiteStore) NextPending(ctx context.Context, limit int, indexKind stri
 			mediaRef  string
 			language  string
 			chunkCtx  string
+			repID     int64
+			runeStart int
+			runeEnd   int
 			spanK     string
 			spanS     int
 			spanE     int
 			spanExtra string
 			mtimeUnix int64
 		)
-		if err := rows.Scan(&chunkID, &relPath, &docType, &repType, &text, &textHash, &idxKind, &modality, &mediaRef, &language, &chunkCtx, &spanK, &spanS, &spanE, &spanExtra, &mtimeUnix); err != nil {
+		if err := rows.Scan(&chunkID, &relPath, &docType, &repType, &text, &textHash, &idxKind, &modality, &mediaRef, &language, &chunkCtx, &repID, &runeStart, &runeEnd, &spanK, &spanS, &spanE, &spanExtra, &mtimeUnix); err != nil {
 			return nil, err
 		}
 		if chunkID <= 0 {
@@ -2971,6 +3142,12 @@ func (s *SQLiteStore) NextPending(ctx context.Context, limit int, indexKind stri
 		// the chunk. Snippet above is built from the raw text, so nothing the
 		// generator wrote can reach a citation (#403).
 		task.Context = chunkCtx
+		// Late chunking (SPEC §8.1.9): the representation the chunk belongs to
+		// and its rune span in that representation's document text, so the
+		// worker can pool this chunk from one whole-document token embedding.
+		task.RepID = repID
+		task.RuneStart = runeStart
+		task.RuneEnd = runeEnd
 		tasks = append(tasks, task)
 	}
 	return tasks, rows.Err()

@@ -1047,6 +1047,32 @@ stt_provider: whisper        # STT uses the legacy selector
 - **Capability mapping** (which route serves each capability, spec §8.5): embed → `POST {base_url}/v1/embeddings`; chat → `/v1/chat/completions`; STT → `/v1/audio/transcriptions` (endpoint-dependent, validated at first use). **OCR has no OpenAI analog** — bind it only to a `kind: mistral` `/v1/ocr` endpoint (or use [docling-serve](#docling-extraction-over-http-docling-serve)); binding `model.ocr.provider` to a `kind: openai` profile is rejected as `CONFIG_INVALID`.
 - **`base_url` shape differs by kind:** a `kind: openai` `base_url` already includes `/v1`; a `kind: mistral` OCR `base_url` and a `kind: whisper` STT `base_url` are the **host root** (the client appends `/v1/ocr` and `/v1/audio/transcriptions` respectively). The whisper client tolerates a stray trailing `/v1` and will not double it.
 - No shipped self-hosted defaults — you must declare the profile and bind it explicitly; nothing silently auto-selects a self-hosted endpoint.
+
+### Late chunking with a self-hosted TEI server (`kind: tei`)
+
+Late chunking (spec §8.1.9) embeds a whole document once through a long-context model, then mean-pools each chunk's token vectors, so every chunk vector carries document context. It needs an embedder that returns **token-level** embeddings with offsets. The only kind that does is `tei`: a self-hosted [Hugging Face Text Embeddings Inference](https://github.com/huggingface/text-embeddings-inference) server on its **native** surface (`/embed`, `/embed_all`, `/tokenize`, `/info`). A `kind: openai` profile pointed at the same server keeps working but returns pooled vectors only, so it cannot serve this mode.
+
+```yaml
+providers:
+  tei:
+    kind: tei
+    base_url: http://gpu-box:8080                       # host ROOT (native surface, not /v1)
+    embed_text_model: sentence-transformers/all-MiniLM-L6-v2   # the served model id, so the embed identity names it
+    embed_code_model: sentence-transformers/all-MiniLM-L6-v2
+model:
+  embed:
+    provider: tei              # reindex-bound (the embed identity includes it)
+ingest:
+  late_chunking: true          # reindex-bound too; run `dir2mcp reindex` after turning it on
+```
+
+Notes:
+
+- The served model must use **mean** pooling (`GET /info` reports it). The adapter checks it once per run, before any document is embedded; with any other pooling it refuses token embeddings and the whole corpus embeds chunk-then-embed, logged once with the served pooling named. A TEI model that pools with `cls` (many `bge` models) is not a late-chunking model.
+- A document longer than the server's `max_input_length` is split into consecutive token windows and embedded window by window; the split is deterministic. Small models (256 tokens) work, but a long-context model gives each chunk more context.
+- `ingest.late_chunking` and `retrieval.contextual.enabled` are mutually exclusive (`CONFIG_INVALID`): both put document context into a chunk vector, by incompatible means.
+- Every other embedder (Mistral, OpenAI, Cohere, Gemini, `kind: openai`, `omniembed`) falls back to chunk-then-embed with the flag on; the fallback and its reason are logged once per run.
+- A remote `tei` endpoint (not loopback or a private network) must be `https`; a Bearer token is sent only to the configured scheme and host. The `TEI_BASE_URL` environment variable fills the built-in `tei` profile's `base_url`.
 - For a full GPU-VPS topology (corpus over NFS/S3, vector backend, systemd), see [docs/dual-machine-deployment.md](docs/dual-machine-deployment.md).
 
 ### Continuous incremental indexing (optional)

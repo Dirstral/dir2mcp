@@ -4875,6 +4875,8 @@ func (c *Config) Validate() error {
 		c.validateDistributedEmbed,
 		c.validateMediaBatch,
 		c.validateCrossLingual,
+		c.validateLateChunking,
+		c.validateTEITransport,
 		c.validateMCPPath,
 	} {
 		if err := validate(); err != nil {
@@ -4885,6 +4887,58 @@ func (c *Config) Validate() error {
 	if c.SessionMaxLifetime > 0 && c.SessionMaxLifetime < c.SessionInactivityTimeout {
 		return fmt.Errorf("session_max_lifetime (%v) must be >= session_inactivity_timeout (%v)",
 			c.SessionMaxLifetime, c.SessionInactivityTimeout)
+	}
+	return nil
+}
+
+// validateLateChunking fails fast (CONFIG_INVALID) when ingest.late_chunking and
+// retrieval.contextual.enabled are both on (SPEC §8.1.9). Contextual retrieval
+// changes the text that is embedded per chunk; late chunking embeds the
+// document's own text and pools each chunk's tokens out of it, so a generated
+// context has no position in the document and cannot be applied consistently.
+// The two techniques address the same problem by incompatible means, and a
+// corpus that silently ran one while configured for both would carry an embed
+// identity that says otherwise (§8.1.4). An operator picks one.
+func (c *Config) validateLateChunking() error {
+	if c.IngestLateChunking && c.RetrievalContextualEnabled {
+		return errors.New("CONFIG_INVALID: ingest.late_chunking and retrieval.contextual.enabled are mutually exclusive " +
+			"(SPEC §8.1.9): late chunking pools each chunk from the whole document's token embeddings, so a generated " +
+			"context cannot be prepended to it; disable one of the two (both are reindex-bound, §8.1.4)")
+	}
+	return nil
+}
+
+// validateTEITransport enforces the SPEC 8.1.1 transport rule for `kind: tei`
+// profiles: late chunking sends WHOLE documents to that endpoint, so an endpoint
+// that is not loopback, link-local or private-network MUST use https, and an
+// api_key over plain http to a remote host (a Bearer token in cleartext) is
+// CONFIG_INVALID. Local and private endpoints stay allowed on http, as §8.5
+// permits for every self-hosted kind. Profiles are scanned in sorted order so
+// the reported error is stable.
+func (c *Config) validateTEITransport() error {
+	byName := c.Providers().ByName()
+	names := make([]string, 0, len(byName))
+	for name := range byName {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		p := byName[name]
+		if p.Kind != provider.KindTEI || strings.TrimSpace(p.BaseURL) == "" {
+			continue
+		}
+		u, err := url.Parse(strings.TrimSpace(p.BaseURL))
+		if err != nil || u.Host == "" {
+			return fmt.Errorf("CONFIG_INVALID: provider profile %q (kind tei) has an unparseable base_url", name)
+		}
+		if netutil.IsLocalOrPrivateHost(u.Hostname()) {
+			continue
+		}
+		if !strings.EqualFold(u.Scheme, "https") {
+			return fmt.Errorf("CONFIG_INVALID: provider profile %q (kind tei) points at the remote host %q over %s; "+
+				"late chunking sends whole documents to this endpoint, so a remote tei endpoint must use https (SPEC 8.1.1)",
+				name, u.Hostname(), u.Scheme)
+		}
 	}
 	return nil
 }

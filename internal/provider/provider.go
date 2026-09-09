@@ -48,6 +48,18 @@ const (
 	// KindWhisper for STT. It pairs with self-hosted embeddings (#334) for a
 	// fully-offline high-precision retrieval pipeline.
 	KindColBERT Kind = "colbert"
+	// KindTEI is a self-hosted Hugging Face Text Embeddings Inference server
+	// addressed on its NATIVE surface (SPEC 8.1.1, dir2mcp#565): POST
+	// {base_url}/embed for pooled vectors, POST {base_url}/embed_all for one
+	// vector per token, POST {base_url}/tokenize for token offsets and GET
+	// {base_url}/info for the served model, its pooling and its maximum input
+	// length. It is distinct from KindOpenAI (a TEI server also speaks
+	// /v1/embeddings) because only the native surface returns token-level
+	// embeddings, which is what late chunking (SPEC 8.1.9) pools; a
+	// kind:openai profile pointed at a TEI server keeps working but cannot
+	// serve that mode. Embed only; credential-optional like the other
+	// self-hosted kinds.
+	KindTEI Kind = "tei"
 )
 
 // knownKinds is the set of recognized provider kinds (SPEC 8.1.1), in a
@@ -57,7 +69,7 @@ const (
 // generic ErrNoProvider far from its cause (issue #440 F7).
 var knownKinds = []Kind{
 	KindOpenAI, KindMistral, KindAnthropic, KindGemini, KindCohere,
-	KindElevenLabs, KindWhisper, KindOmniEmbed, KindColBERT,
+	KindElevenLabs, KindWhisper, KindOmniEmbed, KindColBERT, KindTEI,
 }
 
 // IsKnownKind reports whether k is a recognized provider kind (SPEC 8.1.1).
@@ -166,6 +178,14 @@ var matrix = map[Kind]map[Capability]Support{
 		// and media into one shared vector space (SPEC 8.1.7), so — like
 		// kind:whisper for STT — it is marked Supported rather than
 		// EndpointDependent.
+		CapEmbed: Supported,
+	},
+	KindTEI: {
+		// Self-hosted Hugging Face TEI on its native surface (dir2mcp#565).
+		// Statically embed-capable: the native /embed contract is fixed, so
+		// like KindOmniEmbed it is Supported rather than EndpointDependent and
+		// credential-optional. It is the first kind whose adapter implements
+		// model.TokenEmbedder (SPEC 8.1.9).
 		CapEmbed: Supported,
 	},
 	KindColBERT: {

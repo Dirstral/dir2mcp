@@ -71,6 +71,39 @@ type Job struct {
 	// provider does not match this MUST reject the job rather than write a vector
 	// from the wrong vector space (SPEC §8.7.3, §6.4).
 	EmbedIdentity string
+
+	// --- document job (late chunking, SPEC §8.1.9 "Distributed workers") ---
+
+	// RepID and ChunkIDs turn the job into a DOCUMENT job: while
+	// ingest.late_chunking is on, the coordinator enqueues one job per document
+	// representation carrying every pending chunk of that representation, so
+	// exactly one worker token-embeds the document and pools all of its chunks
+	// from that single operation (document ownership). ChunkID is then the first
+	// id in ChunkIDs and remains the broker's dedup key. Zero / empty on an
+	// ordinary per-chunk job. A worker running the pooling path MUST fail a
+	// per-chunk job (RepID == 0) rather than token-embed a whole document for one
+	// chunk; 8.7.3 idempotency applies per document job, because a chunk's pooled
+	// vector depends only on the document text and its own span.
+	RepID    int64
+	ChunkIDs []uint64
+}
+
+// IsDocument reports whether the job is a late-chunking DOCUMENT job (one job
+// per representation carrying every pending chunk), as opposed to a per-chunk
+// job (SPEC §8.1.9 "Distributed workers").
+func (j Job) IsDocument() bool {
+	return j.RepID > 0 && len(j.ChunkIDs) > 0
+}
+
+// AllChunkIDs returns every chunk id the job names: ChunkIDs for a document job,
+// the single ChunkID otherwise. It is what a terminal failure is recorded against.
+func (j Job) AllChunkIDs() []uint64 {
+	if j.IsDocument() {
+		out := make([]uint64, len(j.ChunkIDs))
+		copy(out, j.ChunkIDs)
+		return out
+	}
+	return []uint64{j.ChunkID}
 }
 
 // Span is the media-chunk window carried on a Job (SPEC §5.4). It mirrors the
@@ -94,6 +127,19 @@ func (j Job) Validate() error {
 	}
 	if strings.TrimSpace(j.EmbedIdentity) == "" {
 		return errors.New("embedqueue: job has empty embed identity")
+	}
+	if j.RepID > 0 || len(j.ChunkIDs) > 0 {
+		if !j.IsDocument() {
+			return errors.New("embedqueue: document job needs both rep_id and chunk_ids")
+		}
+		if j.ChunkIDs[0] != j.ChunkID {
+			return errors.New("embedqueue: document job chunk_id must be its first chunk id")
+		}
+		for _, id := range j.ChunkIDs {
+			if id == 0 {
+				return errors.New("embedqueue: document job has zero chunk id")
+			}
+		}
 	}
 	return nil
 }

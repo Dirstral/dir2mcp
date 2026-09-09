@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	stdunicode "unicode"
 	"unicode/utf8"
 
 	"github.com/dirstral/dir2mcp/internal/corpusfs"
@@ -122,6 +123,21 @@ type RepresentationGenerator struct {
 	// failed here, and the error did not name the reason. The configured value is
 	// authoritative now.
 	maxFileBytes int64
+	// lateChunking is the resolved ingest.late_chunking flag (SPEC §8.1.9). While
+	// it is on, the chunk writer also persists each text representation's
+	// document text (model.RepresentationTextStore) so the embedding worker can
+	// pool every chunk from one whole-document token embedding. Rune spans are
+	// persisted on every chunk regardless of the flag: they are two integers,
+	// and writing them always means a corpus that later turns the mode on (a
+	// reindex-bound change, §8.1.4) never has to guess where a chunk sits.
+	lateChunking bool
+}
+
+// SetLateChunking binds the resolved ingest.late_chunking flag (SPEC §8.1.9).
+// On, the chunk writer persists each text representation's document text
+// alongside its chunks; off (the default), it writes nothing extra.
+func (rg *RepresentationGenerator) SetLateChunking(on bool) {
+	rg.lateChunking = on
 }
 
 // SetMaxFileBytes plumbs the resolved `ingest.max_file_mb` cap (in bytes) into the
@@ -294,7 +310,7 @@ func (rg *RepresentationGenerator) GenerateRawTextFromContent(ctx context.Contex
 		if err != nil {
 			return fmt.Errorf("upsert representation: %w", err)
 		}
-		if err := rg.upsertChunksForRepresentationWithStore(ctx, tx, repID, indexKindForDocType(doc.DocType), segments, quarantineDecision{}); err != nil {
+		if err := rg.upsertChunksForRepresentationWithStoreDoc(ctx, tx, repID, indexKindForDocType(doc.DocType), segments, quarantineDecision{}, string(normalizedContent)); err != nil {
 			return err
 		}
 		return nil
@@ -324,7 +340,7 @@ func (rg *RepresentationGenerator) PersistSummary(ctx context.Context, rep model
 		if err != nil {
 			return fmt.Errorf("upsert summary representation: %w", err)
 		}
-		return rg.upsertChunksForRepresentationWithStore(ctx, tx, repID, "text", segments, quarantineDecision{})
+		return rg.upsertChunksForRepresentationWithStoreDoc(ctx, tx, repID, "text", segments, quarantineDecision{}, summaryText)
 	})
 }
 
@@ -389,6 +405,16 @@ func (rg *RepresentationGenerator) upsertChunksForRepresentation(ctx context.Con
 }
 
 func (rg *RepresentationGenerator) upsertChunksForRepresentationWithStore(ctx context.Context, st model.RepresentationStore, repID int64, indexKind string, segments []chunkSegment, decision quarantineDecision) error {
+	return rg.upsertChunksForRepresentationWithStoreDoc(ctx, st, repID, indexKind, segments, decision, "")
+}
+
+// upsertChunksForRepresentationWithStoreDoc is the chunk writer proper. docText
+// is the source string the segments were cut from when the caller has one (raw
+// text, code, summaries, annotation text); "" when the representation's chunks
+// are not windows of one string, in which case the document text the
+// late-chunking pooling step reads is the ordinal join (lateChunkInputs, SPEC
+// §8.1.9).
+func (rg *RepresentationGenerator) upsertChunksForRepresentationWithStoreDoc(ctx context.Context, st model.RepresentationStore, repID int64, indexKind string, segments []chunkSegment, decision quarantineDecision, docText string) error {
 	embeddingStatus := "pending"
 	if decision.quarantine {
 		embeddingStatus = "error"
@@ -398,6 +424,9 @@ func (rg *RepresentationGenerator) upsertChunksForRepresentationWithStore(ctx co
 	// once. Off by default — with no contextualizer bound this is a no-op and
 	// every chunk records embedding_mode=disabled, exactly as before.
 	contexts := rg.chunkContexts(ctx, segments)
+	// Late chunking inputs (SPEC §5.2/§5.3/§8.1.9): the document text and each
+	// chunk's rune span in it, resolved once per representation.
+	docText, runeSpans := lateChunkInputs(docText, segments)
 	for i, seg := range segments {
 		chunk := model.Chunk{
 			RepID:           repID,
@@ -410,6 +439,8 @@ func (rg *RepresentationGenerator) upsertChunksForRepresentationWithStore(ctx co
 			ErrorCategory:   decision.category,
 			Context:         contexts[i].text,
 			EmbeddingMode:   contexts[i].mode,
+			RuneStart:       runeSpans[i].start,
+			RuneEnd:         runeSpans[i].end,
 		}
 		// A kind-less span carries no provenance (e.g. a structured chunk whose
 		// source elements exposed no page); persist the chunk with no span row
@@ -425,7 +456,98 @@ func (rg *RepresentationGenerator) upsertChunksForRepresentationWithStore(ctx co
 	if err := st.SoftDeleteChunksFromOrdinal(ctx, repID, len(segments)); err != nil {
 		return fmt.Errorf("soft delete stale chunks: %w", err)
 	}
+	return rg.persistRepresentationText(ctx, st, repID, docText, len(segments))
+}
+
+// persistRepresentationText writes the representation's document text while
+// late chunking is on (SPEC §5.2 `representation_texts`), in the SAME store
+// handle (transaction) the chunks were written through, so the text and the
+// rune spans that index into it commit together. A store that cannot persist the
+// text while the mode is on is an error, not a silent skip: the embedding worker
+// would otherwise find no text under an identity that says the corpus is pooled
+// (SPEC §8.1.9 "Pre-feature rows").
+//
+// OFF (or a representation with no chunks) it DELETES any text the representation
+// still carries. rep_id is stable per (document, rep_type) across rewrites, so a
+// text left from an earlier late-chunking run would otherwise survive this
+// rewrite and a later late-chunking run would pair it with the new chunks' rune
+// spans, pooling the wrong runes without any error (#951 review). A store
+// without the capability never wrote a text, so there is nothing to delete.
+func (rg *RepresentationGenerator) persistRepresentationText(ctx context.Context, st model.RepresentationStore, repID int64, docText string, nSegments int) error {
+	if !rg.lateChunking || nSegments == 0 {
+		if ts, ok := st.(model.RepresentationTextStore); ok {
+			if err := ts.DeleteRepresentationText(ctx, repID); err != nil {
+				return fmt.Errorf("delete stale representation text: %w", err)
+			}
+		}
+		return nil
+	}
+	ts, ok := st.(model.RepresentationTextStore)
+	if !ok {
+		return fmt.Errorf("ingest.late_chunking is on but the store (%T) cannot persist representation text", st)
+	}
+	if err := ts.UpsertRepresentationText(ctx, repID, docText); err != nil {
+		return fmt.Errorf("persist representation text: %w", err)
+	}
 	return nil
+}
+
+// runeSpan is a chunk's half-open rune window in its representation's document
+// text (SPEC §5.3 rune_start/rune_end).
+type runeSpan struct{ start, end int }
+
+// lateChunkInputs resolves the late-chunking inputs of one representation (SPEC
+// §8.1.9 "Persisted inputs"): the document text and one rune span per segment
+// into it, such that the runes of docText at [span) are exactly the segment's
+// Text. Two forms, both deterministic from the persisted chunks:
+//
+//   - Source windows. When the caller supplied the source string and EVERY
+//     segment carries a chunker-reported window that really does reproduce its
+//     Text, the document text is the source and the spans are those windows.
+//     This is the raw-text/code path; overlapping chunks share source runes
+//     rather than duplicating them.
+//   - Ordinal join. Otherwise the document text is the segments' Text joined in
+//     order with a single "\n" (the same parent text contextual retrieval
+//     builds) and the spans are the cumulative positions in that join. This is
+//     the path for OCR pages, structured blocks and time-segmented transcripts,
+//     whose chunks are not windows of one string.
+//
+// The verification in the first form is deliberate: a chunker bug that reported
+// a wrong window would otherwise pool the wrong tokens silently; falling back to
+// the join keeps every span exact.
+func lateChunkInputs(source string, segments []chunkSegment) (docText string, spans []runeSpan) {
+	spans = make([]runeSpan, len(segments))
+	if source != "" && sourceWindowsExact(source, segments) {
+		for i, seg := range segments {
+			spans[i] = runeSpan{start: seg.RuneStart, end: seg.RuneEnd}
+		}
+		return source, spans
+	}
+	pos := 0
+	for i, seg := range segments {
+		n := utf8.RuneCountInString(seg.Text)
+		spans[i] = runeSpan{start: pos, end: pos + n}
+		pos += n + 1 // the "\n" joinSegmentTexts inserts between segments
+	}
+	return joinSegmentTexts(segments), spans
+}
+
+// sourceWindowsExact reports whether every segment carries a known rune window
+// into source that reproduces its Text exactly.
+func sourceWindowsExact(source string, segments []chunkSegment) bool {
+	if len(segments) == 0 {
+		return false
+	}
+	runes := []rune(source)
+	for _, seg := range segments {
+		if !seg.RuneSpanKnown || seg.RuneStart < 0 || seg.RuneEnd <= seg.RuneStart || seg.RuneEnd > len(runes) {
+			return false
+		}
+		if string(runes[seg.RuneStart:seg.RuneEnd]) != seg.Text {
+			return false
+		}
+	}
+	return true
 }
 
 // chunkContextState is one chunk's resolved contextual-retrieval outcome: the
@@ -711,12 +833,26 @@ const (
 type chunkSegment struct {
 	Text string
 	Span model.Span
+	// RuneStart and RuneEnd are the half-open rune window [RuneStart, RuneEnd)
+	// of Text inside the source string the chunker was given, valid only when
+	// RuneSpanKnown (SPEC §5.3 rune_start/rune_end, §8.1.9). The windowed
+	// chunkers (chunkTextByChars, chunkCodeByLines) set them; a chunker whose
+	// segments are not windows of one string (OCR pages, structured blocks,
+	// time-segmented transcripts) leaves them unset and the representation
+	// falls back to positions in the ordinal join (lateChunkInputs).
+	RuneStart     int
+	RuneEnd       int
+	RuneSpanKnown bool
 }
 
 // ChunkSegment is a public test-friendly representation of a chunk span pair.
 type ChunkSegment struct {
 	Text string
 	Span model.Span
+	// RuneStart/RuneEnd/RuneSpanKnown mirror chunkSegment (SPEC §5.3, §8.1.9).
+	RuneStart     int
+	RuneEnd       int
+	RuneSpanKnown bool
 }
 
 func indexKindForDocType(docType string) string {
@@ -1686,6 +1822,12 @@ func chunkCodeByLines(content string, maxLines, overlapLines int) []chunkSegment
 		return nil
 	}
 	lines := strings.Split(content, "\n")
+	// Rune offset at which each line starts in content (SPEC §8.1.9): line i
+	// begins after the i preceding lines and their i newline runes.
+	lineRuneStarts := make([]int, len(lines)+1)
+	for i, line := range lines {
+		lineRuneStarts[i+1] = lineRuneStarts[i] + utf8.RuneCountInString(line) + 1
+	}
 
 	step := maxLines - overlapLines
 	if step <= 0 {
@@ -1701,12 +1843,11 @@ func chunkCodeByLines(content string, maxLines, overlapLines int) []chunkSegment
 		if start >= end {
 			break
 		}
-		text := strings.Join(lines[start:end], "\n")
-		text = strings.TrimSpace(text)
+		text, lead := trimSpaceWithLead(strings.Join(lines[start:end], "\n"))
 		if text == "" {
 			continue
 		}
-		out = appendCodeWindow(out, text, start, end)
+		out = appendCodeWindow(out, text, start, end, lineRuneStarts[start]+lead)
 		if end == len(lines) {
 			break
 		}
@@ -1714,11 +1855,25 @@ func chunkCodeByLines(content string, maxLines, overlapLines int) []chunkSegment
 	return out
 }
 
+// trimSpaceWithLead is strings.TrimSpace that also reports how many leading
+// runes it removed, so a chunker can place the trimmed text back into its source
+// string as an exact rune window (SPEC §8.1.9).
+func trimSpaceWithLead(s string) (trimmed string, leadRunes int) {
+	left := strings.TrimLeftFunc(s, stdunicode.IsSpace)
+	leadRunes = utf8.RuneCountInString(s) - utf8.RuneCountInString(left)
+	return strings.TrimRightFunc(left, stdunicode.IsSpace), leadRunes
+}
+
 // appendCodeWindow emits a line-window's text as one chunk, or—when the window
 // exceeds the rune cap (e.g. a minified single-line bundle)—splits it further by
 // characters so no chunk overruns the embedder input limit. Sub-segment line
 // numbers are mapped back into the window's absolute [start+1, end] range.
-func appendCodeWindow(out []chunkSegment, text string, start, end int) []chunkSegment {
+//
+// runeStart is the rune offset of text (already trimmed) inside the source
+// content, so each emitted chunk carries its exact source window (SPEC §8.1.9);
+// a sub-segment's window is offset by it, since chunkTextByChars measured the
+// sub-window against text alone.
+func appendCodeWindow(out []chunkSegment, text string, start, end, runeStart int) []chunkSegment {
 	if utf8.RuneCountInString(text) <= codeChunkMaxChars {
 		return append(out, chunkSegment{
 			Text: text,
@@ -1727,6 +1882,9 @@ func appendCodeWindow(out []chunkSegment, text string, start, end int) []chunkSe
 				StartLine: start + 1,
 				EndLine:   end,
 			},
+			RuneStart:     runeStart,
+			RuneEnd:       runeStart + utf8.RuneCountInString(text),
+			RuneSpanKnown: true,
 		})
 	}
 	for _, sub := range chunkTextByChars(text, codeChunkMaxChars, codeChunkOverlapChars, 1) {
@@ -1737,6 +1895,9 @@ func appendCodeWindow(out []chunkSegment, text string, start, end int) []chunkSe
 				StartLine: start + sub.Span.StartLine,
 				EndLine:   start + sub.Span.EndLine,
 			},
+			RuneStart:     runeStart + sub.RuneStart,
+			RuneEnd:       runeStart + sub.RuneEnd,
+			RuneSpanKnown: sub.RuneSpanKnown,
 		})
 	}
 	return out
@@ -1800,7 +1961,7 @@ func chunkTextByChars(content string, maxChars, overlapChars, minChars int) []ch
 		}
 
 		segmentRunes := runes[start:end]
-		segmentText := strings.TrimSpace(string(segmentRunes))
+		segmentText, lead := trimSpaceWithLead(string(segmentRunes))
 		if len([]rune(segmentText)) < minChars && end != len(runes) {
 			continue
 		}
@@ -1810,6 +1971,10 @@ func chunkTextByChars(content string, maxChars, overlapChars, minChars int) []ch
 
 		startLine := lineNumberForOffset(lineStarts, start)
 		endLine := lineNumberForOffset(lineStarts, end-1)
+		// The persisted rune span is the TRIMMED text's exact window in the
+		// source (SPEC §8.1.9), so content[RuneStart:RuneEnd] == Text holds and
+		// the late-chunking pooling step selects precisely this chunk's tokens.
+		runeStart := start + lead
 		out = append(out, chunkSegment{
 			Text: segmentText,
 			Span: model.Span{
@@ -1817,6 +1982,9 @@ func chunkTextByChars(content string, maxChars, overlapChars, minChars int) []ch
 				StartLine: startLine,
 				EndLine:   endLine,
 			},
+			RuneStart:     runeStart,
+			RuneEnd:       runeStart + utf8.RuneCountInString(segmentText),
+			RuneSpanKnown: true,
 		})
 		if end == len(runes) {
 			break

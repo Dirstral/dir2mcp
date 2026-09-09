@@ -93,8 +93,27 @@ func (b *MemBroker) Enqueue(_ context.Context, job Job) error {
 
 // sameJobKey reports whether two jobs name the same unit of work: the same
 // vector axis of the same chunk of the SAME corpus (SPEC §8.7.2).
-func sameJobKey(a, b Job) bool {
-	return a.CorpusID == b.CorpusID && a.ChunkID == b.ChunkID && a.IndexKind == b.IndexKind
+//
+// Two DOCUMENT jobs (SPEC §8.1.9) name the same unit of work when they name the
+// same representation on the same axis of the same corpus, whatever their first
+// chunk id: document ownership means one live job per representation.
+//
+// The INCOMING job chooses the key, exactly as the SQLite broker's dedup probe
+// does: a document job is keyed by its representation (against live document
+// jobs only), a per-chunk job by its chunk id against ANY live job, because a
+// document job's chunk_id column is its first chunk id and the SQLite probe does
+// not exclude it. Keying on the existing job instead let a live per-chunk job for
+// chunk 5 swallow a document job whose first chunk is 5, so the two brokers
+// disagreed and the memory broker deferred the document; excluding document jobs
+// from the per-chunk probe made them disagree the other way round.
+func sameJobKey(existing, incoming Job) bool {
+	if existing.CorpusID != incoming.CorpusID || existing.IndexKind != incoming.IndexKind {
+		return false
+	}
+	if incoming.IsDocument() {
+		return existing.IsDocument() && existing.RepID == incoming.RepID
+	}
+	return existing.ChunkID == incoming.ChunkID
 }
 
 // Lease reclaims any expired in-flight jobs, then claims the first pending job
