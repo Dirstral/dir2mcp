@@ -97,32 +97,14 @@ func (c *Coordinator) EnqueuePending(ctx context.Context, indexKind string) (int
 		}
 		enqueuedThisPass := 0
 		for _, t := range tasks {
-			id := t.Metadata.ChunkID
-			if id == 0 {
-				id = t.Label
-			}
-			if _, dup := seen[id]; dup {
-				continue
-			}
-			job, ok, err := c.jobFor(ctx, t, indexKind)
+			enqueued, err := c.enqueueTask(ctx, t, indexKind, seen)
 			if err != nil {
 				return total, err
 			}
-			if !ok {
-				// The task left pending between the page read and the
-				// per-representation read; it is not work any more.
-				seen[id] = struct{}{}
-				continue
+			if enqueued {
+				total++
+				enqueuedThisPass++
 			}
-			if err := c.Broker.Enqueue(ctx, job); err != nil {
-				return total, fmt.Errorf("embedqueue: enqueue chunk %d: %w", id, err)
-			}
-			for _, cid := range job.AllChunkIDs() {
-				seen[cid] = struct{}{}
-			}
-			seen[id] = struct{}{}
-			total++
-			enqueuedThisPass++
 		}
 		// Stop when a pass enqueued nothing new: either the store is empty or it
 		// keeps returning the same already-enqueued head (status not yet updated).
@@ -130,6 +112,38 @@ func (c *Coordinator) EnqueuePending(ctx context.Context, indexKind string) (int
 			return total, nil
 		}
 	}
+}
+
+// enqueueTask handles one task of a NextPending page: it skips a chunk already
+// enqueued this call (seen), builds the job (per chunk, or one document job for
+// the task's representation under late chunking), enqueues it and records every
+// chunk id the job names in seen. It reports whether a job was enqueued. A task
+// jobFor reports as stale (its representation has no pending chunk any more) is
+// recorded in seen and skipped, so the pass does not spin on it.
+func (c *Coordinator) enqueueTask(ctx context.Context, t model.ChunkTask, indexKind string, seen map[uint64]struct{}) (bool, error) {
+	id := t.Metadata.ChunkID
+	if id == 0 {
+		id = t.Label
+	}
+	if _, dup := seen[id]; dup {
+		return false, nil
+	}
+	job, ok, err := c.jobFor(ctx, t, indexKind)
+	if err != nil {
+		return false, err
+	}
+	if !ok {
+		seen[id] = struct{}{}
+		return false, nil
+	}
+	if err := c.Broker.Enqueue(ctx, job); err != nil {
+		return false, fmt.Errorf("embedqueue: enqueue chunk %d: %w", id, err)
+	}
+	for _, cid := range job.AllChunkIDs() {
+		seen[cid] = struct{}{}
+	}
+	seen[id] = struct{}{}
+	return true, nil
 }
 
 // jobFor builds the job for a pending task: a per-chunk job by default, or, with
