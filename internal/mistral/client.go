@@ -673,6 +673,21 @@ func (c *Client) Transcribe(ctx context.Context, relPath string, data []byte) (s
 	return c.transcribeWithRetry(ctx, relPath, data)
 }
 
+// MaxTranscribePayloadBytes implements model.PayloadLimitedTranscriber: it reports
+// the very limit transcribeOnce enforces, so the ingest pipeline can split a long
+// recording into windows that fit instead of sending one oversized request that
+// Voxtral refuses (issue #954). The STT check reuses MaxOCRPayloadBytes, so this
+// reports the same value.
+func (c *Client) MaxTranscribePayloadBytes() int {
+	if c.MaxOCRPayloadBytes > 0 {
+		return c.MaxOCRPayloadBytes
+	}
+	return defaultMaxOCRPayloadBytes
+}
+
+// compile-time interface check for the optional payload-cap capability.
+var _ model.PayloadLimitedTranscriber = (*Client)(nil)
+
 func (c *Client) Generate(ctx context.Context, prompt string) (string, error) {
 	return c.generateWithRetry(ctx, prompt)
 }
@@ -786,10 +801,7 @@ func (c *Client) transcribeOnce(ctx context.Context, relPath string, data []byte
 	// enforce a maximum payload size mirroring the OCR check so callers can
 	// avoid sending absurdly large audio blobs.  use the same configuration
 	// parameter for simplicity.
-	maxPayload := c.MaxOCRPayloadBytes
-	if maxPayload <= 0 {
-		maxPayload = defaultMaxOCRPayloadBytes
-	}
+	maxPayload := c.MaxTranscribePayloadBytes()
 	if len(data) > maxPayload {
 		return "", &model.ProviderError{
 			Code:      "MISTRAL_FAILED",
