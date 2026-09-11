@@ -33,7 +33,9 @@ import (
 	"mime/multipart"
 	"net/http"
 	"path/filepath"
+	"regexp"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/dirstral/dir2mcp/internal/model"
@@ -93,6 +95,12 @@ type Client struct {
 	// falls back to defaultGenerationMaxTokens; it is never sent unbounded.
 	// See issue #500.
 	GenerationMaxTokens int
+
+	// capName remembers which spelling of the completion cap this endpoint
+	// accepts (issue #958). Zero value is capModern, so a fresh client tries the
+	// current OpenAI parameter first and only falls back when a server refuses
+	// it by name. Atomic: one Client serves concurrent embed/generate workers.
+	capName atomic.Int32
 	// DefaultEmbedModel/DefaultChatModel/DefaultSTTModel/DefaultTTSModel/
 	// DefaultTTSVoice are used when the corresponding call is made with
 	// an empty value.
@@ -303,12 +311,28 @@ type generateMessage struct {
 	Content string `json:"content"`
 }
 
+// generateRequest carries the completion cap under ONE of two names, because
+// the two spellings do not overlap across the model generations (issue #958):
+//
+//   - `max_completion_tokens` is the current OpenAI spelling and the only one
+//     GPT-5-era models accept. Measured 2026-09-11: gpt-5.6-sol, gpt-5.5 and
+//     gpt-5.4-mini all answer `400 Unsupported parameter: 'max_tokens' is not
+//     supported with this model` and accept `max_completion_tokens`.
+//   - `max_tokens` is the legacy spelling. gpt-4o and gpt-4o-mini accept both,
+//     but an OpenAI-COMPATIBLE server (this client also drives Mistral,
+//     OpenRouter, Ollama and self-hosted llama.cpp/vLLM under `kind: openai`)
+//     may know only this one.
+//
+// So the cap is sent under the modern name first and the legacy name is the
+// fallback, chosen per request by generateOnce. Exactly one field is emitted:
+// sending both is itself a 400 on some servers. The value is always > 0 after
+// clamping (see generate), so the emitted field never carries a zero and every
+// completion stays bounded (issue #500).
 type generateRequest struct {
-	Model    string            `json:"model"`
-	Messages []generateMessage `json:"messages"`
-	// MaxTokens is always > 0 after clamping (see generate), so it is always
-	// emitted — no omitempty — to keep every completion bounded (issue #500).
-	MaxTokens int `json:"max_tokens"`
+	Model               string            `json:"model"`
+	Messages            []generateMessage `json:"messages"`
+	MaxCompletionTokens int               `json:"max_completion_tokens,omitempty"`
+	MaxTokens           int               `json:"max_tokens,omitempty"`
 }
 
 type generateResponse struct {
@@ -372,6 +396,13 @@ func (c *Client) generate(ctx context.Context, prompt string, maxTokensOverride 
 			}
 		}
 		text, err := c.generateOnce(ctx, chatModel, prompt, maxTokens, timeout)
+		if unsupportedCapParam(err, capModern) {
+			// An OpenAI-compatible server that predates the rename. Retry once
+			// under the legacy name and remember it for this client, so one
+			// probe is spent per client rather than one per request.
+			c.capName.Store(int32(capLegacy))
+			text, err = c.generateOnceWithCapName(ctx, chatModel, prompt, maxTokens, timeout, capLegacy)
+		}
 		if err == nil {
 			return text, nil
 		}
@@ -385,11 +416,93 @@ func (c *Client) generate(ctx context.Context, prompt string, maxTokensOverride 
 }
 
 func (c *Client) generateOnce(ctx context.Context, chatModel, prompt string, maxTokens int, timeout time.Duration) (string, error) {
-	body, err := json.Marshal(generateRequest{
-		Model:     chatModel,
-		Messages:  []generateMessage{{Role: "user", Content: prompt}},
-		MaxTokens: maxTokens,
-	})
+	return c.generateOnceWithCapName(ctx, chatModel, prompt, maxTokens, timeout, c.completionCap())
+}
+
+// completionCap is the spelling this client uses now: the modern one until a
+// server refuses it, then the legacy one for the rest of the client's life. It
+// is atomic because one Client is shared by concurrent workers.
+func (c *Client) completionCap() completionCapName {
+	return completionCapName(c.capName.Load())
+}
+
+// completionCapName selects which spelling of the completion cap goes on the
+// wire. See generateRequest for why there are two.
+type completionCapName int
+
+const (
+	capModern completionCapName = iota // max_completion_tokens
+	capLegacy                          // max_tokens
+)
+
+// capRejectionPhrase matches a rejection bound DIRECTLY to the parameter that
+// follows it, for servers that do not return a structured `param`. The name must
+// be the thing being refused, not merely a word in the sentence.
+var capRejectionPhrase = regexp.MustCompile(
+	`(?i)(?:unsupported|unrecognized|unknown|invalid|extra)[ _-]*(?:parameter|argument|field|input)?s?\s*[:\s]\s*['\"]?(max_completion_tokens|max_tokens)\b`)
+
+// errorParam pulls `error.param` out of an OpenAI-shaped error body. httpError
+// puts the whole response body in Message, so the structured field is still
+// there. Returns "" when the body is not JSON or carries no param.
+func errorParam(msg string) string {
+	var body struct {
+		Error struct {
+			Param string `json:"param"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(msg), &body); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(body.Error.Param)
+}
+
+// unsupportedCapParam reports whether err is the provider refusing the cap
+// parameter ITSELF, which is the one error worth retrying under the other
+// spelling. Everything else must surface unchanged.
+//
+// The refusal has to be bound to the parameter, not merely co-located with its
+// name (#959 review). OpenAI's own message for a rejected parameter NAMES the
+// other spelling as the remedy:
+//
+//	Unsupported parameter: 'temperature' is not supported with this model.
+//	Use 'max_completion_tokens' instead.
+//
+// A plain substring test sees "unsupported" and "max_completion_tokens" in that
+// sentence and flips the client to the legacy name for the rest of its life,
+// over an error that had nothing to do with the cap. So:
+//
+//  1. `error.param` decides when the body carries it. OpenAI and most
+//     compatible servers set it, and it names exactly one parameter.
+//  2. Otherwise the rejection phrase must be immediately followed by the name.
+//  3. Otherwise no retry. A server whose wording matches neither simply gets no
+//     fallback, and the operator sees the real 400 instead of a silent reroute.
+func unsupportedCapParam(err error, sent completionCapName) bool {
+	var pErr *model.ProviderError
+	if !errors.As(err, &pErr) || pErr.StatusCode != http.StatusBadRequest {
+		return false
+	}
+	name := "max_completion_tokens"
+	if sent == capLegacy {
+		name = "max_tokens"
+	}
+	if param := errorParam(pErr.Message); param != "" {
+		return strings.EqualFold(param, name)
+	}
+	m := capRejectionPhrase.FindStringSubmatch(pErr.Message)
+	return len(m) == 2 && strings.EqualFold(m[1], name)
+}
+
+func (c *Client) generateOnceWithCapName(ctx context.Context, chatModel, prompt string, maxTokens int, timeout time.Duration, cap completionCapName) (string, error) {
+	req := generateRequest{
+		Model:    chatModel,
+		Messages: []generateMessage{{Role: "user", Content: prompt}},
+	}
+	if cap == capLegacy {
+		req.MaxTokens = maxTokens
+	} else {
+		req.MaxCompletionTokens = maxTokens
+	}
+	body, err := json.Marshal(req)
 	if err != nil {
 		return "", &model.ProviderError{Code: "OPENAI_FAILED", Message: "failed to marshal generation request", Retryable: false, Cause: err}
 	}
