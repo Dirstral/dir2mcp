@@ -77,7 +77,7 @@ func MergeTranscriptWindows(windows []TranscriptWindow, stepMS int) (string, []m
 		if !last && windows[i+1].StartMS > coreEnd {
 			coreEnd = windows[i+1].StartMS
 		}
-		for _, s := range windowSegments(w.Res, w.StartMS) {
+		for _, s := range windowSegments(w.Res, w.StartMS, i) {
 			if s.startMS < w.StartMS {
 				s.startMS = w.StartMS
 			}
@@ -111,6 +111,10 @@ type mergedSegment struct {
 	startMS int
 	body    string
 	words   []model.TimedWord
+	// win identifies the decode window this segment came from, so de-duplication
+	// only ever collapses the SAME utterance re-decoded by two overlapping windows,
+	// never a speaker who really did repeat themselves inside one window.
+	win int
 }
 
 // windowSegments splits one window's decode result into absolute-time segments,
@@ -118,7 +122,7 @@ type mergedSegment struct {
 // its span. Timestamps and word starts are offset by the window's start so the
 // result is in absolute time. A leading run of un-timestamped text is attached to
 // a synthetic segment at the window start.
-func windowSegments(res model.TranscriptResult, offsetMS int) []mergedSegment {
+func windowSegments(res model.TranscriptResult, offsetMS, win int) []mergedSegment {
 	type lineT struct {
 		start int
 		body  string
@@ -148,7 +152,7 @@ func windowSegments(res model.TranscriptResult, offsetMS int) []mergedSegment {
 	}
 	segs := make([]mergedSegment, len(lns))
 	for i, l := range lns {
-		segs[i] = mergedSegment{startMS: l.start + offsetMS, body: l.body}
+		segs[i] = mergedSegment{startMS: l.start + offsetMS, body: l.body, win: win}
 	}
 	// Assign each word to the last segment whose local start is <= the word's local
 	// start (segments are in playback order).
@@ -174,7 +178,8 @@ func windowSegments(res model.TranscriptResult, offsetMS int) []mergedSegment {
 // the boundary and both copies survive. Here a segment is dropped when it shares
 // >= 0.75 of its words with a recent kept segment (within 8 s); the more complete
 // wording — and its word timings — is retained, so the transcript never doubles a
-// sentence.
+// sentence. Only segments from DIFFERENT windows are compared: a repeated phrase
+// inside one window is the speaker repeating themselves, not an overlap artifact.
 func dedupMergedSegments(segs []mergedSegment) []mergedSegment {
 	kept := make([]mergedSegment, 0, len(segs))
 	for _, s := range segs {
@@ -182,6 +187,10 @@ func dedupMergedSegments(segs []mergedSegment) []mergedSegment {
 		for j := len(kept) - 1; j >= 0 && j >= len(kept)-4; j-- {
 			if s.startMS-kept[j].startMS > 8000 {
 				break
+			}
+			if kept[j].win == s.win {
+				// Same window: whatever it said twice, it really said twice.
+				continue
 			}
 			if segmentWordOverlap(kept[j].body, s.body) >= 0.75 {
 				if len(s.body) > len(kept[j].body) { // keep the fuller decode + its words
@@ -301,9 +310,10 @@ const DefaultSTTWindowMS = 10 * 60 * 1000
 
 // minSTTWindowMS floors the window derived from a provider payload cap. A shorter
 // window decodes badly (a very short clip makes Whisper hallucinate) and multiplies
-// requests, so an extremely dense payload is windowed at the floor even when a
-// window may still exceed the cap: the provider then reports its cap honestly
-// instead of dir2mcp slicing the audio into rubble.
+// requests, so an extremely dense payload is scheduled at the floor rather than in
+// rubble. The floor does not hand the provider an oversized request: extractWithinCap
+// measures each cut and halves it (down to minWindowSplitMS) when it overshoots the
+// cap, so the cap is enforced on the bytes actually sent, not on an estimate.
 const minSTTWindowMS = 30 * 1000
 
 // sttWindowCapHeadroomPct is the share of the provider cap a window may occupy.
@@ -474,61 +484,162 @@ func (s *Service) decodeWindowedTranscript(ctx context.Context, relPath, tmpPath
 	if stepMS <= 0 {
 		stepMS = windowMS
 	}
-	windows, attempted, err := s.decodeTranscriptWindows(ctx, relPath, tmpPath, stt, totalMS, windowMS, stepMS, label)
+	windows, stats, err := s.decodeTranscriptWindows(ctx, relPath, tmpPath, stt, windowSchedule{
+		totalMS:  totalMS,
+		windowMS: windowMS,
+		stepMS:   stepMS,
+		capBytes: sttPayloadCapBytes(stt),
+		label:    label,
+	})
 	if err != nil {
 		return "", nil, err
 	}
 	// One progress line per document: how much of the recording actually decoded.
 	s.getLogger().Printf("windowed %s %s: %d/%d windows decoded (window %ds, overlap %ds, duration %ds)",
-		label, relPath, len(windows), attempted, windowMS/1000, overlapMS/1000, totalMS/1000)
+		label, relPath, stats.decoded, stats.attempted, windowMS/1000, overlapMS/1000, totalMS/1000)
 	text, words := MergeTranscriptWindows(windows, stepMS)
 	return text, words, nil
 }
 
+// windowSchedule is the plan for one windowed decode: the recording length, the
+// window and its step (window minus overlap), the provider's payload cap (0 when
+// it declares none), and the log label.
+type windowSchedule struct {
+	totalMS  int
+	windowMS int
+	stepMS   int
+	capBytes int
+	label    string
+}
+
+// windowStats counts the scheduled windows that were attempted and the ones that
+// yielded at least one decoded piece.
+type windowStats struct {
+	attempted int
+	decoded   int
+}
+
 // decodeTranscriptWindows extracts and decodes each scheduled window from the
-// staged audio at tmpPath, returning the windows that decoded to content (in
-// schedule order) and how many were attempted. It prefers the structured
-// (word-timing) capability per window and degrades to text-only, exactly as a
+// staged audio at tmpPath, returning the pieces that decoded to content (in
+// schedule order) and the per-window counts. It prefers the structured
+// (word-timing) capability per piece and degrades to text-only, exactly as a
 // single-request decode does.
 //
-// A window whose decode fails (silence, music, a provider error that survived the
-// client's retries) is skipped with a warning rather than aborting the whole
-// recording, because a long recording routinely has stretches with nothing to
-// transcribe. If EVERY attempted window fails that is systemic (provider down, bad
-// credentials, unsupported media), so it is returned as an error and the document
-// fails exactly as it does today.
-func (s *Service) decodeTranscriptWindows(ctx context.Context, relPath, tmpPath string, stt model.Transcriber, totalMS, windowMS, stepMS int, label string) ([]TranscriptWindow, int, error) {
+// A window that fails — the cut fails, or the decode fails on silence, music or a
+// provider error that survived the client's retries — is skipped with a warning
+// rather than aborting the whole recording, because a long recording routinely has
+// stretches with nothing to transcribe and one bad region must not cost the other
+// two hours. If EVERY attempted window fails that is systemic (ffmpeg absent,
+// provider down, bad credentials, unsupported media), so it is returned as an
+// error and the document fails exactly as it does today.
+func (s *Service) decodeTranscriptWindows(ctx context.Context, relPath, tmpPath string, stt model.Transcriber, plan windowSchedule) ([]TranscriptWindow, windowStats, error) {
 	var windows []TranscriptWindow
+	var firstDecodeErr, firstCutErr error
+	var stats windowStats
+	for _, start := range TranscriptWindowStarts(plan.totalMS, plan.stepMS, TranscriptWindowOverlapMS(plan.windowMS)) {
+		end := start + plan.windowMS
+		if end > plan.totalMS {
+			end = plan.totalMS
+		}
+		stats.attempted++
+		pieces, err := s.extractWithinCap(ctx, tmpPath, start, end, plan.capBytes, maxWindowSplits)
+		if err != nil {
+			if firstCutErr == nil {
+				firstCutErr = &windowExtractError{fmt.Errorf("extract %s window [%d,%d]ms: %w", plan.label, start, end, err)}
+			}
+			s.getLogger().Printf("windowed %s: cannot cut window [%d,%d]ms of %s: %v", plan.label, start, end, relPath, err)
+			continue
+		}
+		decoded, decodeErr := s.decodeWindowPieces(ctx, relPath, stt, pieces, plan.label)
+		if decodeErr != nil && firstDecodeErr == nil {
+			firstDecodeErr = decodeErr
+		}
+		if len(decoded) == 0 {
+			continue
+		}
+		stats.decoded++
+		windows = append(windows, decoded...)
+	}
+	if stats.attempted > 0 && stats.decoded == 0 {
+		// Prefer the provider's failure over a cut failure: it is the one whose
+		// retryable/terminal classification decides whether the document stays
+		// pending, and it must survive the aggregation rather than be flattened into
+		// an opaque string. With no decode failure recorded, nothing could be cut,
+		// and the windowExtractError tells the caller to send one request instead.
+		cause := firstDecodeErr
+		if cause == nil {
+			cause = firstCutErr
+		}
+		return nil, stats, fmt.Errorf("windowed %s %s: all %d windows failed: %w", plan.label, relPath, stats.attempted, cause)
+	}
+	return windows, stats, nil
+}
+
+// decodeWindowPieces decodes every piece of one scheduled window and returns the
+// pieces that produced content plus the first decode failure. A piece that fails is
+// skipped, so a window split by the payload cap keeps the halves that did decode.
+func (s *Service) decodeWindowPieces(ctx context.Context, relPath string, stt model.Transcriber, pieces []windowPiece, label string) ([]TranscriptWindow, error) {
+	var out []TranscriptWindow
 	var firstErr error
-	attempted, failed := 0, 0
-	for _, start := range TranscriptWindowStarts(totalMS, stepMS, TranscriptWindowOverlapMS(windowMS)) {
-		end := start + windowMS
-		if end > totalMS {
-			end = totalMS
-		}
-		seg, err := s.extractMediaSegment(ctx, tmpPath, start, end)
+	for _, p := range pieces {
+		text, words, err := s.transcribeWith(ctx, stt, relPath, p.data)
 		if err != nil {
-			return nil, attempted, &windowExtractError{fmt.Errorf("extract %s window [%d,%d]ms: %w", label, start, end, err)}
-		}
-		attempted++
-		text, words, err := s.transcribeWith(ctx, stt, relPath, seg)
-		if err != nil {
-			failed++
 			if firstErr == nil {
 				firstErr = err
 			}
-			s.getLogger().Printf("windowed %s: skip window [%d,%d]ms of %s: %v", label, start, end, relPath, err)
+			s.getLogger().Printf("windowed %s: skip window [%d,%d]ms of %s: %v", label, p.startMS, p.endMS, relPath, err)
 			continue
 		}
-		windows = append(windows, TranscriptWindow{StartMS: start, Res: model.TranscriptResult{Text: text, Words: words}})
+		out = append(out, TranscriptWindow{StartMS: p.startMS, Res: model.TranscriptResult{Text: text, Words: words}})
 	}
-	if attempted > 0 && failed == attempted {
-		// Wrap the first failure so the caller's retryable/terminal classification
-		// (a transient provider error leaves the document pending) survives the
-		// aggregation instead of being flattened into an opaque string.
-		return nil, attempted, fmt.Errorf("windowed %s %s: all %d windows failed: %w", label, relPath, failed, firstErr)
+	return out, firstErr
+}
+
+// windowPiece is one slice of staged audio ready to send: the absolute range it
+// covers and its extracted bytes.
+type windowPiece struct {
+	startMS int
+	endMS   int
+	data    []byte
+}
+
+// maxWindowSplits bounds how often an oversized window is halved before it is sent
+// anyway. Three halvings take a window to an eighth of its length, which is far
+// past any plausible bitrate surprise; splitting further would produce clips too
+// short to decode reliably.
+const maxWindowSplits = 3
+
+// minWindowSplitMS stops the halving at a length Whisper can still decode. A clip
+// below this yields empty or hallucinated text, so an even smaller request is not
+// an improvement over letting the provider report its cap.
+const minWindowSplitMS = 10 * 1000
+
+// extractWithinCap cuts [startMS,endMS) from the staged media and, when the
+// extracted bytes overshoot the provider cap, halves the range and cuts again.
+// STTWindowMS sizes a window from the WHOLE file's bytes-per-millisecond, while
+// avutil.ExtractSegment copies the source codec, so a variable-bitrate stretch or a
+// keyframe-aligned cut can still come out larger than the estimate. A piece that is
+// still over the cap when the split budget runs out is returned anyway: the
+// provider then reports its own cap for that window, which is more honest than
+// dropping audio silently, and the rest of the recording still decodes.
+func (s *Service) extractWithinCap(ctx context.Context, path string, startMS, endMS, capBytes, depth int) ([]windowPiece, error) {
+	data, err := s.extractMediaSegment(ctx, path, startMS, endMS)
+	if err != nil {
+		return nil, err
 	}
-	return windows, attempted, nil
+	if capBytes <= 0 || len(data) <= capBytes || depth <= 0 || endMS-startMS <= minWindowSplitMS {
+		return []windowPiece{{startMS: startMS, endMS: endMS, data: data}}, nil
+	}
+	mid := startMS + (endMS-startMS)/2
+	head, err := s.extractWithinCap(ctx, path, startMS, mid, capBytes, depth-1)
+	if err != nil {
+		return nil, err
+	}
+	tail, err := s.extractWithinCap(ctx, path, mid, endMS, capBytes, depth-1)
+	if err != nil {
+		return nil, err
+	}
+	return append(head, tail...), nil
 }
 
 // windowExtractError marks a failure to SLICE the staged audio (ffmpeg absent, an

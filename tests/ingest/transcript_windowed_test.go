@@ -246,3 +246,17 @@ func TestMergeTranscriptWindowsCountsCharactersNotBytes(t *testing.T) {
 		t.Errorf("non-Latin segments were over-merged; want 2 lines, got:\n%s", text)
 	}
 }
+
+// TestMergeTranscriptWindowsKeepsRepeatsWithinOneWindow pins that overlap
+// de-duplication only collapses the SAME utterance re-decoded by two overlapping
+// windows. A speaker who repeats a phrase inside ONE window said it twice, and both
+// copies must survive; dropping one would silently edit the transcript.
+func TestMergeTranscriptWindowsKeepsRepeatsWithinOneWindow(t *testing.T) {
+	windows := []ingest.TranscriptWindow{
+		{StartMS: 0, Res: model.TranscriptResult{Text: "[0:00] this is very important\n[0:04] this is very important"}},
+	}
+	text, _ := ingest.MergeTranscriptWindows(windows, 20000)
+	if n := strings.Count(text, "this is very important"); n != 2 {
+		t.Errorf("a genuine repeat inside one window was de-duplicated; want 2 copies, got %d:\n%s", n, text)
+	}
+}

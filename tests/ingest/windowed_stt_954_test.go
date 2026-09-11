@@ -103,6 +103,12 @@ type windowSTTHarness struct {
 
 	mu   sync.Mutex
 	cuts []sttWindowCut
+	// oversize multiplies the stub slice's size, so a test can make a window come
+	// out larger than its duration-proportional estimate (ffmpeg copies the source
+	// codec, so a variable-bitrate stretch really can).
+	oversize int
+	// failCut fails the cut of the window starting at the given offset (ms).
+	failCut map[int]error
 }
 
 func newWindowSTTHarness(t *testing.T, tr *windowRecordingTranscriber, totalMS int, payload []byte) *windowSTTHarness {
@@ -122,11 +128,19 @@ func newWindowSTTHarness(t *testing.T, tr *windowRecordingTranscriber, totalMS i
 	h.svc.ExtractSegmentFunc = func(_ context.Context, _ string, startMS, endMS int) ([]byte, error) {
 		h.mu.Lock()
 		h.cuts = append(h.cuts, sttWindowCut{startMS: startMS, endMS: endMS})
+		failCut := h.failCut[startMS]
+		oversize := h.oversize
 		h.mu.Unlock()
+		if failCut != nil {
+			return nil, failCut
+		}
 		if totalMS <= 0 {
 			return nil, errors.New("no duration")
 		}
-		return make([]byte, len(payload)*(endMS-startMS)/totalMS), nil
+		if oversize < 1 {
+			oversize = 1
+		}
+		return make([]byte, oversize*len(payload)*(endMS-startMS)/totalMS), nil
 	}
 	return h
 }
@@ -463,7 +477,7 @@ func TestWindowedSTT_RealSegmentExtraction(t *testing.T) {
 	cmd := exec.CommandContext(context.Background(), ffmpeg, "-nostdin", "-v", "error", "-y",
 		"-f", "lavfi", "-i", "sine=frequency=440:duration=70", src)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Skipf("ffmpeg could not synthesize the fixture: %v: %s", err, out)
+		t.Fatalf("ffmpeg could not synthesize the fixture: %v: %s", err, out)
 	}
 	content, err := os.ReadFile(src)
 	if err != nil {
@@ -505,5 +519,65 @@ func TestWindowedSTT_RealSegmentExtraction(t *testing.T) {
 		if starts[i] <= starts[i-1] {
 			t.Fatalf("timestamps are not monotonic (%v):\n%s", starts, raw)
 		}
+	}
+}
+
+// TestWindowedSTT_OversizedWindowIsSplit pins the guard behind the size estimate:
+// the window is sized from the WHOLE file's bytes per millisecond, but ffmpeg
+// copies the source codec, so a window can still come out over the provider cap.
+// Such a window is halved and sent as pieces, instead of being refused with the
+// very error #954 is about.
+func TestWindowedSTT_OversizedWindowIsSplit(t *testing.T) {
+	t.Parallel()
+	const totalMS = 30 * 60 * 1000
+	content := make([]byte, 300_000)
+	tr := &windowRecordingTranscriber{capBytes: 200_000}
+	h := newWindowSTTHarness(t, tr, totalMS, content)
+	h.oversize = 3 // every cut comes out three times its estimate
+
+	if err := h.svc.GenerateTranscriptRepresentation(context.Background(), mediaDoc("talks/vbr.m4a"), content); err != nil {
+		t.Fatalf("an oversized window must be split, not refused: %v", err)
+	}
+	reqs := tr.requests()
+	if len(reqs) <= 4 {
+		t.Fatalf("expected the oversized windows to be split into more than 4 requests, got %v", reqs)
+	}
+	for i, n := range reqs {
+		if n > tr.capBytes {
+			t.Errorf("request %d carried %d bytes, over the provider cap %d", i+1, n, tr.capBytes)
+		}
+	}
+	starts := transcriptStarts(t, h.transcriptText(t, content))
+	for i := 1; i < len(starts); i++ {
+		if starts[i] <= starts[i-1] {
+			t.Fatalf("split pieces broke the timeline: %v", starts)
+		}
+	}
+}
+
+// TestWindowedSTT_OneUncuttableWindowIsSkipped pins that a single bad region costs
+// one window, not the document: ffmpeg failing on one window leaves the rest of the
+// recording transcribed.
+func TestWindowedSTT_OneUncuttableWindowIsSkipped(t *testing.T) {
+	t.Parallel()
+	const totalMS = 30 * 60 * 1000
+	content := make([]byte, 300_000)
+	tr := &windowRecordingTranscriber{capBytes: 200_000}
+	h := newWindowSTTHarness(t, tr, totalMS, content)
+	// The second scheduled window starts one step (window minus overlap) in.
+	secondStart := ingest.DefaultSTTWindowMS - ingest.TranscriptWindowOverlapMS(ingest.DefaultSTTWindowMS)
+	h.failCut = map[int]error{secondStart: errors.New("ffmpeg segment: exit status 1")}
+
+	if err := h.svc.GenerateTranscriptRepresentation(context.Background(), mediaDoc("talks/one-bad-region.m4a"), content); err != nil {
+		t.Fatalf("one uncuttable window must not fail the document: %v", err)
+	}
+	if got := len(tr.requests()); got != 3 {
+		t.Fatalf("provider saw %d requests, want 3 (the four windows minus the uncuttable one)", got)
+	}
+	if !strings.Contains(h.logs.String(), "3/4 windows decoded") {
+		t.Errorf("missing the windows done/total line in:\n%s", h.logs.String())
+	}
+	if !strings.Contains(h.logs.String(), "cannot cut window") {
+		t.Errorf("the skipped cut was not reported in:\n%s", h.logs.String())
 	}
 }
