@@ -550,7 +550,7 @@ func (s *Service) decodeTranscriptWindows(ctx context.Context, relPath, tmpPath 
 			s.getLogger().Printf("windowed %s: cannot cut window [%d,%d]ms of %s: %v", plan.label, start, end, relPath, err)
 			continue
 		}
-		decoded, decodeErr := s.decodeWindowPieces(ctx, relPath, stt, pieces, plan.label)
+		decoded, decodeErr := s.decodeWindowPieces(ctx, relPath, stt, pieces, plan)
 		if decodeErr != nil && firstDecodeErr == nil {
 			firstDecodeErr = decodeErr
 		}
@@ -578,16 +578,31 @@ func (s *Service) decodeTranscriptWindows(ctx context.Context, relPath, tmpPath 
 // decodeWindowPieces decodes every piece of one scheduled window and returns the
 // pieces that produced content plus the first decode failure. A piece that fails is
 // skipped, so a window split by the payload cap keeps the halves that did decode.
-func (s *Service) decodeWindowPieces(ctx context.Context, relPath string, stt model.Transcriber, pieces []windowPiece, label string) ([]TranscriptWindow, error) {
+//
+// A piece that is STILL over the provider cap when the split budget runs out is not
+// sent at all: the client enforces the same cap locally, so the request would be
+// refused without reaching the server. Skipping it costs the same audio and says
+// exactly why, and when every window ends this way the document fails with that
+// reason instead of a generic refusal.
+func (s *Service) decodeWindowPieces(ctx context.Context, relPath string, stt model.Transcriber, pieces []windowPiece, plan windowSchedule) ([]TranscriptWindow, error) {
 	var out []TranscriptWindow
 	var firstErr error
 	for _, p := range pieces {
+		if plan.capBytes > 0 && len(p.data) > plan.capBytes {
+			err := fmt.Errorf("%s window [%d,%d]ms is %d bytes after %d splits, over the provider cap of %d bytes",
+				plan.label, p.startMS, p.endMS, len(p.data), maxWindowSplits, plan.capBytes)
+			if firstErr == nil {
+				firstErr = err
+			}
+			s.getLogger().Printf("windowed %s: skip window of %s: %v (raise the provider payload cap or re-encode the media)", plan.label, relPath, err)
+			continue
+		}
 		text, words, err := s.transcribeWith(ctx, stt, relPath, p.data)
 		if err != nil {
 			if firstErr == nil {
 				firstErr = err
 			}
-			s.getLogger().Printf("windowed %s: skip window [%d,%d]ms of %s: %v", label, p.startMS, p.endMS, relPath, err)
+			s.getLogger().Printf("windowed %s: skip window [%d,%d]ms of %s: %v", plan.label, p.startMS, p.endMS, relPath, err)
 			continue
 		}
 		out = append(out, TranscriptWindow{StartMS: p.startMS, Res: model.TranscriptResult{Text: text, Words: words}})
@@ -619,9 +634,10 @@ const minWindowSplitMS = 10 * 1000
 // STTWindowMS sizes a window from the WHOLE file's bytes-per-millisecond, while
 // avutil.ExtractSegment copies the source codec, so a variable-bitrate stretch or a
 // keyframe-aligned cut can still come out larger than the estimate. A piece that is
-// still over the cap when the split budget runs out is returned anyway: the
-// provider then reports its own cap for that window, which is more honest than
-// dropping audio silently, and the rest of the recording still decodes.
+// still over the cap when the split budget runs out is returned anyway, and
+// decodeWindowPieces then skips it with a precise reason rather than handing the
+// provider a request its own client would refuse; the rest of the recording still
+// decodes.
 func (s *Service) extractWithinCap(ctx context.Context, path string, startMS, endMS, capBytes, depth int) ([]windowPiece, error) {
 	data, err := s.extractMediaSegment(ctx, path, startMS, endMS)
 	if err != nil {

@@ -581,3 +581,28 @@ func TestWindowedSTT_OneUncuttableWindowIsSkipped(t *testing.T) {
 		t.Errorf("the skipped cut was not reported in:\n%s", h.logs.String())
 	}
 }
+
+// TestWindowedSTT_UnshrinkableWindowIsNeverSent pins the last line of the payload
+// contract: when even the smallest split is still over the provider cap, the piece
+// is NOT sent. The client enforces the same cap locally, so the request would be
+// refused without reaching the server; skipping it costs the same audio and says
+// exactly why. With every window in that state the document fails with that reason.
+func TestWindowedSTT_UnshrinkableWindowIsNeverSent(t *testing.T) {
+	t.Parallel()
+	content := make([]byte, 300_000)
+	tr := &windowRecordingTranscriber{capBytes: 200_000}
+	h := newWindowSTTHarness(t, tr, 30*60*1000, content)
+	// Even the shortest piece the splitter will produce stays over the cap.
+	h.oversize = 200
+
+	err := h.svc.GenerateTranscriptRepresentation(context.Background(), mediaDoc("talks/unshrinkable.m4a"), content)
+	if err == nil {
+		t.Fatal("a recording no window of which fits the cap must fail the document")
+	}
+	if !strings.Contains(err.Error(), "over the provider cap") {
+		t.Errorf("error does not name the payload cap: %v", err)
+	}
+	if reqs := tr.requests(); len(reqs) != 0 {
+		t.Errorf("an oversized piece was sent anyway: %v", reqs)
+	}
+}
