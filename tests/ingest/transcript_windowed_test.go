@@ -227,3 +227,22 @@ func TestTranscriptWindowStarts_DropsTooShortFinalWindow(t *testing.T) {
 		})
 	}
 }
+
+// TestMergeTranscriptWindowsCountsCharactersNotBytes pins that the reading-speed
+// budget behind the mistimed-segment merge counts CHARACTERS. A Cyrillic segment
+// costs two bytes per character, so a byte count would claim it needs twice the
+// span it really does and would merge two perfectly-timed segments into one,
+// changing the cue layout of every non-Latin transcript.
+func TestMergeTranscriptWindowsCountsCharactersNotBytes(t *testing.T) {
+	// 41 characters (76 bytes) followed 3 s later by the next segment: at 17 cps the
+	// text needs ~2.4 s, so the span is adequate and the segments stay separate. On a
+	// byte count it would "need" ~4.5 s and be merged.
+	const first = "и потом он рассказал мне длинную историю о"
+	windows := []ingest.TranscriptWindow{
+		{StartMS: 0, Res: model.TranscriptResult{Text: "[0:00] " + first + "\n[0:03] том как всё это началось"}},
+	}
+	text, _ := ingest.MergeTranscriptWindows(windows, 20000)
+	if strings.Count(text, "\n") != 1 {
+		t.Errorf("non-Latin segments were over-merged; want 2 lines, got:\n%s", text)
+	}
+}

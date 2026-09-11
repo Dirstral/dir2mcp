@@ -407,28 +407,40 @@ func TestWindowedSTT_UncappedProviderWindowsOnDurationOnly(t *testing.T) {
 	}
 }
 
-// TestWindowedSTT_NoFFmpegFallsBackToOneRequest pins the honest degradation: ffmpeg
-// is what slices the audio, so without it a long recording cannot be windowed, but
-// it must still be sent whole exactly as before #954. A missing binary must never
-// turn a transcript into a failed document.
-func TestWindowedSTT_NoFFmpegFallsBackToOneRequest(t *testing.T) {
+// TestWindowedSTT_UncuttableAudioFallsBackToOneRequest pins the honest degradation:
+// ffmpeg is what slices the audio, so when it is missing OR cannot cut this
+// container the recording cannot be windowed, but it must still be sent whole
+// exactly as before #954. A slicing failure must never turn a transcript into a
+// failed document.
+func TestWindowedSTT_UncuttableAudioFallsBackToOneRequest(t *testing.T) {
 	t.Parallel()
 	content := make([]byte, 300_000)
-	tr := &windowRecordingTranscriber{}
-	h := newWindowSTTHarness(t, tr, 30*60*1000, content)
-	h.svc.ExtractSegmentFunc = func(context.Context, string, int, int) ([]byte, error) {
-		return nil, avutil.ErrToolNotFound
-	}
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"ffmpeg is not installed", avutil.ErrToolNotFound},
+		{"ffmpeg cannot cut the container", errors.New("ffmpeg segment: exit status 1")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tr := &windowRecordingTranscriber{}
+			h := newWindowSTTHarness(t, tr, 30*60*1000, content)
+			h.svc.ExtractSegmentFunc = func(context.Context, string, int, int) ([]byte, error) {
+				return nil, tc.err
+			}
 
-	if err := h.svc.GenerateTranscriptRepresentation(context.Background(), mediaDoc("talks/no-ffmpeg.m4a"), content); err != nil {
-		t.Fatalf("a missing ffmpeg must not fail the document: %v", err)
-	}
-	reqs := tr.requests()
-	if len(reqs) != 1 || reqs[0] != len(content) {
-		t.Fatalf("provider saw %v, want one request carrying the whole file (%d bytes)", reqs, len(content))
-	}
-	if !strings.Contains(h.logs.String(), "ffmpeg is not installed") {
-		t.Errorf("the fallback was not reported in:\n%s", h.logs.String())
+			if err := h.svc.GenerateTranscriptRepresentation(context.Background(), mediaDoc("talks/uncuttable.m4a"), content); err != nil {
+				t.Fatalf("a slicing failure must not fail the document: %v", err)
+			}
+			reqs := tr.requests()
+			if len(reqs) != 1 || reqs[0] != len(content) {
+				t.Fatalf("provider saw %v, want one request carrying the whole file (%d bytes)", reqs, len(content))
+			}
+			if !strings.Contains(h.logs.String(), "cannot be sliced") {
+				t.Errorf("the fallback was not reported in:\n%s", h.logs.String())
+			}
+		})
 	}
 }
 

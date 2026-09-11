@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/dirstral/dir2mcp/internal/avutil"
 	"github.com/dirstral/dir2mcp/internal/model"
@@ -240,8 +241,13 @@ func groupMistimedSegments(segs []mergedSegment) []mergedSegment {
 		j := i + 1
 		for j < len(segs) {
 			spanToNext := segs[j].startMS - cur.startMS
-			need := int(float64(len(cur.body)) / mergeTargetCPS * 1000)
-			if spanToNext >= need || len(cur.body) > maxGroupChars {
+			// Count CHARACTERS, not bytes: a Cyrillic or CJK transcript costs 2-3
+			// bytes per character, so a byte count would inflate the reading-speed
+			// budget and hit the group cap at a third of the intended text, merging
+			// non-Latin transcripts far more aggressively than Latin ones.
+			chars := utf8.RuneCountInString(cur.body)
+			need := int(float64(chars) / mergeTargetCPS * 1000)
+			if spanToNext >= need || chars > maxGroupChars {
 				break
 			}
 			cur.body = strings.TrimSpace(cur.body + " " + segs[j].body)
@@ -406,12 +412,14 @@ func (s *Service) transcribeStructuredWindowed(ctx context.Context, relPath stri
 		return s.transcribeWith(ctx, s.transcriber, relPath, content)
 	}
 	text, words, err := s.decodeWindowedTranscript(ctx, relPath, tmpPath, s.transcriber, totalMS, windowMS, "transcription")
-	if errors.Is(err, avutil.ErrToolNotFound) {
-		// ffmpeg is what SLICES the audio. Without it the recording cannot be
-		// windowed, but it can still be sent whole, exactly as before #954: a
-		// missing binary must not turn a transcript into a failed document. A
-		// provider that then refuses the payload says so in its own error.
-		s.getLogger().Printf("windowed transcription %s: ffmpeg is not installed; sending one request", relPath)
+	var cut *windowExtractError
+	if errors.As(err, &cut) {
+		// ffmpeg is what SLICES the audio. When it is missing, or cannot cut this
+		// container, the recording cannot be windowed but it can still be sent
+		// whole, exactly as before #954: a slicing failure must not turn a
+		// transcript into a failed document. A provider that then refuses the
+		// payload reports its own cap honestly.
+		s.getLogger().Printf("windowed transcription %s: the audio cannot be sliced (%v); sending one request", relPath, err)
 		return s.transcribeWith(ctx, s.transcriber, relPath, content)
 	}
 	return text, words, err
@@ -447,8 +455,9 @@ func (s *Service) translateStructuredWindowed(ctx context.Context, doc model.Doc
 		return s.translateStructured(ctx, doc, content)
 	}
 	text, words, err := s.decodeWindowedTranscript(ctx, doc.RelPath, tmpPath, s.translateSTT, totalMS, windowMS, "translate")
-	if errors.Is(err, avutil.ErrToolNotFound) {
-		s.getLogger().Printf("windowed translate %s: ffmpeg is not installed; decoding in one pass", doc.RelPath)
+	var cut *windowExtractError
+	if errors.As(err, &cut) {
+		s.getLogger().Printf("windowed translate %s: the audio cannot be sliced (%v); decoding in one pass", doc.RelPath, err)
 		return s.translateStructured(ctx, doc, content)
 	}
 	return text, words, err
@@ -499,7 +508,7 @@ func (s *Service) decodeTranscriptWindows(ctx context.Context, relPath, tmpPath 
 		}
 		seg, err := s.extractMediaSegment(ctx, tmpPath, start, end)
 		if err != nil {
-			return nil, attempted, fmt.Errorf("extract %s window [%d,%d]ms: %w", label, start, end, err)
+			return nil, attempted, &windowExtractError{fmt.Errorf("extract %s window [%d,%d]ms: %w", label, start, end, err)}
 		}
 		attempted++
 		text, words, err := s.transcribeWith(ctx, stt, relPath, seg)
@@ -521,6 +530,16 @@ func (s *Service) decodeTranscriptWindows(ctx context.Context, relPath, tmpPath 
 	}
 	return windows, attempted, nil
 }
+
+// windowExtractError marks a failure to SLICE the staged audio (ffmpeg absent, an
+// unsupported container, a seek that ffmpeg refuses). It is distinct from a decode
+// failure, because the caller answers it differently: a recording that cannot be
+// cut is still sent as one request, while a decode failure is the provider's and
+// is reported as such.
+type windowExtractError struct{ err error }
+
+func (e *windowExtractError) Error() string { return e.err.Error() }
+func (e *windowExtractError) Unwrap() error { return e.err }
 
 // stageMediaTemp writes in-memory media to a temp file that keeps the original
 // extension, because avutil probes and slices by PATH. The returned cleanup
