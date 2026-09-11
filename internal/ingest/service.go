@@ -1280,6 +1280,17 @@ func TranscriberFromConfigWithLanguage(cfg config.Config, language string) (mode
 // media.filter_words. The same filter is used for STT transcript chunking and
 // sidecar-cue chunking so configured phrases are stripped consistently before
 // embedding. An empty config yields an inactive filter (no-op).
+// transcriptWindow builds the SPEC 8.6.1 transcript chunk window from
+// media.transcript_chunk_sec / media.transcript_chunk_gap_sec. A configured 0
+// for the chunk length disables merging and restores one chunk per provider
+// segment, so the value is passed through rather than re-defaulted here.
+func (s *Service) transcriptWindow() transcriptWindow {
+	return transcriptWindow{
+		ChunkMS: s.cfg.MediaTranscriptChunkSec * 1000,
+		GapMS:   s.cfg.MediaTranscriptChunkGapSec * 1000,
+	}
+}
+
 func (s *Service) captionWordFilter() *subtitle.WordFilter {
 	return subtitle.NewWordFilter(s.cfg.MediaFilterWords)
 }
@@ -5420,6 +5431,16 @@ func (s *Service) transcribeAndPersistTrack(ctx context.Context, doc model.Docum
 	// attribution that is actually present on the segments.
 	s.applyDiarization(ctx, doc, content, segments)
 
+	// SPEC 8.6.1 transcript chunk window: merge the per-segment chunks into
+	// retrieval-sized windows. It runs LAST among the passes that touch chunk
+	// text, because it records each member cue's rune length on the merged span
+	// for subtitle export to cut back at (SPEC 8.6.3), and a later rewrite of the
+	// text would move those cut points. It runs after diarization for a second
+	// reason: a window must not cross a speaker change (SPEC 8.6.8 makes the
+	// speaker turn a chunk boundary), and the speakers only exist once
+	// applyDiarization has stamped them.
+	segments = mergeTranscriptChunkWindows(segments, s.transcriptWindow())
+
 	meta := s.sttTranscriptMeta(distinctSpeakers(segments), transcriptText, segmentsHaveWordTiming(segments))
 	applyTrackMeta(&meta, tc)
 	metaJSON, err := json.Marshal(meta)
@@ -5809,6 +5830,11 @@ func (s *Service) translateOneTranscript(ctx context.Context, doc model.Document
 	if trimOffsetMS > 0 {
 		shiftTranscriptSpans(segments, trimOffsetMS)
 	}
+	// SPEC 8.6.1 transcript chunk window, same rule as the source transcript: a
+	// translated transcript is retrieved too, so it needs the same retrieval
+	// unit. It runs after the silence-trim shift so the recorded cue offsets
+	// describe the spans that are actually stored.
+	segments = mergeTranscriptChunkWindows(segments, s.transcriptWindow())
 
 	meta := transcriptMeta{
 		Source:            translationSource,

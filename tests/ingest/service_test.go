@@ -654,6 +654,45 @@ func TestServiceRun_AudioGeneratesTranscriptRepresentation(t *testing.T) {
 	if st.reps[0].RepType != ingest.RepTypeTranscript {
 		t.Fatalf("expected transcript rep type, got %q", st.reps[0].RepType)
 	}
+	// SPEC 8.6.1 transcript chunk window, on by default: the two two-second
+	// segments are one turn, so they index as one chunk spanning both. The
+	// segment boundaries survive on the span for subtitle export to cut back at.
+	if len(st.chunks) != 1 {
+		t.Fatalf("expected one merged transcript chunk, got %d", len(st.chunks))
+	}
+	if len(st.spans) != 1 {
+		t.Fatalf("expected one transcript span, got %d", len(st.spans))
+	}
+	if st.spans[0].Kind != "time" || st.spans[0].StartMS != 0 || st.spans[0].EndMS != 3000 {
+		t.Fatalf("unexpected transcript span: %+v", st.spans[0])
+	}
+	if len(st.spans[0].Cues) != 2 {
+		t.Fatalf("merged span must record its 2 source segments, got %d", len(st.spans[0].Cues))
+	}
+	if st.chunks[0].Text != "hello world" {
+		t.Fatalf("merged text = %q, want %q", st.chunks[0].Text, "hello world")
+	}
+}
+
+// TestServiceRun_TranscriptChunkWindowDisabled pins the documented escape hatch
+// and keeps the pre-0.62 coverage this file had: media.transcript_chunk_sec of 0
+// indexes one chunk per transcript segment, with no merged-cue record.
+func TestServiceRun_TranscriptChunkWindowDisabled(t *testing.T) {
+	root := t.TempDir()
+	mustWriteFile(t, filepath.Join(root, "audio", "sample.mp3"), []byte("fake-audio-bytes"))
+
+	cfg := config.Default()
+	cfg.RootDir = root
+	cfg.StateDir = filepath.Join(root, ".dir2mcp")
+	cfg.MediaTranscriptChunkSec = 0
+
+	st := newMemoryStore()
+	svc := mustNewIngestService(t, cfg, st)
+	svc.SetTranscriber(&fakeTranscriber{text: "[00:00] hello\n[00:02] world"})
+
+	if err := svc.Run(context.Background()); err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
 	if len(st.chunks) != 2 {
 		t.Fatalf("expected two transcript chunks, got %d", len(st.chunks))
 	}
@@ -662,6 +701,9 @@ func TestServiceRun_AudioGeneratesTranscriptRepresentation(t *testing.T) {
 	}
 	if st.spans[0].Kind != "time" || st.spans[0].StartMS != 0 || st.spans[0].EndMS != 2000 {
 		t.Fatalf("unexpected first transcript span: %+v", st.spans[0])
+	}
+	if len(st.spans[0].Cues) != 0 {
+		t.Fatalf("an unmerged span must carry no cue record, got %d", len(st.spans[0].Cues))
 	}
 }
 

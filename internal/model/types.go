@@ -311,6 +311,18 @@ type Span struct {
 	// behaviour identical to a words-absent transcript. Its presence makes Span
 	// non-comparable, so callers must not use Span as a map key.
 	Words []WordSpan
+	// Cues optionally carries the transcript segment boundaries that were merged
+	// into this chunk by the SPEC 8.6.1 chunk window. Each entry is one original
+	// segment: start ms, duration ms, and the rune length of its text inside the
+	// chunk's text, in order, so subtitle export can cut the merged text back
+	// into the segments it came from (SPEC 8.6.3). It is metadata only, exactly
+	// like Words: it never changes the chunk text or the chunk's own span.
+	//
+	// Nil when nothing was merged (one chunk per segment), which is every
+	// transcript indexed before the chunk window existed and every corpus that
+	// pins media.transcript_chunk_sec to 0. Persisted in the "time" span's
+	// extra_json as a `cues` array.
+	Cues []CueSpan
 	// Speaker is the stable per-transcript speaker identifier (e.g. "S1") on a
 	// diarized transcript's "time" span (spec §8.6.8). SpeakerLabel is an
 	// optional human-readable name (e.g. a WebVTT <v Name> voice tag). Both are
@@ -368,6 +380,22 @@ type WordSpan struct {
 	T int    `json:"t"`
 	D int    `json:"d"`
 	W string `json:"w"`
+}
+
+// CueSpan is one transcript segment that the SPEC 8.6.1 chunk window merged into
+// a larger retrieval chunk: T is its start in milliseconds, D its duration in
+// milliseconds, and N the rune length of its text inside the merged chunk text.
+//
+// N is a length, not an offset, so the entries are read in order and summed. The
+// cut points are exact because the merge is the last pass that touches chunk
+// text and it joins members with exactly one space: cutting N runes, then
+// skipping one separator rune, reproduces each original segment. Subtitle export
+// uses this to keep its cues at the transcript's own boundaries even when
+// retrieval chunks are forty seconds long (SPEC 8.6.3).
+type CueSpan struct {
+	T int `json:"t"`
+	D int `json:"d"`
+	N int `json:"n"`
 }
 
 // FormatTranscriptTimestamp renders an absolute media offset (milliseconds) as

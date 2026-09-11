@@ -131,6 +131,19 @@ const (
 	RAGKFallback = 15
 )
 
+// DefaultTranscriptChunkSec and DefaultTranscriptChunkGapSec are the shipped
+// transcript chunk window (SPEC 8.6.1, media.transcript_chunk_sec /
+// media.transcript_chunk_gap_sec). 40 s is about a conversational turn or a
+// paragraph of speech, which is the unit a person asks a recording about; 6 s of
+// silence is long enough to mark a turn boundary and short enough not to run two
+// speakers together. Measured on a three-hour recording, the alternative (one
+// chunk per provider segment) gave 1,271 chunks of about eight seconds each and
+// cut the most quoted line in the recording in half (dir2mcp #955).
+const (
+	DefaultTranscriptChunkSec    = 40
+	DefaultTranscriptChunkGapSec = 6
+)
+
 // DefaultMediaSubtitlesAlignToleranceMS is the bilingual cross-language cue
 // alignment tolerance (SPEC §8.6.10, media.subtitles.ttml.align_tolerance_ms):
 // a secondary segment whose start is within this many milliseconds of a primary
@@ -1051,6 +1064,24 @@ type Config struct {
 	MediaAudioWindowSec int
 	MediaVideoWindowSec int
 
+	// MediaTranscriptChunkSec / MediaTranscriptChunkGapSec set the transcript
+	// chunk window (SPEC 8.6.1; config `media.transcript_chunk_sec` /
+	// `media.transcript_chunk_gap_sec`). An STT provider emits one segment per
+	// breath group, about eight seconds, which is too fine a retrieval unit for
+	// speech, so consecutive segments merge into a chunk window: the window
+	// closes when the next segment would make it longer than
+	// MediaTranscriptChunkSec, or when the silence before that segment is longer
+	// than MediaTranscriptChunkGapSec (a turn boundary). The merged window is
+	// what retrieval scores and what a time-span citation names.
+	//
+	// MediaTranscriptChunkSec of 0 DISABLES merging and restores one chunk per
+	// provider segment. It is a real value, not "unset": Default() ships 40, so
+	// writing 0 in the config is how an operator pins the pre-0.62 behavior.
+	// Subtitle export is unaffected and keeps the provider segments (SPEC
+	// 8.6.3). Defaults: 40 s and 6 s.
+	MediaTranscriptChunkSec    int
+	MediaTranscriptChunkGapSec int
+
 	// MediaClipMaxDurationMS / MediaClipMaxBytes bound the
 	// dir2mcp_open_media_clip tool (SPEC §15.11; config `media.clip.max_duration_ms`
 	// / `media.clip.max_bytes`). A requested span whose duration exceeds
@@ -1404,6 +1435,8 @@ type fileConfig struct {
 	MediaDiarizeEnabled                *bool
 	MediaAudioWindowSec                *int
 	MediaVideoWindowSec                *int
+	MediaTranscriptChunkSec            *int
+	MediaTranscriptChunkGapSec         *int
 	MediaClipMaxDurationMS             *int
 	MediaClipMaxBytes                  *int
 	MediaSTTMaxPayloadMB               *int
@@ -1569,6 +1602,8 @@ type persistedConfig struct {
 	MediaVAD                           bool          `yaml:"media_vad"`
 	MediaAudioWindowSec                int           `yaml:"media_audio_window_sec"`
 	MediaVideoWindowSec                int           `yaml:"media_video_window_sec"`
+	MediaTranscriptChunkSec            int           `yaml:"media_transcript_chunk_sec"`
+	MediaTranscriptChunkGapSec         int           `yaml:"media_transcript_chunk_gap_sec"`
 	MediaClipMaxDurationMS             int           `yaml:"media_clip_max_duration_ms"`
 	MediaClipMaxBytes                  int           `yaml:"media_clip_max_bytes"`
 	MediaSTTMaxPayloadMB               int           `yaml:"media_stt_max_payload_mb"`
@@ -1806,8 +1841,13 @@ func Default() Config {
 		MediaClipMaxDurationMS:         DefaultMediaClipMaxDurationMS,
 		MediaClipMaxBytes:              DefaultMediaClipMaxBytes,
 		// 0 = use the whisper client's built-in caps (#510, #511).
-		MediaSTTMaxPayloadMB:      0,
-		MediaSTTRequestTimeoutSec: 0,
+		MediaSTTMaxPayloadMB: 0,
+		// SPEC 8.6.1 transcript chunk window. These ship ON: one chunk per
+		// provider segment is measurably the wrong retrieval unit for speech
+		// (dir2mcp #955). `media.transcript_chunk_sec: 0` restores it.
+		MediaTranscriptChunkSec:    DefaultTranscriptChunkSec,
+		MediaTranscriptChunkGapSec: DefaultTranscriptChunkGapSec,
+		MediaSTTRequestTimeoutSec:  0,
 		// A pinned STT language is a provider hint, not per-file ground truth, so
 		// it does not drive quality-gate quarantine by default (dir2mcp#439 F3).
 		MediaSTTLanguageStrict: false,
@@ -2002,6 +2042,8 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		MediaDiarizeEnabled:                copyBoolPtr(cfg.MediaDiarizeEnabled),
 		MediaAudioWindowSec:                cfg.MediaAudioWindowSec,
 		MediaVideoWindowSec:                cfg.MediaVideoWindowSec,
+		MediaTranscriptChunkSec:            cfg.MediaTranscriptChunkSec,
+		MediaTranscriptChunkGapSec:         cfg.MediaTranscriptChunkGapSec,
 		MediaClipMaxDurationMS:             cfg.MediaClipMaxDurationMS,
 		MediaClipMaxBytes:                  cfg.MediaClipMaxBytes,
 		MediaSTTMaxPayloadMB:               cfg.MediaSTTMaxPayloadMB,
@@ -2963,6 +3005,12 @@ func applyMediaProcessingFileParsed(cfg *Config, fc fileConfig) {
 	if fc.MediaVideoWindowSec != nil {
 		cfg.MediaVideoWindowSec = *fc.MediaVideoWindowSec
 	}
+	if fc.MediaTranscriptChunkSec != nil {
+		cfg.MediaTranscriptChunkSec = *fc.MediaTranscriptChunkSec
+	}
+	if fc.MediaTranscriptChunkGapSec != nil {
+		cfg.MediaTranscriptChunkGapSec = *fc.MediaTranscriptChunkGapSec
+	}
 	applyMediaSTTFileParsed(cfg, fc)
 	if fc.MediaClipMaxDurationMS != nil {
 		cfg.MediaClipMaxDurationMS = *fc.MediaClipMaxDurationMS
@@ -3502,6 +3550,8 @@ var configKeyAliases = map[string]string{
 	"media_diarize_enabled":                   "media.diarize.enabled",
 	"media_audio_window_sec":                  "media.audio_window_sec",
 	"media_video_window_sec":                  "media.video_window_sec",
+	"media_transcript_chunk_sec":              "media.transcript_chunk_sec",
+	"media_transcript_chunk_gap_sec":          "media.transcript_chunk_gap_sec",
 	"media_clip_max_duration_ms":              "media.clip.max_duration_ms",
 	"media_clip_max_bytes":                    "media.clip.max_bytes",
 	"media_stt_max_payload_mb":                "media.stt.max_payload_mb",
@@ -3738,6 +3788,8 @@ var intFileScalarTargets = map[string]func(*fileConfig) **int{
 	"media.translate.window_lines":       func(c *fileConfig) **int { return &c.MediaTranslateWindowLines },
 	"media.translate.context_lines":      func(c *fileConfig) **int { return &c.MediaTranslateContextLines },
 	"media.video_window_sec":             func(c *fileConfig) **int { return &c.MediaVideoWindowSec },
+	"media.transcript_chunk_sec":         func(c *fileConfig) **int { return &c.MediaTranscriptChunkSec },
+	"media.transcript_chunk_gap_sec":     func(c *fileConfig) **int { return &c.MediaTranscriptChunkGapSec },
 	"media.clip.max_duration_ms":         func(c *fileConfig) **int { return &c.MediaClipMaxDurationMS },
 	"media.clip.max_bytes":               func(c *fileConfig) **int { return &c.MediaClipMaxBytes },
 	"media.stt.max_payload_mb":           func(c *fileConfig) **int { return &c.MediaSTTMaxPayloadMB },
@@ -3787,6 +3839,8 @@ var nonNegativeIntKeys = map[string]bool{
 	"media.translate.window_lines":            true,
 	"media.translate.context_lines":           true,
 	"media.video_window_sec":                  true,
+	"media.transcript_chunk_sec":              true,
+	"media.transcript_chunk_gap_sec":          true,
 	"media.clip.max_duration_ms":              true,
 	"media.clip.max_bytes":                    true,
 	"media.stt.max_payload_mb":                true,
@@ -4349,6 +4403,8 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 		writeBool("media_diarize_enabled", *cfg.MediaDiarizeEnabled)
 	}
 	writeInt("media_audio_window_sec", cfg.MediaAudioWindowSec)
+	writeInt("media_transcript_chunk_sec", cfg.MediaTranscriptChunkSec)
+	writeInt("media_transcript_chunk_gap_sec", cfg.MediaTranscriptChunkGapSec)
 	writeInt("media_translate_whisper_window_sec", cfg.MediaTranslateWhisperWindowSec)
 	writeInt("media_translate_window_lines", cfg.MediaTranslateWindowLines)
 	writeInt("media_translate_context_lines", cfg.MediaTranslateContextLines)

@@ -3381,6 +3381,7 @@ func spanFromRow(kind string, start, end int, extraJSON string) model.Span {
 		return model.Span{
 			Kind: "time", StartMS: start, EndMS: end,
 			Words:        wordsFromExtraJSON(extraJSON),
+			Cues:         cuesFromExtraJSON(extraJSON),
 			Speaker:      speaker,
 			SpeakerLabel: speakerLabel,
 			Entities:     entities,
@@ -3447,6 +3448,38 @@ func wordsFromExtraJSON(extraJSON string) []model.WordSpan {
 			w.D = 0
 		}
 		out = append(out, w)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// cuesFromExtraJSON reconstructs the merged transcript segment boundaries of a
+// "time" span from its stored extra_json (SPEC 8.6.1 chunk window). A NULL,
+// empty or malformed payload yields nil, so a chunk stored before the chunk
+// window existed degrades to exactly one cue covering the whole chunk, which is
+// the behaviour it had. An entry with a non-positive rune length is dropped: it
+// can cut nothing, and keeping it would shift every later cut point.
+func cuesFromExtraJSON(extraJSON string) []model.CueSpan {
+	if strings.TrimSpace(extraJSON) == "" {
+		return nil
+	}
+	var payload struct {
+		Cues []model.CueSpan `json:"cues"`
+	}
+	if err := json.Unmarshal([]byte(extraJSON), &payload); err != nil || len(payload.Cues) == 0 {
+		return nil
+	}
+	out := make([]model.CueSpan, 0, len(payload.Cues))
+	for _, c := range payload.Cues {
+		if c.N <= 0 {
+			continue
+		}
+		if c.D < 0 {
+			c.D = 0
+		}
+		out = append(out, c)
 	}
 	if len(out) == 0 {
 		return nil
@@ -4320,7 +4353,8 @@ func spanToRow(span model.Span) (kind string, start int, end int, extraJSON stri
 }
 
 // timeSpanExtraJSON marshals the optional metadata of a "time" span into the
-// stored extra_json object: per-word timing (`words`, spec §8.6.1), the
+// stored extra_json object: per-word timing (`words`, spec §8.6.1), the merged
+// transcript segment boundaries of the chunk window (`cues`, SPEC 8.6.1), the
 // diarized speaker attribution (`speaker`/`speaker_label`, spec §8.6.8), and a
 // recognition annotation's attribution (`entities`/`event`, design 0004 §7)
 // plus its recognizer provenance (`sources`, df-005 0.3.0). Each field is
@@ -4341,11 +4375,13 @@ func timeSpanExtraJSON(span model.Span) (string, error) {
 	event := strings.TrimSpace(span.Event)
 	sources := model.NormalizeSources(span.Sources)
 	attributes := model.NormalizeAttributes(span.Attributes)
-	if len(words) == 0 && speaker == "" && len(entities) == 0 && event == "" && len(sources) == 0 && len(attributes) == 0 {
+	cues := span.Cues
+	if len(words) == 0 && speaker == "" && len(entities) == 0 && event == "" && len(sources) == 0 && len(attributes) == 0 && len(cues) == 0 {
 		return "", nil
 	}
 	payload := struct {
 		Words        []model.WordSpan  `json:"words,omitempty"`
+		Cues         []model.CueSpan   `json:"cues,omitempty"`
 		Speaker      string            `json:"speaker,omitempty"`
 		SpeakerLabel string            `json:"speaker_label,omitempty"`
 		Entities     []string          `json:"entities,omitempty"`
@@ -4353,7 +4389,7 @@ func timeSpanExtraJSON(span model.Span) (string, error) {
 		Sources      []string          `json:"sources,omitempty"`
 		Attributes   map[string]string `json:"attributes,omitempty"`
 	}{
-		Words: words, Speaker: speaker, SpeakerLabel: speakerLabel,
+		Words: words, Cues: cues, Speaker: speaker, SpeakerLabel: speakerLabel,
 		Entities: entities, Event: event, Sources: sources, Attributes: attributes,
 	}
 	encoded, err := json.Marshal(payload)
