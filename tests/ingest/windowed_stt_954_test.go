@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dirstral/dir2mcp/internal/avutil"
 	"github.com/dirstral/dir2mcp/internal/config"
 	"github.com/dirstral/dir2mcp/internal/ingest"
 	"github.com/dirstral/dir2mcp/internal/model"
@@ -403,6 +404,31 @@ func TestWindowedSTT_UncappedProviderWindowsOnDurationOnly(t *testing.T) {
 	}
 	if cuts := hLong.windows(); len(cuts) != 4 {
 		t.Errorf("an uncapped provider must still window a long recording, got %+v", cuts)
+	}
+}
+
+// TestWindowedSTT_NoFFmpegFallsBackToOneRequest pins the honest degradation: ffmpeg
+// is what slices the audio, so without it a long recording cannot be windowed, but
+// it must still be sent whole exactly as before #954. A missing binary must never
+// turn a transcript into a failed document.
+func TestWindowedSTT_NoFFmpegFallsBackToOneRequest(t *testing.T) {
+	t.Parallel()
+	content := make([]byte, 300_000)
+	tr := &windowRecordingTranscriber{}
+	h := newWindowSTTHarness(t, tr, 30*60*1000, content)
+	h.svc.ExtractSegmentFunc = func(context.Context, string, int, int) ([]byte, error) {
+		return nil, avutil.ErrToolNotFound
+	}
+
+	if err := h.svc.GenerateTranscriptRepresentation(context.Background(), mediaDoc("talks/no-ffmpeg.m4a"), content); err != nil {
+		t.Fatalf("a missing ffmpeg must not fail the document: %v", err)
+	}
+	reqs := tr.requests()
+	if len(reqs) != 1 || reqs[0] != len(content) {
+		t.Fatalf("provider saw %v, want one request carrying the whole file (%d bytes)", reqs, len(content))
+	}
+	if !strings.Contains(h.logs.String(), "ffmpeg is not installed") {
+		t.Errorf("the fallback was not reported in:\n%s", h.logs.String())
 	}
 }
 

@@ -2,6 +2,7 @@ package ingest
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -404,7 +405,16 @@ func (s *Service) transcribeStructuredWindowed(ctx context.Context, relPath stri
 		}
 		return s.transcribeWith(ctx, s.transcriber, relPath, content)
 	}
-	return s.decodeWindowedTranscript(ctx, relPath, tmpPath, s.transcriber, totalMS, windowMS, "transcription")
+	text, words, err := s.decodeWindowedTranscript(ctx, relPath, tmpPath, s.transcriber, totalMS, windowMS, "transcription")
+	if errors.Is(err, avutil.ErrToolNotFound) {
+		// ffmpeg is what SLICES the audio. Without it the recording cannot be
+		// windowed, but it can still be sent whole, exactly as before #954: a
+		// missing binary must not turn a transcript into a failed document. A
+		// provider that then refuses the payload says so in its own error.
+		s.getLogger().Printf("windowed transcription %s: ffmpeg is not installed; sending one request", relPath)
+		return s.transcribeWith(ctx, s.transcriber, relPath, content)
+	}
+	return text, words, err
 }
 
 // translateStructuredWindowed is the media.translate.whisper_window_sec-aware
@@ -436,7 +446,12 @@ func (s *Service) translateStructuredWindowed(ctx context.Context, doc model.Doc
 	if totalMS <= windowMS {
 		return s.translateStructured(ctx, doc, content)
 	}
-	return s.decodeWindowedTranscript(ctx, doc.RelPath, tmpPath, s.translateSTT, totalMS, windowMS, "translate")
+	text, words, err := s.decodeWindowedTranscript(ctx, doc.RelPath, tmpPath, s.translateSTT, totalMS, windowMS, "translate")
+	if errors.Is(err, avutil.ErrToolNotFound) {
+		s.getLogger().Printf("windowed translate %s: ffmpeg is not installed; decoding in one pass", doc.RelPath)
+		return s.translateStructured(ctx, doc, content)
+	}
+	return text, words, err
 }
 
 // decodeWindowedTranscript decodes the staged audio at tmpPath in overlapping
