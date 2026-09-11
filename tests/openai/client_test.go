@@ -214,7 +214,7 @@ func TestGenerate_HappyPathAndStructuredContent(t *testing.T) {
 }
 
 // TestGenerate_SendsBoundedMaxTokens locks issue #500: the chat request
-// must always carry a finite max_tokens so a misbehaving/self-hosted model
+// must always carry a finite completion cap so a misbehaving/self-hosted model
 // cannot run away past the generation timeout and fail the whole file.
 // NewClient's default (4096, matching the anthropic sibling so answer
 // synthesis and annotate JSON are not truncated) applies when the caller sets
@@ -240,12 +240,15 @@ func TestGenerate_SendsBoundedMaxTokens(t *testing.T) {
 				t.Fatalf("generate: %v", err)
 			}
 			gotBody := <-bodyCh
-			mt, ok := gotBody["max_tokens"]
+			// The cap now goes out as max_completion_tokens (issue #958): the
+			// legacy max_tokens is refused by every GPT-5-era model. What this
+			// test pins is unchanged, that a finite cap is always sent.
+			mt, ok := gotBody["max_completion_tokens"]
 			if !ok {
-				t.Fatalf("request omitted max_tokens; body = %v", gotBody)
+				t.Fatalf("request omitted max_completion_tokens; body = %v", gotBody)
 			}
 			if got, _ := mt.(float64); got != tc.want {
-				t.Fatalf("max_tokens = %v, want %v", mt, tc.want)
+				t.Fatalf("max_completion_tokens = %v, want %v", mt, tc.want)
 			}
 		})
 	}
@@ -275,12 +278,15 @@ func TestGenerateWithMaxTokens_PerCallCap(t *testing.T) {
 				t.Fatalf("generate: %v", err)
 			}
 			gotBody := <-bodyCh
-			mt, ok := gotBody["max_tokens"]
+			// The cap now goes out as max_completion_tokens (issue #958): the
+			// legacy max_tokens is refused by every GPT-5-era model. What this
+			// test pins is unchanged, that a finite cap is always sent.
+			mt, ok := gotBody["max_completion_tokens"]
 			if !ok {
-				t.Fatalf("request omitted max_tokens; body = %v", gotBody)
+				t.Fatalf("request omitted max_completion_tokens; body = %v", gotBody)
 			}
 			if got, _ := mt.(float64); got != tc.want {
-				t.Fatalf("max_tokens = %v, want %v", mt, tc.want)
+				t.Fatalf("max_completion_tokens = %v, want %v", mt, tc.want)
 			}
 		})
 	}
