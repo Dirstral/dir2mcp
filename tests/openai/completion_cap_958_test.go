@@ -214,3 +214,100 @@ func TestGenerate_ServerErrorDoesNotFlipTheCapName_958(t *testing.T) {
 		}
 	}
 }
+
+// The #959 review case, and it is not hypothetical: OpenAI's message for a
+// rejected parameter NAMES the other spelling as the remedy, so a 400 about
+// `temperature` can contain both "unsupported" and "max_completion_tokens". A
+// substring test flips the client to the legacy name for the rest of its life
+// over an error that had nothing to do with the cap, which leaves a modern
+// endpoint driven with a parameter every GPT-5-era model refuses.
+func TestGenerate_UnrelatedRejectionNamingTheCapDoesNotFlip_959(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{
+			// The real shape, with the structured param OpenAI sends.
+			name: "structured param names another parameter",
+			body: `{"error":{"message":"Unsupported parameter: 'temperature' is not supported with this model. Use 'max_completion_tokens' instead.","type":"invalid_request_error","param":"temperature","code":"unsupported_parameter"}}`,
+		},
+		{
+			// Same sentence from a server that sends no param at all, so only
+			// the phrase binding can save it.
+			name: "no structured param, cap named only as the remedy",
+			body: `{"error":{"message":"Unsupported parameter: 'temperature' is not supported with this model. Use 'max_completion_tokens' instead."}}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var mu sync.Mutex
+			var bodies []map[string]any
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				var b map[string]any
+				_ = json.NewDecoder(req.Body).Decode(&b)
+				mu.Lock()
+				bodies = append(bodies, b)
+				mu.Unlock()
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			t.Cleanup(srv.Close)
+
+			c := openai.NewClient(srv.URL+"/v1", "k")
+			if _, err := c.Generate(context.Background(), "q"); err == nil {
+				t.Fatal("a 400 about another parameter must surface")
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if len(bodies) != 1 {
+				t.Fatalf("requests = %d, want 1: the cap parameter was not what the server refused", len(bodies))
+			}
+			if _, ok := bodies[0]["max_completion_tokens"]; !ok {
+				t.Fatalf("the client must still be on the modern cap name; body = %v", bodies[0])
+			}
+		})
+	}
+}
+
+// The genuine rejection must still be recognised through the structured param,
+// which is what OpenAI and most compatible servers send.
+func TestGenerate_StructuredParamDrivesTheFallback_959(t *testing.T) {
+	var mu sync.Mutex
+	var sent []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		var b map[string]any
+		_ = json.NewDecoder(req.Body).Decode(&b)
+		mu.Lock()
+		legacy := false
+		if _, ok := b["max_tokens"]; ok {
+			legacy = true
+			sent = append(sent, "max_tokens")
+		} else {
+			sent = append(sent, "max_completion_tokens")
+		}
+		mu.Unlock()
+		if legacy {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"grounded answer"}}]}`))
+			return
+		}
+		w.WriteHeader(http.StatusBadRequest)
+		// A message whose prose does NOT bind the name, so only error.param can
+		// decide. An older llama.cpp answers in roughly this shape.
+		_, _ = w.Write([]byte(`{"error":{"message":"this build does not accept that field","param":"max_completion_tokens","type":"invalid_request_error"}}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	c := openai.NewClient(srv.URL+"/v1", "k")
+	got, err := c.Generate(context.Background(), "q")
+	if err != nil {
+		t.Fatalf("the structured param must drive the fallback: %v", err)
+	}
+	if got != "grounded answer" {
+		t.Fatalf("answer = %q", got)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(sent) != 2 || sent[0] != "max_completion_tokens" || sent[1] != "max_tokens" {
+		t.Fatalf("wire parameters = %v, want [max_completion_tokens max_tokens]", sent)
+	}
+}

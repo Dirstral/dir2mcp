@@ -33,6 +33,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -434,27 +435,61 @@ const (
 	capLegacy                          // max_tokens
 )
 
+// capRejectionPhrase matches a rejection bound DIRECTLY to the parameter that
+// follows it, for servers that do not return a structured `param`. The name must
+// be the thing being refused, not merely a word in the sentence.
+var capRejectionPhrase = regexp.MustCompile(
+	`(?i)(?:unsupported|unrecognized|unknown|invalid|extra)[ _-]*(?:parameter|argument|field|input)?s?\s*[:\s]\s*['\"]?(max_completion_tokens|max_tokens)\b`)
+
+// errorParam pulls `error.param` out of an OpenAI-shaped error body. httpError
+// puts the whole response body in Message, so the structured field is still
+// there. Returns "" when the body is not JSON or carries no param.
+func errorParam(msg string) string {
+	var body struct {
+		Error struct {
+			Param string `json:"param"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(msg), &body); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(body.Error.Param)
+}
+
 // unsupportedCapParam reports whether err is the provider refusing the cap
-// parameter itself, which is the one error worth retrying under the other
-// spelling. It is deliberately narrow: a 400 that names a DIFFERENT parameter,
-// or any other status, is a real failure and must surface unchanged rather than
-// costing a second request.
+// parameter ITSELF, which is the one error worth retrying under the other
+// spelling. Everything else must surface unchanged.
+//
+// The refusal has to be bound to the parameter, not merely co-located with its
+// name (#959 review). OpenAI's own message for a rejected parameter NAMES the
+// other spelling as the remedy:
+//
+//	Unsupported parameter: 'temperature' is not supported with this model.
+//	Use 'max_completion_tokens' instead.
+//
+// A plain substring test sees "unsupported" and "max_completion_tokens" in that
+// sentence and flips the client to the legacy name for the rest of its life,
+// over an error that had nothing to do with the cap. So:
+//
+//  1. `error.param` decides when the body carries it. OpenAI and most
+//     compatible servers set it, and it names exactly one parameter.
+//  2. Otherwise the rejection phrase must be immediately followed by the name.
+//  3. Otherwise no retry. A server whose wording matches neither simply gets no
+//     fallback, and the operator sees the real 400 instead of a silent reroute.
 func unsupportedCapParam(err error, sent completionCapName) bool {
 	var pErr *model.ProviderError
 	if !errors.As(err, &pErr) || pErr.StatusCode != http.StatusBadRequest {
 		return false
 	}
-	msg := strings.ToLower(pErr.Message)
 	name := "max_completion_tokens"
 	if sent == capLegacy {
 		name = "max_tokens"
 	}
-	if !strings.Contains(msg, name) {
-		return false
+	if param := errorParam(pErr.Message); param != "" {
+		return strings.EqualFold(param, name)
 	}
-	return strings.Contains(msg, "unsupported") || strings.Contains(msg, "unrecognized") ||
-		strings.Contains(msg, "unknown") || strings.Contains(msg, "not supported") ||
-		strings.Contains(msg, "extra inputs")
+	m := capRejectionPhrase.FindStringSubmatch(pErr.Message)
+	return len(m) == 2 && strings.EqualFold(m[1], name)
 }
 
 func (c *Client) generateOnceWithCapName(ctx context.Context, chatModel, prompt string, maxTokens int, timeout time.Duration, cap completionCapName) (string, error) {
