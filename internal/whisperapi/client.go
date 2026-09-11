@@ -177,10 +177,7 @@ func (c *Client) TranscribeStructured(ctx context.Context, relPath string, data 
 	if len(data) == 0 {
 		return model.TranscriptResult{}, &model.ProviderError{Code: "WHISPER_FAILED", Message: "transcription input is empty", Retryable: false}
 	}
-	maxPayload := c.MaxPayloadBytes
-	if maxPayload <= 0 {
-		maxPayload = defaultMaxPayloadBytes
-	}
+	maxPayload := c.MaxTranscribePayloadBytes()
 	if len(data) > maxPayload {
 		return model.TranscriptResult{}, &model.ProviderError{
 			Code:      "WHISPER_FAILED",
@@ -193,6 +190,21 @@ func (c *Client) TranscribeStructured(ctx context.Context, relPath string, data 
 
 // compile-time interface check for the optional word-timing capability.
 var _ model.StructuredTranscriber = (*Client)(nil)
+
+// MaxTranscribePayloadBytes implements model.PayloadLimitedTranscriber: it reports
+// the very limit this client enforces above, so the ingest pipeline can split a
+// long recording into windows that fit instead of sending one oversized request
+// that is refused (issue #954). Operators raise it with
+// media.stt.max_payload_mb.
+func (c *Client) MaxTranscribePayloadBytes() int {
+	if c.MaxPayloadBytes > 0 {
+		return c.MaxPayloadBytes
+	}
+	return defaultMaxPayloadBytes
+}
+
+// compile-time interface check for the optional payload-cap capability.
+var _ model.PayloadLimitedTranscriber = (*Client)(nil)
 
 func (c *Client) transcribeWithRetry(ctx context.Context, relPath string, data []byte) (model.TranscriptResult, error) {
 	maxAttempts := c.MaxRetries + 1

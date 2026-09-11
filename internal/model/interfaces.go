@@ -332,6 +332,21 @@ type StructuredTranscriber interface {
 	TranscribeStructured(ctx context.Context, relPath string, data []byte) (TranscriptResult, error)
 }
 
+// PayloadLimitedTranscriber is an OPTIONAL capability a Transcriber MAY implement
+// to declare the largest audio payload it accepts in ONE request (issue #954).
+// The ingest pipeline reads it before transcribing: a recording whose extracted
+// audio exceeds the cap is decoded in windows instead of being sent whole and
+// refused outright, which used to stamp the document status=error with no
+// transcript at all.
+//
+// A transcriber that does not implement it counts as uncapped, and is windowed on
+// the duration rule alone. Implementations MUST report the SAME limit they
+// enforce, in bytes; 0 (or negative) means "no declared cap".
+type PayloadLimitedTranscriber interface {
+	Transcriber
+	MaxTranscribePayloadBytes() int
+}
+
 // RecognizedAnnotation is one time-ranged statement a recognition backend
 // makes about a media file's content (design 0004 §5). StartMS/EndMS are
 // absolute offsets from the start of the media.

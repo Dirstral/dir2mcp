@@ -228,6 +228,12 @@ type Service struct {
 	// avutil.ErrNoAudioStream for a track past the count) without the ffmpeg binary.
 	ExtractAudioTrackIndexFunc func(ctx context.Context, path string, audioIndex int) ([]byte, error)
 
+	// ExtractSegmentFunc overrides extraction of one time slice of staged media,
+	// used by windowed transcription and windowed translation (issue #954).
+	// Defaults to avutil.ExtractSegment (ffmpeg) when nil; tests set it to supply
+	// deterministic per-window bytes without requiring the ffmpeg binary.
+	ExtractSegmentFunc func(ctx context.Context, path string, startMS, endMS int) ([]byte, error)
+
 	// ProbeMediaInfoFunc overrides the container/stream probe used to detect
 	// multi-track audio (issue #567). Defaults to avutil.ProbeMediaInfo (ffprobe)
 	// when nil; tests set it to supply a deterministic stream census without the
@@ -6420,6 +6426,11 @@ func (s *Service) translateStructured(ctx context.Context, doc model.Document, c
 // ffmpeg first and handed to the provider under an audio filename; audio documents
 // are passed through unchanged. A video with no audio track degrades to an empty
 // transcript (no error) so the caller records "no transcript" rather than failing.
+//
+// The audio is then handed to transcribeStructuredWindowed, which sends it as ONE
+// request when it fits and decodes it in overlapping windows when it does not
+// (issue #954): a 3-hour recording used to be refused whole on the provider's
+// payload cap and left the document at status=error with no transcript.
 func (s *Service) transcribe(ctx context.Context, doc model.Document, content []byte) (string, []model.TimedWord, error) {
 	relPath := doc.RelPath
 	if doc.DocType == "video" {
@@ -6434,7 +6445,7 @@ func (s *Service) transcribe(ctx context.Context, doc model.Document, content []
 		content = audio
 		relPath = videoAudioRelPath(doc.RelPath)
 	}
-	return s.transcribeWith(ctx, s.transcriber, relPath, content)
+	return s.transcribeStructuredWindowed(ctx, relPath, content)
 }
 
 // extractVideoAudioTrack demuxes a video's audio track to a compact STT-ready
