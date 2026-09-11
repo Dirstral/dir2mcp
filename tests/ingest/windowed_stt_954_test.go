@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -194,6 +195,9 @@ func TestSTTWindowMS(t *testing.T) {
 		{"a dense payload is floored, never sliced into rubble", 60 * 1000, 100 * mb, mb, 30_000},
 		{"an unknown duration is never windowed", 0, 100 * mb, 50 * mb, 0},
 		{"a cap larger than the payload leaves the default window", 30 * 60 * 1000, mb, 50 * mb, ingest.DefaultSTTWindowMS},
+		// media.stt.max_payload_mb clamps to math.MaxInt, so the cap arithmetic must
+		// not overflow and collapse the window to its floor.
+		{"an enormous configured cap keeps the default window", 3 * 60 * 60 * 1000, 2000 * mb, math.MaxInt, ingest.DefaultSTTWindowMS},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := ingest.STTWindowMS(tc.totalMS, tc.payloadBytes, tc.capBytes); got != tc.want {

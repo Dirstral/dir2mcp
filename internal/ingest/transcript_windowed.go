@@ -334,9 +334,15 @@ func STTWindowMS(totalMS, payloadBytes, capBytes int) int {
 	}
 	windowMS := DefaultSTTWindowMS
 	if capBytes > 0 && payloadBytes > 0 {
-		budget := int64(capBytes) * sttWindowCapHeadroomPct / 100
-		if fit := int(budget * int64(totalMS) / int64(payloadBytes)); fit < windowMS {
-			windowMS = fit
+		budget := int64(capBytes) / 100 * sttWindowCapHeadroomPct
+		// Project the default window's share of the payload and shrink the window
+		// only when that share does not fit the budget. Comparing first is also what
+		// keeps a very large configured cap (media.stt.max_payload_mb clamps to
+		// math.MaxInt) from overflowing the multiplication below and collapsing the
+		// window to the floor.
+		projected := int64(payloadBytes) * int64(DefaultSTTWindowMS) / int64(totalMS)
+		if projected > budget {
+			windowMS = int(budget * int64(totalMS) / int64(payloadBytes))
 		}
 	}
 	if windowMS < minSTTWindowMS {
