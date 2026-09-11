@@ -217,7 +217,7 @@ func TestSubtitleExportKeepsWholeChunkWithoutCueRecord(t *testing.T) {
 // cut in the wrong place.
 func TestSubtitleExportKeepsChunkWhenCueRecordDoesNotFit(t *testing.T) {
 	merged := ingest.MergeTranscriptChunkWindows(speech(), 40, 6)
-	var target int = -1
+	target := -1
 	for i := range merged {
 		if len(merged[i].Span.Cues) > 1 {
 			target = i
