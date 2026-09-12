@@ -639,3 +639,54 @@ func TestPartialTranscriptFloor_SkipRetiresWhatAnEarlierRunIndexed(t *testing.T)
 		t.Fatalf("the refused document reports itself skipped but still holds %d live transcript representation(s); it would keep answering from audio it never heard", n)
 	}
 }
+
+// TestPartialTranscriptFloor_SkipNeverRetiresASidecarTranscript pins the one thing
+// a refusal must never touch. A sidecar transcript is authored, not model-derived
+// (§8.6.4/§8.6.7), so a policy about the quality of MODEL output has no standing
+// to delete an editor's work. A sidecar for track 0 is stored under a rep_type
+// that shares the refused track's prefix, which is exactly how it would be swept
+// up by a rep_type match alone.
+//
+// Mutant killed: matching purely on rep_type when deciding what a refusal retires.
+func TestPartialTranscriptFloor_SkipNeverRetiresASidecarTranscript(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "long.mp3"), "fake-audio")
+	st := newRealStore(t)
+
+	// Seed an authored sidecar transcript under a rep_type in the refused track's
+	// family, the way sidecar ingestion of a language-suffixed .vtt would.
+	if err := st.UpsertDocument(ctx, model.Document{RelPath: "long.mp3", DocType: "audio", Status: "ok"}); err != nil {
+		t.Fatalf("seed document: %v", err)
+	}
+	doc0 := mustGetDoc(t, st, "long.mp3")
+	if _, err := st.UpsertRepresentation(ctx, model.Representation{
+		DocID:       doc0.DocID,
+		RepType:     ingest.RepTypeTranscript + "-ru",
+		RepHash:     "sidecar-hash",
+		MetaJSON:    `{"source":"sidecar","language":"ru","timestamps":true}`,
+		CreatedUnix: time.Now().Unix(),
+	}); err != nil {
+		t.Fatalf("seed sidecar transcript: %v", err)
+	}
+
+	// Not a forced reindex: --force deliberately retires stale sidecar transcripts
+	// so STT can replace them (§8.6.4), which is a different rule from this one.
+	svc, _, _ := partialFloorService(t, root, st, 0.9, "skip")
+	f := ingest.DiscoveredFile{RelPath: "long.mp3", SizeBytes: 10, MTimeUnix: time.Now().Unix()}
+	if err := svc.ProcessDocument(ctx, f, nil, false); err != nil {
+		t.Fatalf("ProcessDocument: %v", err)
+	}
+
+	reps, err := st.ActiveRepresentations(ctx, "long.mp3")
+	if err != nil {
+		t.Fatalf("ActiveRepresentations: %v", err)
+	}
+	for _, rep := range reps {
+		if rep.RepType == ingest.RepTypeTranscript+"-ru" {
+			return // the authored sidecar survived the refusal, as it must
+		}
+	}
+	t.Fatalf("the refusal retired the authored sidecar transcript; live reps: %+v", reps)
+}

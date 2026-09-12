@@ -5671,6 +5671,33 @@ func (s *Service) judgeEmptyTranscript(ctx context.Context, doc model.Document, 
 	return false
 }
 
+// refusedTranscriptRep reports whether a stored representation is one the
+// §8.6.13 refusal of the track whose transcript rep_type is `base` must retire.
+//
+// The rep_type test is exact-or-"-<lang>"-prefix: the exact match is the source
+// transcript and the suffixed ones are the translations derived from it
+// (§8.6.2). Track 0's base is the bare "transcript", so a plain prefix test would
+// sweep in "transcript@t1", a sibling track's work.
+//
+// A SIDECAR transcript is never retired, whatever its rep_type. It is authored,
+// not model-derived (§8.6.4/§8.6.7), so a policy about the quality of MODEL
+// output has no standing to delete it. The ordinary paths already make this
+// unreachable (a sidecar wins before STT runs, and a forced reindex retires the
+// stale ones itself), but an invariant about not deleting an editor's work should
+// hold because it is checked, not because no current path reaches it.
+func refusedTranscriptRep(rep store.RepresentationRow, base string) bool {
+	if rep.RepType != base && !strings.HasPrefix(rep.RepType, base+"-") {
+		return false
+	}
+	var meta transcriptMeta
+	if err := json.Unmarshal([]byte(rep.MetaJSON), &meta); err == nil {
+		if strings.TrimSpace(meta.Source) == sidecarSource {
+			return false
+		}
+	}
+	return true
+}
+
 // refusePartialTranscript applies the §8.6.13 floor's SKIP action (#961): it
 // reports whether this track's transcript must be dropped because its windowed
 // decode covered less of the recording than media.stt.min_coverage requires. It
@@ -5720,10 +5747,7 @@ func (s *Service) retireTrackTranscripts(ctx context.Context, doc model.Document
 	base := TranscriptRepTypeForTrack(tc.audioIndex, "")
 	var ids []int64
 	for _, rep := range reps {
-		// Exact match is the source transcript; the "-<lang>" prefix is its
-		// translations. Track 0's base is the bare "transcript", so the exact/prefix
-		// pair is what keeps "transcript@t1" out of track 0's retirement set.
-		if rep.RepType == base || strings.HasPrefix(rep.RepType, base+"-") {
+		if refusedTranscriptRep(rep, base) {
 			ids = append(ids, rep.RepID)
 		}
 	}
