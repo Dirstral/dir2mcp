@@ -3,6 +3,7 @@ package tests
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -142,6 +143,61 @@ func TestConfig965_AnUnknownReferenceIsConfigInvalid(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error does not mention %q: %v", want, err)
 		}
+	}
+}
+
+// TestConfig965_AMalformedReferenceIsConfigInvalid: a reference that is not
+// closed, or whose braces are broken by whitespace, expands to nothing and
+// reaches the model as literal text. That is the same silent loss as a
+// misspelled name, so it fails at load the same way. The check scans for the
+// `${rag.` prefix rather than for well-formed references, because a pattern
+// that only finds complete references cannot see a broken one.
+func TestConfig965_AMalformedReferenceIsConfigInvalid(t *testing.T) {
+	for _, tc := range []struct {
+		prompt string
+		// quoted is the offending text the error must hand back, quoted. The
+		// expectation is deliberately NOT "the error mentions
+		// ${rag.answer_language_rule}": the message also lists the valid
+		// references, so that assertion would hold even when the check reports
+		// nothing at all.
+		quoted string
+	}{
+		{"Answer briefly. ${rag.answer_language_rule", "${rag.answer_language_rule"},
+		{"Answer briefly. ${rag. answer_language_rule}", "${rag. answer_language_rule}"},
+		{"Answer briefly. ${rag.answer_language_rule\nCite files.", "${rag.answer_language_rule"},
+		{"Answer briefly. ${rag.}", "${rag.}"},
+	} {
+		cfg := config.Default()
+		cfg.RAGSystemPrompt = tc.prompt
+		err := cfg.Validate()
+		if err == nil {
+			t.Errorf("prompt %q holds a broken rule reference and must be CONFIG_INVALID", tc.prompt)
+			continue
+		}
+		if !strings.Contains(err.Error(), "CONFIG_INVALID") {
+			t.Errorf("prompt %q: error is not CONFIG_INVALID: %v", tc.prompt, err)
+		}
+		if !strings.Contains(err.Error(), strconv.Quote(tc.quoted)) {
+			t.Errorf("prompt %q: error does not hand back %q: %v", tc.prompt, tc.quoted, err)
+		}
+	}
+}
+
+// TestConfig965_AMalformedReferenceIsQuotedBackShortly: the error cuts the
+// offending text at the line break. An unclosed brace otherwise swallows the
+// rest of a multi-line prompt into the message.
+func TestConfig965_AMalformedReferenceIsQuotedBackShortly(t *testing.T) {
+	cfg := config.Default()
+	cfg.RAGSystemPrompt = "Answer briefly. ${rag.answer_language_rule\nNEVER QUOTE THIS LINE.\n"
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("an unclosed reference must be CONFIG_INVALID")
+	}
+	if !strings.Contains(err.Error(), strconv.Quote("${rag.answer_language_rule")) {
+		t.Errorf("the error does not quote the offending text: %v", err)
+	}
+	if strings.Contains(err.Error(), "NEVER QUOTE THIS LINE") {
+		t.Errorf("the error swallowed the following line: %v", err)
 	}
 }
 

@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/dirstral/dir2mcp/internal/promptrules"
@@ -13,11 +14,12 @@ import (
 //
 // Two things happen here, and they are deliberately of different strengths.
 //
-// An unknown reference is CONFIG_INVALID. The namespace is closed and new, so
-// nothing existing can break, and the alternative is the exact failure this
-// issue is about: `${rag.answer_language}` would travel to the model as
-// literal text, the answer-language rule would be absent, the trailing reminder
-// (#892) would stand down, and no layer would say a word.
+// An unknown or malformed reference is CONFIG_INVALID. The namespace is closed
+// and new, so nothing existing can break, and the alternative is the exact
+// failure this issue is about: `${rag.answer_language}`, or an unclosed
+// `${rag.answer_language_rule`, would travel to the model as literal text, the
+// answer-language rule would be absent, the trailing reminder (#892) would
+// stand down, and no layer would say a word.
 //
 // A partial copy of a shipped rule is a WARNING. The server cannot repair it:
 // the operator's prompt is the operator's, and text that looks like our rule
@@ -35,16 +37,17 @@ func (c *Config) validateRAGSystemPrompt() error {
 		return nil
 	}
 	if unknown := promptrules.UnknownReferences(prompt); len(unknown) > 0 {
-		return fmt.Errorf("CONFIG_INVALID: rag.system_prompt references %s, which name%s no rule this server ships; "+
-			"the references it expands are %s (SPEC §16.1.2)",
-			strings.Join(unknown, ", "), plural(len(unknown)), strings.Join(knownRuleTokens(), " and "))
+		return fmt.Errorf("CONFIG_INVALID: rag.system_prompt contains %s, which this server will not expand: "+
+			"the name matches no shipped rule, or the reference is not closed. "+
+			"The references it expands are %s (SPEC §16.1.2)",
+			quoteAll(unknown), strings.Join(knownRuleTokens(), " and "))
 	}
 	for _, stale := range promptrules.StaleCopies(prompt) {
 		c.appendWarningOnce(fmt.Errorf(
 			"rag.system_prompt reproduces PART of the shipped %s but not all of it. "+
-				"That is a copy taken from an older release: the server matches this rule exactly, so %s no longer applies "+
-				"to this deployment, and nothing else changes. Write %s in place of the copied sentences and the prompt "+
-				"follows the server from now on. The current text is: %q",
+				"That is a copy taken from an older release, and the server matches this rule exactly, so %s is off for "+
+				"this deployment. Nothing else changes. Write %s in place of the copied sentences and the prompt follows "+
+				"the server from now on. The current text is: %q",
 			stale.Name, stale.Behaviour, stale.Token, strings.TrimSpace(stale.Text)))
 	}
 	return nil
@@ -60,11 +63,15 @@ func knownRuleTokens() []string {
 	return tokens
 }
 
-func plural(n int) string {
-	if n == 1 {
-		return "s"
+// quoteAll renders the offending occurrences for an error message. They are
+// quoted because a malformed one is a fragment of the operator's prompt, and an
+// unquoted fragment would be unreadable inside a sentence.
+func quoteAll(refs []string) string {
+	quoted := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		quoted = append(quoted, strconv.Quote(ref))
 	}
-	return ""
+	return strings.Join(quoted, ", ")
 }
 
 // appendWarningOnce adds a warning unless the same text is already recorded.

@@ -99,8 +99,9 @@ type Rule struct {
 	Token string
 	// Text is the rule the running server ships.
 	Text string
-	// Behaviour names, in one clause, what the server does with this rule. It is
-	// what a warning needs in order to say what stops working.
+	// Behaviour names what this rule gates, as a noun phrase, so a message can
+	// say that it is off. It is what a warning needs in order to report a
+	// consequence rather than a mismatch.
 	Behaviour string
 }
 
@@ -110,13 +111,13 @@ var Rules = []Rule{
 		Name:      AnswerLanguageRuleName,
 		Token:     AnswerLanguageRuleToken,
 		Text:      AnswerLanguageRule,
-		Behaviour: "the trailing answer-language reminder is appended after the context (#892)",
+		Behaviour: "the trailing answer-language reminder after the context (#892)",
 	},
 	{
 		Name:      CitationRuleName,
 		Token:     CitationRuleToken,
 		Text:      CitationRule,
-		Behaviour: "answers carry the bracketed tag a client turns into a link or a playable moment (#889)",
+		Behaviour: "the bracketed citation tag a client turns into a link or a playable moment (#889)",
 	},
 }
 
@@ -149,31 +150,70 @@ func Expand(prompt string) string {
 	return expander.Replace(prompt)
 }
 
-// referencePattern matches a reference in the namespace this package owns. It
-// is deliberately loose about the name: its job is to notice that the operator
-// aimed at this namespace, and UnknownReferences decides whether they hit.
-var referencePattern = regexp.MustCompile(`\$\{rag\.[^}\s]*\}`)
+// wellFormedReference matches a complete reference at the START of the text it
+// is applied to: the namespace prefix, a name, and a closing brace. It is
+// deliberately loose about the name, because its job is to decide the SHAPE;
+// UnknownReferences decides whether the name names a rule.
+var wellFormedReference = regexp.MustCompile(`^\$\{rag\.[^}\s]*\}`)
 
-// UnknownReferences returns the `${rag.*}` references in prompt that name no
-// shipped rule, in the order they appear, without duplicates.
+// UnknownReferences returns the `${rag.…}` occurrences in prompt that this
+// server will not expand, in the order they appear, without duplicates. An
+// occurrence is returned when its name matches no shipped rule AND when it is
+// malformed: an unclosed `${rag.answer_language_rule`, or a brace broken by
+// whitespace, expands to nothing either way.
 //
-// The namespace is closed on purpose. `${rag.answer_language}` left as
-// literal text would reach the model as the rule's replacement, which is the
-// same silent loss of the reminder that #965 is about, in new clothes. Text
-// outside this namespace is never touched: a prompt that talks about `${HOME}`
-// or shell syntax is prompt text.
+// The scan is driven by the PREFIX, not by a well-formed pattern. A pattern
+// that only finds complete references would skip the broken ones, and a broken
+// reference is the failure mode this check exists for: it survives config load
+// as literal text, reaches the model in place of the rule, and disarms the
+// behaviour keyed on it without a word. The namespace is closed, so every
+// `${rag.` in a prompt is an attempt at a reference.
+//
+// Text outside this namespace is never touched: a prompt that talks about
+// `${HOME}` or shell syntax is prompt text.
 func UnknownReferences(prompt string) []string {
 	var unknown []string
 	seen := map[string]bool{}
-	for _, ref := range referencePattern.FindAllString(prompt, -1) {
-		if seen[ref] || known(ref) {
-			continue
+	for i := 0; ; {
+		j := strings.Index(prompt[i:], namespacePrefix)
+		if j < 0 {
+			return unknown
 		}
-		seen[ref] = true
-		unknown = append(unknown, ref)
+		start := i + j
+		ref, complete := referenceAt(prompt[start:])
+		if (!complete || !known(ref)) && !seen[ref] {
+			seen[ref] = true
+			unknown = append(unknown, ref)
+		}
+		// Advance past the prefix, not past the reference: a malformed one has no
+		// reliable end, and a later reference may start inside its preview.
+		i = start + len(namespacePrefix)
 	}
-	return unknown
 }
+
+// referenceAt reads the reference that begins at the start of s and reports
+// whether it is complete. A malformed one is returned as a short literal
+// preview, so the operator can find it in their prompt; it is cut at the first
+// line break, because an unclosed brace otherwise swallows the rest of a
+// multi-line prompt.
+func referenceAt(s string) (string, bool) {
+	if ref := wellFormedReference.FindString(s); ref != "" {
+		return ref, true
+	}
+	preview := s
+	if i := strings.IndexAny(preview, "\r\n"); i >= 0 {
+		preview = preview[:i]
+	}
+	if r := []rune(preview); len(r) > maxPreviewRunes {
+		preview = string(r[:maxPreviewRunes]) + "..."
+	}
+	return strings.TrimRight(preview, " \t"), false
+}
+
+// maxPreviewRunes bounds the malformed-reference preview an error quotes. Long
+// enough to show the whole of a real reference plus its neighbourhood, short
+// enough that a prompt cannot turn one error into a page.
+const maxPreviewRunes = 48
 
 func known(ref string) bool {
 	for _, r := range Rules {
