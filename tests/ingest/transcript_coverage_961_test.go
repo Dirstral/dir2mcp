@@ -3,6 +3,7 @@ package tests
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"os"
 	"path/filepath"
@@ -285,12 +286,27 @@ func TestWindowedSTT_CoverageSurvivesTheTranscriptCache(t *testing.T) {
 	}
 	requestsAfterFirst := len(tr.requests())
 
-	if err := h.svc.GenerateTranscriptRepresentation(context.Background(), mediaDoc("talks/cached.m4a"), content); err != nil {
+	// A RESTART, not a second call on the same service. Reusing h.svc would pass
+	// on in-memory state alone, which is not what "survives the cache" claims:
+	// the next run is a new process reading the same state directory. So this
+	// builds a fresh Service over the same cache with a fresh transcriber, and
+	// the fresh transcriber is what makes "no provider request" mean the cache
+	// answered rather than a warm field somewhere.
+	restarted := &windowRecordingTranscriber{capBytes: tr.capBytes}
+	svc2 := mustNewIngestService(t, config.Config{StateDir: h.stateDir}, h.store)
+	svc2.SetTranscriber(restarted)
+	svc2.SetLogger(log.New(h.logs, "", 0))
+	svc2.ProbeDurationFunc = h.svc.ProbeDurationFunc
+	svc2.ExtractSegmentFunc = h.svc.ExtractSegmentFunc
+
+	if err := svc2.GenerateTranscriptRepresentation(context.Background(), mediaDoc("talks/cached.m4a"), content); err != nil {
 		t.Fatalf("second (cached) run failed: %v", err)
 	}
+	if got := len(restarted.requests()); got != 0 {
+		t.Fatalf("the restarted run sent %d provider requests; it did not read the cache, so the test proves nothing", got)
+	}
 	if got := len(tr.requests()); got != requestsAfterFirst {
-		t.Fatalf("second run sent %d provider requests (first run: %d); it did not read the cache, so the test proves nothing",
-			got-requestsAfterFirst, requestsAfterFirst)
+		t.Fatalf("the restarted run reached the first transcriber %d extra time(s)", got-requestsAfterFirst)
 	}
 	if len(h.store.reps) != 2 {
 		t.Fatalf("persisted %d representations over two runs, want 2", len(h.store.reps))
@@ -303,6 +319,20 @@ func TestWindowedSTT_CoverageSurvivesTheTranscriptCache(t *testing.T) {
 		second.DecodedMS != first.DecodedMS || second.DurationMS != first.DurationMS {
 		t.Errorf("cached coverage %+v does not match the decoded coverage %+v", second, first)
 	}
+	// The ranges are the part a consumer reads to know WHICH minutes exist, and
+	// they are the part a scalar comparison cannot miss the loss of: a sidecar
+	// that dropped them keeps every count intact and still cannot say what was
+	// decoded.
+	if len(second.Ranges) != len(first.Ranges) {
+		t.Fatalf("cached run carried %d decoded range(s), the decode found %d: %+v vs %+v",
+			len(second.Ranges), len(first.Ranges), second.Ranges, first.Ranges)
+	}
+	for i := range first.Ranges {
+		if second.Ranges[i] != first.Ranges[i] {
+			t.Errorf("decoded range %d survived the cache as %+v, want %+v",
+				i, second.Ranges[i], first.Ranges[i])
+		}
+	}
 }
 
 // partialFloorService builds a media-ingesting service over a REAL store whose
@@ -310,7 +340,7 @@ func TestWindowedSTT_CoverageSurvivesTheTranscriptCache(t *testing.T) {
 // ProcessDocument drives a windowed decode end to end and exercises the durable
 // status/skip_reason persistence the §8.6.13 floor depends on. Two of the four
 // windows fail, giving a transcript that covers roughly a third of the recording.
-func partialFloorService(t *testing.T, root string, st *store.SQLiteStore, minCoverage float64, action string) (*ingest.Service, *appstate.IndexingState, *syncBuffer) {
+func partialFloorService(t *testing.T, root string, st model.Store, minCoverage float64, action string) (*ingest.Service, *appstate.IndexingState, *syncBuffer) {
 	t.Helper()
 	const totalMS = 30 * 60 * 1000
 	cfg := config.Config{RootDir: root, StateDir: t.TempDir(), STTProvider: "off"}
@@ -689,4 +719,63 @@ func TestPartialTranscriptFloor_SkipNeverRetiresASidecarTranscript(t *testing.T)
 		}
 	}
 	t.Fatalf("the refusal retired the authored sidecar transcript; live reps: %+v", reps)
+}
+
+// retireFailingStore961 is a real store whose retirement always fails, which is
+// what the SQLite store does under a locked database: it rolls the transaction
+// back and every representation it was asked to tombstone stays active.
+type retireFailingStore961 struct {
+	*store.SQLiteStore
+	err error
+}
+
+func (s *retireFailingStore961) SoftDeleteRepresentations(
+	ctx context.Context, relPath string, repIDs []int64) (int, error) {
+	return 0, s.err
+}
+
+// TestPartialFloor_ARefusalThatCannotRetireDoesNotRecordASkip pins the pair the
+// §8.6.13 floor exists to prevent, reached from the other side.
+//
+// The refusal tombstones what an earlier run indexed. When that retirement
+// fails, the store rolls it back and the earlier chunks are still live.
+// Recording status="skipped" then describes a document that reports itself not
+// indexed while it still answers from audio no window ever decoded, which is
+// worse than either half alone. A failed retirement has to fail the document.
+//
+// Mutant killed: logging the retirement error and refusing anyway, which is what
+// this PR did before review.
+func TestPartialFloor_ARefusalThatCannotRetireDoesNotRecordASkip(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	base := newRealStore(t)
+	st := &retireFailingStore961{SQLiteStore: base, err: errors.New("database is locked")}
+
+	writeFile(t, filepath.Join(root, "long.mp3"), "fake-audio")
+	f := ingest.DiscoveredFile{RelPath: "long.mp3", SizeBytes: 10, MTimeUnix: time.Now().Unix()}
+	ctx := context.Background()
+
+	// The adoption path the retirement exists for: index the corpus with the
+	// floor off, discover the gap, then turn it on. Without the first run there
+	// is nothing stored to retire, and the refusal would succeed trivially.
+	warmed, _, _ := partialFloorService(t, root, base, 0, "warn")
+	if err := warmed.ProcessDocument(ctx, f, nil, false); err != nil {
+		t.Fatalf("the first run should index the partial transcript: %v", err)
+	}
+	reps, err := base.ActiveRepresentations(ctx, "long.mp3")
+	if err != nil || len(reps) == 0 {
+		t.Fatalf("the first run stored nothing to retire (%d reps, err=%v)", len(reps), err)
+	}
+
+	// force, because the document has not changed since the warm run: turning
+	// the floor on is exactly the case where the content hash is identical and
+	// the verdict is not.
+	svc, _, _ := partialFloorService(t, root, st, 1.0, "skip")
+	err = svc.ProcessDocument(ctx, f, nil, true)
+	if err == nil {
+		t.Fatal("a refusal whose retirement failed reported success, so the run records a skip over chunks that are still live")
+	}
+	if !strings.Contains(err.Error(), "database is locked") {
+		t.Errorf("the error lost the store's own reason: %v", err)
+	}
 }

@@ -5515,7 +5515,7 @@ func (s *Service) transcribeAndPersistTrack(ctx context.Context, doc model.Docum
 
 	transcriptText = strings.TrimSpace(transcriptText)
 	if transcriptText == "" {
-		return false, false, s.judgeEmptyTranscript(ctx, doc, tc, coverage), nil
+		return s.settleEmptyTranscript(ctx, doc, tc, coverage)
 	}
 
 	// #681: a credential spoken on a call, or read out in a screen share, is audio
@@ -5534,8 +5534,8 @@ func (s *Service) transcribeAndPersistTrack(ctx context.Context, doc model.Docum
 	// runs BEFORE the §8.6.6 quality gate because the two measure different things:
 	// the gate screens the text that WAS decoded, this measures how much was
 	// decoded at all, and text that never existed cannot be screened.
-	if s.refusePartialTranscript(ctx, doc, tc, coverage) {
-		return false, false, true, nil
+	if handled, skipped, rerr := s.settlePartialRefusal(ctx, doc, tc, coverage); handled {
+		return false, false, skipped, rerr
 	}
 
 	var duration time.Duration
@@ -5663,12 +5663,16 @@ func (s *Service) transcribeAndPersistTrack(ctx context.Context, doc model.Docum
 // Recording that as ordinary silence would assert the recording had nothing to
 // say. An empty transcript cannot carry a secret, so the floor is the only
 // judgement left to make here.
-func (s *Service) judgeEmptyTranscript(ctx context.Context, doc model.Document, tc trackContext, coverage *TranscriptCoverage) bool {
-	if s.refusePartialTranscript(ctx, doc, tc, coverage) {
-		return true
+func (s *Service) judgeEmptyTranscript(ctx context.Context, doc model.Document, tc trackContext, coverage *TranscriptCoverage) (bool, error) {
+	refused, err := s.refusePartialTranscript(ctx, doc, tc, coverage)
+	if err != nil {
+		return false, err
+	}
+	if refused {
+		return true, nil
 	}
 	s.warnPartialTranscript(doc, tc, coverage)
-	return false
+	return false, nil
 }
 
 // refusedTranscriptRep reports whether a stored representation is one the
@@ -5703,15 +5707,47 @@ func refusedTranscriptRep(rep store.RepresentationRow, base string) bool {
 // decode covered less of the recording than media.stt.min_coverage requires. It
 // is false under `warn` (the fail-open default) and whenever the floor is off or
 // the decode was not windowed, so the shipped default never refuses a transcript.
-func (s *Service) refusePartialTranscript(ctx context.Context, doc model.Document, tc trackContext, coverage *TranscriptCoverage) bool {
+// settlePartialRefusal collapses the §8.6.13 floor decision into one branch for
+// the caller: handled says whether the track is finished with, skipped whether
+// it was refused, and a non-nil error is always handled and never a skip, since
+// a refusal whose retirement failed must not be recorded as one.
+func (s *Service) settlePartialRefusal(ctx context.Context, doc model.Document, tc trackContext, coverage *TranscriptCoverage) (bool, bool, error) {
+	refused, err := s.refusePartialTranscript(ctx, doc, tc, coverage)
+	if err != nil {
+		return true, false, err
+	}
+	return refused, refused, nil
+}
+
+// settleEmptyTranscript turns the empty-transcript verdict into this function's
+// four-value return, so the caller carries one line rather than a nested error
+// branch. A refusal whose retirement failed is an error, not a skip: see
+// refusePartialTranscript.
+func (s *Service) settleEmptyTranscript(ctx context.Context, doc model.Document, tc trackContext, coverage *TranscriptCoverage) (bool, bool, bool, error) {
+	skipped, err := s.judgeEmptyTranscript(ctx, doc, tc, coverage)
+	if err != nil {
+		return false, false, false, err
+	}
+	return false, false, skipped, nil
+}
+
+func (s *Service) refusePartialTranscript(ctx context.Context, doc model.Document, tc trackContext, coverage *TranscriptCoverage) (bool, error) {
 	if s.onPartialTranscript != onPartialTranscriptSkip || !s.transcriptBelowCoverageFloor(coverage) {
-		return false
+		return false, nil
 	}
 	s.logTrackDropped(doc, tc, fmt.Sprintf(
 		"windowed decode covered %.1f%% of the recording (%d/%d windows), below media.stt.min_coverage=%v (media.stt.on_partial_transcript=skip, SPEC §8.6.13)",
 		coverage.Fraction()*100, coverage.WindowsDecoded, coverage.WindowsAttempted, s.minTranscriptCoverage))
-	s.retireTrackTranscripts(ctx, doc, tc)
-	return true
+	// Refuse only once the earlier run's transcript is actually gone. The store
+	// lists active representations and rolls its retirement back on failure, so
+	// returning true here on a failed retirement would record status="skipped"
+	// over chunks that are still live: a document reporting itself not indexed
+	// while it answers from the audio it never heard. That is the exact pair
+	// this floor exists to prevent, arrived at from the other side.
+	if err := s.retireTrackTranscripts(ctx, doc, tc); err != nil {
+		return false, fmt.Errorf("partial transcript refusal for %s: %w", doc.RelPath, err)
+	}
+	return true, nil
 }
 
 // retireTrackTranscripts tombstones the transcript representations an EARLIER run
@@ -5728,21 +5764,30 @@ func (s *Service) refusePartialTranscript(ctx context.Context, doc model.Documen
 // It is scoped to THIS track's transcripts: the source rep_type plus any
 // per-language translations derived from it (§8.6.2). Media chunks, recognition
 // output and a sibling track's transcript are another source's work and are left
-// alone. Best-effort by design: a store without the capability, or a delete it
-// refuses, is logged and never fails the document, because the skip itself is
-// still the more honest record than an unqualified "ok".
-func (s *Service) retireTrackTranscripts(ctx context.Context, doc model.Document, tc trackContext) {
+// alone.
+//
+// A store that cannot retire at all, and a document with nothing stored yet, are
+// both the empty case: there is no stale transcript to leave behind, so they
+// return without error. A retirement that FAILS is different. The store lists
+// only active representations and rolls its transaction back, so the earlier
+// run's chunks are still live, and recording status="skipped" over them would
+// produce a document that reports itself not indexed while it answers from the
+// audio it never heard. That is the pair this floor exists to prevent, so the
+// failure travels up rather than into the log.
+func (s *Service) retireTrackTranscripts(ctx context.Context, doc model.Document, tc trackContext) error {
 	lister, listOK := s.store.(activeRepresentationLister)
 	retirer, retireOK := s.store.(representationRetirer)
 	if !listOK || !retireOK {
-		return
+		return nil
 	}
 	reps, err := lister.ActiveRepresentations(ctx, doc.RelPath)
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
-			s.getLogger().Printf("partial transcript: list representations for %s failed: %v", doc.RelPath, err)
+			// A document with nothing stored yet is not a failure: os.ErrNotExist
+			// is the empty case, and there is nothing to retire.
+			return fmt.Errorf("list representations for %s: %w", doc.RelPath, err)
 		}
-		return
+		return nil
 	}
 	base := TranscriptRepTypeForTrack(tc.audioIndex, "")
 	var ids []int64
@@ -5752,15 +5797,16 @@ func (s *Service) retireTrackTranscripts(ctx context.Context, doc model.Document
 		}
 	}
 	if len(ids) == 0 {
-		return
+		return nil
 	}
 	retired, err := retirer.SoftDeleteRepresentations(ctx, doc.RelPath, ids)
 	if err != nil {
-		s.getLogger().Printf("partial transcript: retire %d stale transcript representation(s) of %s failed: %v", len(ids), doc.RelPath, err)
-		return
+		return fmt.Errorf("retire %d stale transcript representation(s) of %s: %w",
+			len(ids), doc.RelPath, err)
 	}
 	s.getLogger().Printf("partial transcript: retired %d stale transcript representation(s) of %s%s, so the refused transcript stops answering queries (SPEC §8.6.13)",
 		retired, doc.RelPath, trackSuffixForLog(tc))
+	return nil
 }
 
 // warnPartialTranscript emits the §8.6.13 `warn` signal for a transcript that is
