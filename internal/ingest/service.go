@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -120,6 +121,14 @@ type Service struct {
 	// as documents.status="skipped" with skip_reason="language_uncovered" instead
 	// of transcribing to degraded output. Resolved once from config in NewService.
 	onUncoveredLanguage string
+
+	// minTranscriptCoverage / onPartialTranscript are the resolved §8.6.13
+	// partial-transcript floor (#961): the fraction of a WINDOWED recording that
+	// must decode, and what happens below it. 0 (the default) leaves the floor off,
+	// so a partial transcript is still indexed, but now it carries the coverage
+	// that says it is partial. Resolved once from config in NewService.
+	minTranscriptCoverage float64
+	onPartialTranscript   string
 
 	// diarizeActive reports whether speaker diarization is active for
 	// model-derived transcripts (SPEC §8.6.8): true only when diarization is
@@ -736,6 +745,63 @@ func (s *Service) SetOnUncoveredLanguage(action string) {
 	s.onUncoveredLanguage = normalizeOnUncoveredLanguage(action)
 }
 
+// onPartialTranscriptWarn / onPartialTranscriptSkip are the resolved
+// media.stt.on_partial_transcript actions (SPEC §8.6.13, #961). "skip" drops a
+// transcript whose windowed decode fell below media.stt.min_coverage; "warn" (and
+// any other resolved value) is the fail-open default: index it, and say so.
+const (
+	onPartialTranscriptWarn = "warn"
+	onPartialTranscriptSkip = "skip"
+)
+
+// normalizeOnPartialTranscript maps the raw media.stt.on_partial_transcript config
+// value to the resolved §8.6.13 action, mirroring normalizeOnUncoveredLanguage:
+// only "skip" (case-insensitive) is strict, everything else is the fail-open
+// "warn", so a Service built from an unvalidated config still indexes as today.
+func normalizeOnPartialTranscript(v string) string {
+	if strings.EqualFold(strings.TrimSpace(v), onPartialTranscriptSkip) {
+		return onPartialTranscriptSkip
+	}
+	return onPartialTranscriptWarn
+}
+
+// normalizeMinCoverage clamps the configured §8.6.13 floor into [0,1]. A negative
+// or NaN value disables the floor rather than tripping on every recording, and a
+// value above 1 is capped at "every window must decode": config.Validate rejects
+// both, so this only guards a Service built directly from an unvalidated config.
+func normalizeMinCoverage(v float64) float64 {
+	if math.IsNaN(v) || v < 0 {
+		return 0
+	}
+	if v > 1 {
+		return 1
+	}
+	return v
+}
+
+// SetPartialTranscriptFloor overrides the resolved §8.6.13 floor, primarily for
+// tests that need to exercise warn/skip without threading a full config.
+func (s *Service) SetPartialTranscriptFloor(minCoverage float64, action string) {
+	s.minTranscriptCoverage = normalizeMinCoverage(minCoverage)
+	s.onPartialTranscript = normalizeOnPartialTranscript(action)
+}
+
+// transcriptBelowCoverageFloor reports whether a windowed decode's coverage falls
+// below the configured §8.6.13 floor. A nil coverage (a single-request decode, or
+// a cache entry written before coverage existed) never trips it: absence is "no
+// assertion" per §5.2, and refusing a transcript on the strength of a missing
+// record would punish the decodes this feature cannot measure.
+//
+// A floor of 0 (the default) is off: it must not trip even on a coverage of
+// exactly 0, because `>= s.minTranscriptCoverage` on a disabled floor would
+// reject every recording whose duration probe failed.
+func (s *Service) transcriptBelowCoverageFloor(coverage *TranscriptCoverage) bool {
+	if coverage == nil || s.minTranscriptCoverage <= 0 {
+		return false
+	}
+	return coverage.Fraction() < s.minTranscriptCoverage
+}
+
 // sttLanguageUncovered reports whether the pinned STT source language trips the
 // honest-coverage floor (SPEC §8.2.1): the finally-selected model declares a
 // non-empty stt_languages set and the pinned language is outside it. It keys off
@@ -786,6 +852,34 @@ func (s *Service) skipUncoveredLanguageTranscript(ctx context.Context, doc model
 	}
 	s.addSkipped(1)
 	s.persistNonFatalDocSkip(ctx, doc, model.SkipReasonLanguageUncovered)
+	return true, true
+}
+
+// recordPartialTranscriptSkip persists the §8.6.13 skip action's durable outcome
+// (#961) for a media item whose transcript was refused because its windowed decode
+// fell below media.stt.min_coverage. It mirrors skipUncoveredLanguageTranscript:
+//
+//   - When the item produced no other searchable representation (mediaProduced=false)
+//     it is recorded as a durable status="skipped" with
+//     skip_reason="transcript_partial" and credited to the skipped counter, so the
+//     gap surfaces as honest not-indexed coverage rather than as a document that
+//     quietly answers "nothing found" for audio it never transcribed. suppressCredit
+//     is true so the caller does not also credit it as indexed (#426).
+//   - When the item already produced media chunks (embed_multimodal=augment) it stays
+//     searchable via those, so only the transcript is suppressed and suppressCredit
+//     is false.
+//
+// It returns (suppressCredit, skipped); skipped is false when no refusal happened,
+// leaving every other path untouched.
+func (s *Service) recordPartialTranscriptSkip(ctx context.Context, doc model.Document, partialSkipped, mediaProduced bool) (bool, bool) {
+	if !partialSkipped {
+		return false, false
+	}
+	if mediaProduced {
+		return false, true
+	}
+	s.addSkipped(1)
+	s.persistNonFatalDocSkip(ctx, doc, model.SkipReasonTranscriptPartial)
 	return true, true
 }
 
@@ -856,6 +950,8 @@ func NewService(cfg config.Config, store model.Store) (*Service, error) {
 		onDocumentDeletedMaxConcurrency: defaultOnDocumentDeletedMaxConcurrency,
 		onUnsupported:                   normalizeOnUnsupported(cfg.IngestOnUnsupported),
 		onUncoveredLanguage:             normalizeOnUncoveredLanguage(cfg.MediaSTTOnUncoveredLanguage),
+		minTranscriptCoverage:           normalizeMinCoverage(cfg.MediaSTTMinCoverage),
+		onPartialTranscript:             normalizeOnPartialTranscript(cfg.MediaSTTOnPartialTranscript),
 	}
 	transcriber, err := TranscriberFromConfig(cfg)
 	if err != nil {
@@ -2704,7 +2800,7 @@ func (s *Service) deriveTranscriptTranslations(ctx context.Context, doc model.Do
 // means the track produced no source transcript (empty/failed in the transcription
 // pass), which is a legitimate no-op — never a re-transcription.
 func (s *Service) deriveOneTrackTranslations(ctx context.Context, doc model.Document, content []byte, tc trackContext, duration time.Duration, trimOffsetMS int) error {
-	transcriptText, _, err := s.readTrackTranscript(ctx, doc, content, tc)
+	transcriptText, _, _, err := s.readTrackTranscript(ctx, doc, content, tc)
 	if err != nil {
 		return err
 	}
@@ -4388,6 +4484,28 @@ func (s *Service) generateHTMLStructured(ctx context.Context, doc model.Document
 	return false, nil
 }
 
+// resolveSidecarTranscript applies the §8.6.4 subtitle-sidecar precedence before
+// STT runs. It returns done=true when the caller must stop: the sidecar WAS
+// ingested as the transcript (authored beats model-derived), or the sidecar's cues
+// matched a secret pattern so nothing was ingested and the document is now
+// withheld (#681). Falling through to STT there would transcribe the same media
+// and could brand the withheld document with a provider error. Under
+// `--force`/reindex it instead retires the stale sidecar transcripts and reports
+// done=false so STT re-runs.
+//
+// Split out of generateTranscriptOrSidecar to keep that function inside the
+// cyclomatic-complexity budget; the behavior is unchanged.
+func (s *Service) resolveSidecarTranscript(ctx context.Context, doc model.Document, forceReindex bool) (bool, error) {
+	if forceReindex {
+		return false, s.retireStaleSidecarTranscripts(ctx, doc)
+	}
+	ingested, err := s.ingestSidecarTranscripts(ctx, doc)
+	if err != nil {
+		return false, err
+	}
+	return ingested || s.secretExcludedThisDoc, nil
+}
+
 // generateTranscriptOrSidecar resolves a media document's transcript. Subtitle
 // sidecar precedence (§8.6.4): a subtitle file (.vtt/.srt/.ttml) next to the
 // media is ingested AS the transcript instead of running STT — an authored
@@ -4403,22 +4521,8 @@ func (s *Service) generateHTMLStructured(ctx context.Context, doc model.Document
 // caller finalizes only after recognition has had its chance, since recognition
 // is an independent representation source (#622).
 func (s *Service) generateTranscriptOrSidecar(ctx context.Context, doc model.Document, content []byte, secretPatterns []*regexp.Regexp, forceReindex, mediaProduced bool) (bool, bool, error) {
-	if !forceReindex {
-		ingested, err := s.ingestSidecarTranscripts(ctx, doc)
-		if err != nil {
-			return false, false, err
-		}
-		if ingested {
-			return false, false, nil
-		}
-		// #681: the sidecar's cues matched a configured secret pattern, so nothing
-		// was ingested AND the document is now withheld. Stop here rather than fall
-		// through to STT, which would transcribe the same media and could brand the
-		// withheld document with a provider error.
-		if s.secretExcludedThisDoc {
-			return false, false, nil
-		}
-	} else if err := s.retireStaleSidecarTranscripts(ctx, doc); err != nil {
+	done, err := s.resolveSidecarTranscript(ctx, doc, forceReindex)
+	if err != nil || done {
 		return false, false, err
 	}
 
@@ -4436,7 +4540,7 @@ func (s *Service) generateTranscriptOrSidecar(ctx context.Context, doc model.Doc
 		if skip, suppressCredit := s.skipUncoveredLanguageTranscript(ctx, doc, mediaProduced); skip {
 			return suppressCredit, false, nil
 		}
-		produced, err := s.generateTranscriptRepresentation(ctx, doc, content)
+		produced, partialSkipped, err := s.generateTranscriptRepresentation(ctx, doc, content)
 		if err != nil {
 			// Provider/transient failures should not fail the entire ingest run.
 			// Persistence/cache failures should still propagate.
@@ -4469,6 +4573,15 @@ func (s *Service) generateTranscriptOrSidecar(ctx context.Context, doc model.Doc
 		if produced {
 			s.addRepresentations(1)
 			return false, false, nil
+		}
+		// §8.6.13 skip action (#961): the transcript was refused because its windowed
+		// decode covered too little of the recording. Record the durable
+		// status="skipped" + skip_reason="transcript_partial" so the gap surfaces in
+		// the skip_reasons honest-coverage aggregate, exactly as the §8.2.1 language
+		// floor does. Handled in a helper to keep this function inside the
+		// cyclomatic-complexity budget.
+		if suppressCredit, skipped := s.recordPartialTranscriptSkip(ctx, doc, partialSkipped, mediaProduced); skipped {
+			return suppressCredit, false, nil
 		}
 		// produced == false: the transcript was empty (silence) or the video has no
 		// audio track to transcribe. Fall through so an otherwise unsearchable video
@@ -5227,33 +5340,37 @@ type trackContext struct {
 
 // generateTranscriptRepresentation transcribes a media document (audio, or a
 // video's extracted audio track — issue #495) and persists the source transcript
-// representation(s) and their chunks. It returns (produced, err): produced is true
-// when at least one transcript representation was actually persisted, so the caller
-// can tell a real transcript from a legitimately empty one (silence, or a video with
-// no audio track) and surface an otherwise-unsearchable video (#398). A returned err
+// representation(s) and their chunks. It returns (produced, partialSkipped, err):
+// produced is true when at least one transcript representation was actually
+// persisted, so the caller can tell a real transcript from a legitimately empty one
+// (silence, or a video with no audio track) and surface an otherwise-unsearchable
+// video (#398). partialSkipped is true when every selected track that failed did so
+// because its windowed decode fell below the §8.6.13 coverage floor under
+// `media.stt.on_partial_transcript=skip`: a DELIBERATE not-indexed gap the caller
+// records as status="skipped", not as an error to retry (#961). A returned err
 // follows the same contract as generateRepresentations.
 //
 // Which audio tracks are transcribed is governed by media.stt.tracks (SPEC §8.6.12):
 // the default `first` transcribes only track 0 (byte-for-byte today's behavior and
 // cost), while `all` / an explicit index list additionally transcribe each selected
 // track N ≥ 1 under a distinct `transcript@t<N>` rep_type.
-func (s *Service) generateTranscriptRepresentation(ctx context.Context, doc model.Document, content []byte) (bool, error) {
+func (s *Service) generateTranscriptRepresentation(ctx context.Context, doc model.Document, content []byte) (bool, bool, error) {
 	if s.repGen == nil || s.transcriber == nil {
-		return false, nil
+		return false, false, nil
 	}
 	sel, err := config.ParseSTTTracks(s.cfg.MediaSTTTracks)
 	if err != nil {
 		// Should never happen (validated at startup), but fail closed rather than
 		// silently transcribing the wrong track set.
-		return false, err
+		return false, false, err
 	}
 	// Default (and overwhelmingly common) single-track path: transcribe only the
 	// first audio stream, keeping the eager quality-gate semantics and the honest
 	// "additional tracks dropped" diagnostic exactly as before (§8.6.12: track 0 is
 	// byte-for-byte unchanged).
 	if sel.Mode == config.STTTracksFirst {
-		produced, _, terr := s.transcribeAndPersistTrack(ctx, doc, content, trackContext{audioIndex: 0, warnExtras: true})
-		return produced, terr
+		produced, _, partialSkipped, terr := s.transcribeAndPersistTrack(ctx, doc, content, trackContext{audioIndex: 0, warnExtras: true})
+		return produced, partialSkipped, terr
 	}
 	return s.generateSelectedTrackTranscripts(ctx, doc, content, sel)
 }
@@ -5265,7 +5382,7 @@ func (s *Service) generateTranscriptRepresentation(ctx context.Context, doc mode
 // dropped and recorded as honest coverage), and the DOCUMENT is reported as an
 // error only if EVERY selected track failed — otherwise it is ready with whatever
 // tracks succeeded.
-func (s *Service) generateSelectedTrackTranscripts(ctx context.Context, doc model.Document, content []byte, sel config.STTTrackSelection) (bool, error) {
+func (s *Service) generateSelectedTrackTranscripts(ctx context.Context, doc model.Document, content []byte, sel config.STTTrackSelection) (bool, bool, error) {
 	info := s.probeTrackInfo(ctx, doc)
 	indices := resolveTrackIndices(sel, info)
 	if len(indices) == 0 {
@@ -5273,8 +5390,8 @@ func (s *Service) generateSelectedTrackTranscripts(ctx context.Context, doc mode
 			// Unprobeable / no audio census (ffprobe absent, undecodable input): fall
 			// back to the default first-track path so a media file still gets its
 			// track-0 transcript rather than being silently skipped.
-			produced, _, terr := s.transcribeAndPersistTrack(ctx, doc, content, trackContext{audioIndex: 0, warnExtras: false})
-			return produced, terr
+			produced, _, partialSkipped, terr := s.transcribeAndPersistTrack(ctx, doc, content, trackContext{audioIndex: 0, warnExtras: false})
+			return produced, partialSkipped, terr
 		}
 		// The probe succeeded but an explicit index list matched no existing track in
 		// THIS file (every listed index is past its track count — a per-file
@@ -5282,7 +5399,7 @@ func (s *Service) generateSelectedTrackTranscripts(ctx context.Context, doc mode
 		// unselected track. A video with no other representation is still caught by
 		// the caller's no-representation check (#398).
 		s.getLogger().Printf("media.stt.tracks: none of the selected tracks exist in %s (%d audio stream(s)); no transcript produced (§8.6.12)", doc.RelPath, len(info.AudioStreams))
-		return false, nil
+		return false, false, nil
 	}
 
 	// Defer the eager per-document quality-gate error while looping so a rejected
@@ -5293,6 +5410,7 @@ func (s *Service) generateSelectedTrackTranscripts(ctx context.Context, doc mode
 
 	producedAny := false
 	failed := 0
+	partialSkips := 0
 	var firstFailErr error
 	for _, n := range indices {
 		tc := trackContext{audioIndex: n}
@@ -5300,11 +5418,11 @@ func (s *Service) generateSelectedTrackTranscripts(ctx context.Context, doc mode
 			tc.stream = info.AudioStreams[n]
 			tc.hasStream = true
 		}
-		produced, rejected, terr := s.transcribeAndPersistTrack(ctx, doc, content, tc)
+		produced, rejected, partialSkipped, terr := s.transcribeAndPersistTrack(ctx, doc, content, tc)
 		if terr != nil {
 			if isHardTranscriptError(terr) {
 				// A persistence/cache failure is not track-scoped; abort the document.
-				return producedAny, terr
+				return producedAny, false, terr
 			}
 			// A provider/transient transcription failure is scoped to this track.
 			failed++
@@ -5312,6 +5430,13 @@ func (s *Service) generateSelectedTrackTranscripts(ctx context.Context, doc mode
 				firstFailErr = terr
 			}
 			s.logTrackDropped(doc, tc, terr.Error())
+			continue
+		}
+		if partialSkipped {
+			// §8.6.13 skip: this track was refused on purpose, so it counts as failed
+			// for the all-failed decision below but is NOT a provider error.
+			failed++
+			partialSkips++
 			continue
 		}
 		if rejected {
@@ -5329,12 +5454,20 @@ func (s *Service) generateSelectedTrackTranscripts(ctx context.Context, doc mode
 	// so the caller marks the document status=error and retries it next run, without
 	// double-counting the video-no-representation path.
 	if failed == len(indices) {
-		if firstFailErr != nil {
-			return false, firstFailErr
+		// §8.6.13 (#961): when EVERY selected track was refused by the coverage
+		// floor, nothing failed: the daemon declined on purpose, so the document is
+		// a declared skip rather than an error to retry next run. A mix of refusals
+		// and real failures still reports the failure: it is the retryable one, and
+		// the more urgent thing to tell an operator.
+		if partialSkips == failed {
+			return false, true, nil
 		}
-		return false, fmt.Errorf("%w: every selected audio track of %s failed transcription (§8.6.12)", ErrTranscriptProviderFailure, doc.RelPath)
+		if firstFailErr != nil {
+			return false, false, firstFailErr
+		}
+		return false, false, fmt.Errorf("%w: every selected audio track of %s failed transcription (§8.6.12)", ErrTranscriptProviderFailure, doc.RelPath)
 	}
-	return producedAny, nil
+	return producedAny, false, nil
 }
 
 // shiftSegmentsForLeadingSilence applies the optional leading-silence trim
@@ -5366,10 +5499,10 @@ func (s *Service) shiftSegmentsForLeadingSilence(ctx context.Context, doc model.
 // keeps the bare `transcript` rep_type and is byte-for-byte identical to the legacy
 // single-track path; each additional track N ≥ 1 is persisted under
 // `transcript@t<N>` with its container-declared track/language/label in meta_json.
-func (s *Service) transcribeAndPersistTrack(ctx context.Context, doc model.Document, content []byte, tc trackContext) (bool, bool, error) {
-	transcriptText, words, err := s.readTrackTranscript(ctx, doc, content, tc)
+func (s *Service) transcribeAndPersistTrack(ctx context.Context, doc model.Document, content []byte, tc trackContext) (bool, bool, bool, error) {
+	transcriptText, words, coverage, err := s.readTrackTranscript(ctx, doc, content, tc)
 	if err != nil {
-		return false, false, err
+		return false, false, false, err
 	}
 
 	// Multi-track honesty (issue #567/#596): on the default first-track path the STT
@@ -5382,7 +5515,7 @@ func (s *Service) transcribeAndPersistTrack(ctx context.Context, doc model.Docum
 
 	transcriptText = strings.TrimSpace(transcriptText)
 	if transcriptText == "" {
-		return false, false, nil
+		return false, false, false, nil
 	}
 
 	// #681: a credential spoken on a call, or read out in a screen share, is audio
@@ -5391,7 +5524,18 @@ func (s *Service) transcribeAndPersistTrack(ctx context.Context, doc model.Docum
 	// so this reports "no transcript produced" without a soft error: the run must
 	// not also count the withheld document as an error.
 	if s.screenDerivedSecrets(ctx, doc, derivedKindTranscript, transcriptText) {
-		return false, false, nil
+		return false, false, false, nil
+	}
+
+	// §8.6.13 partial-transcript floor (#961): a windowed decode that covered less
+	// of the recording than media.stt.min_coverage requires is refused under
+	// `skip`, so the gap is recorded as honest not-indexed coverage instead of a
+	// transcript that silently answers "no" for the audio no window decoded. It
+	// runs BEFORE the §8.6.6 quality gate because the two measure different things:
+	// the gate screens the text that WAS decoded, this measures how much was
+	// decoded at all, and text that never existed cannot be screened.
+	if s.refusePartialTranscript(doc, tc, coverage) {
+		return false, false, true, nil
 	}
 
 	var duration time.Duration
@@ -5410,7 +5554,7 @@ func (s *Service) transcribeAndPersistTrack(ctx context.Context, doc model.Docum
 	// persist-with-quarantine behavior below is preserved unchanged.
 	if decision.quarantine && s.deferGateDocError {
 		s.logTrackDropped(doc, tc, "output quality gate rejected the transcript")
-		return false, true, nil
+		return false, true, false, nil
 	}
 
 	segments := chunkTranscriptByTimeWithWordsFiltered(transcriptText, words, s.captionWordFilter())
@@ -5420,7 +5564,7 @@ func (s *Service) transcribeAndPersistTrack(ctx context.Context, doc model.Docum
 	// the export path applies to the sidecar. Off by default.
 	segments = applyCueCleaningToSegments(segments, s.captionCleanOptions())
 	if len(segments) == 0 {
-		return false, false, nil
+		return false, false, false, nil
 	}
 	// Optional model-driven speaker diarization (SPEC §8.6.8): when active and a
 	// diarizer is injected, attribute each segment to a speaker. This is metadata
@@ -5443,9 +5587,14 @@ func (s *Service) transcribeAndPersistTrack(ctx context.Context, doc model.Docum
 
 	meta := s.sttTranscriptMeta(distinctSpeakers(segments), transcriptText, segmentsHaveWordTiming(segments))
 	applyTrackMeta(&meta, tc)
+	// §8.6.13: record what a windowed decode actually covered. Nil for a
+	// single-request decode, so the field stays absent and the meta_json of a
+	// short recording is unchanged (#961).
+	meta.Coverage = coverage
+	s.warnPartialTranscript(doc, tc, coverage)
 	metaJSON, err := json.Marshal(meta)
 	if err != nil {
-		return false, false, fmt.Errorf("marshal transcript meta: %w", err)
+		return false, false, false, fmt.Errorf("marshal transcript meta: %w", err)
 	}
 	rep := model.Representation{
 		DocID:       doc.DocID,
@@ -5457,7 +5606,7 @@ func (s *Service) transcribeAndPersistTrack(ctx context.Context, doc model.Docum
 	}
 	repID, err := s.repGen.store.UpsertRepresentation(ctx, rep)
 	if err != nil {
-		return false, false, fmt.Errorf("upsert transcript representation: %w", err)
+		return false, false, false, fmt.Errorf("upsert transcript representation: %w", err)
 	}
 
 	// Optional leading-silence trim (dir2mcp#258): when enabled, subtract the
@@ -5468,7 +5617,7 @@ func (s *Service) transcribeAndPersistTrack(ctx context.Context, doc model.Docum
 	// transcripts below, keeping source/translated time windows aligned.
 	trimOffsetMS := s.shiftSegmentsForLeadingSilence(ctx, doc, segments)
 	if err := s.repGen.upsertChunksForRepresentation(ctx, repID, "text", segments, decision); err != nil {
-		return false, false, fmt.Errorf("persist transcript chunks: %w", err)
+		return false, false, false, fmt.Errorf("persist transcript chunks: %w", err)
 	}
 
 	// Optional translation step (SPEC §8.6.2): after the source transcript
@@ -5488,7 +5637,7 @@ func (s *Service) transcribeAndPersistTrack(ctx context.Context, doc model.Docum
 	// final set of representations is identical either way — only the ordering
 	// differs. In single-pass mode (the default) it runs inline as before.
 	if s.activePass == passTranscription {
-		return true, false, nil
+		return true, false, false, nil
 	}
 	if err := s.translateTranscriptRepresentations(ctx, doc, content, transcriptText, duration, trimOffsetMS, tc.audioIndex); err != nil {
 		s.getLogger().Printf("transcript translation skipped for %s: %v", doc.RelPath, err)
@@ -5502,7 +5651,38 @@ func (s *Service) transcribeAndPersistTrack(ctx context.Context, doc model.Docum
 		code := manifestErrorCode(err)
 		s.markActiveErrored(code, code+": transcript translation failed")
 	}
-	return true, false, nil
+	return true, false, false, nil
+}
+
+// refusePartialTranscript applies the §8.6.13 floor's SKIP action (#961): it
+// reports whether this track's transcript must be dropped because its windowed
+// decode covered less of the recording than media.stt.min_coverage requires. It
+// is false under `warn` (the fail-open default) and whenever the floor is off or
+// the decode was not windowed, so the shipped default never refuses a transcript.
+func (s *Service) refusePartialTranscript(doc model.Document, tc trackContext, coverage *TranscriptCoverage) bool {
+	if s.onPartialTranscript != onPartialTranscriptSkip || !s.transcriptBelowCoverageFloor(coverage) {
+		return false
+	}
+	s.logTrackDropped(doc, tc, fmt.Sprintf(
+		"windowed decode covered %.1f%% of the recording (%d/%d windows), below media.stt.min_coverage=%v (media.stt.on_partial_transcript=skip, SPEC §8.6.13)",
+		coverage.Fraction()*100, coverage.WindowsDecoded, coverage.WindowsAttempted, s.minTranscriptCoverage))
+	return true
+}
+
+// warnPartialTranscript emits the §8.6.13 `warn` signal for a transcript that is
+// about to be indexed despite covering only part of its recording. The coverage
+// is recorded on meta_json regardless; this is the operator-visible half, so an
+// incomplete transcript is not something only a later meta_json read can reveal.
+// It fires for ANY incomplete windowed decode, not only one under the configured
+// floor: the floor decides what to REFUSE, while a missing window is always worth
+// saying out loud.
+func (s *Service) warnPartialTranscript(doc model.Document, tc trackContext, coverage *TranscriptCoverage) {
+	if coverage == nil || coverage.Complete() {
+		return
+	}
+	s.getLogger().Printf("stt: %s%s is indexed as a PARTIAL transcript: the windowed decode covered %.1f%% of the recording (%d/%d windows, %d of %d ms); it is recorded on the transcript meta_json coverage (SPEC §8.6.13)",
+		doc.RelPath, trackSuffixForLog(tc), coverage.Fraction()*100,
+		coverage.WindowsDecoded, coverage.WindowsAttempted, coverage.DecodedMS, coverage.DurationMS)
 }
 
 // readTrackTranscript resolves the transcript text (and optional per-word timing)
@@ -5512,7 +5692,7 @@ func (s *Service) transcribeAndPersistTrack(ctx context.Context, doc model.Docum
 // track N ≥ 1 is first demuxed to a compact per-track audio clip and transcribed as
 // a standalone audio document, keying the transcribe cache on the extracted bytes so
 // each track caches independently.
-func (s *Service) readTrackTranscript(ctx context.Context, doc model.Document, content []byte, tc trackContext) (string, []model.TimedWord, error) {
+func (s *Service) readTrackTranscript(ctx context.Context, doc model.Document, content []byte, tc trackContext) (string, []model.TimedWord, *TranscriptCoverage, error) {
 	if tc.audioIndex <= 0 {
 		return s.readOrComputeTranscriptWithWords(ctx, doc, content, "")
 	}
@@ -5523,9 +5703,9 @@ func (s *Service) readTrackTranscript(ctx context.Context, doc model.Document, c
 			// transcript" (handled by the caller as an empty, non-fatal outcome), not
 			// a provider failure.
 			s.getLogger().Printf("media.stt.tracks: %s has no audio track %d to transcribe; skipping it (§8.6.12)", doc.RelPath, tc.audioIndex)
-			return "", nil, nil
+			return "", nil, nil, nil
 		}
-		return "", nil, fmt.Errorf("%w: extract audio track %d of %s: %w", ErrTranscriptProviderFailure, tc.audioIndex, doc.RelPath, err)
+		return "", nil, nil, fmt.Errorf("%w: extract audio track %d of %s: %w", ErrTranscriptProviderFailure, tc.audioIndex, doc.RelPath, err)
 	}
 	// Transcribe the extracted clip as a standalone audio document: DocType audio so
 	// transcribe() does not re-demux, and an audio-suffixed rel_path so the provider
@@ -5641,6 +5821,16 @@ func applyTrackMeta(meta *transcriptMeta, tc trackContext) {
 func (s *Service) logTrackDropped(doc model.Document, tc trackContext, reason string) {
 	desc := describeAudioStream(tc.audioIndex, tc.stream)
 	s.getLogger().Printf("media.stt.tracks: dropped audio track %s of %s: %s (issue #567)", desc, doc.RelPath, reason)
+}
+
+// trackSuffixForLog names an ADDITIONAL audio track in a log line and is empty for
+// track 0, so a single-track document's diagnostics read exactly as they did
+// before multi-track support (SPEC §8.6.12).
+func trackSuffixForLog(tc trackContext) string {
+	if tc.audioIndex <= 0 {
+		return ""
+	}
+	return fmt.Sprintf(" (audio track %d)", tc.audioIndex)
 }
 
 // isHardTranscriptError reports whether a per-track transcription error is a HARD
@@ -5888,7 +6078,7 @@ func (s *Service) translateOneTranscript(ctx context.Context, doc model.Document
 
 // GenerateTranscriptRepresentation exposes transcript generation for tests.
 func (s *Service) GenerateTranscriptRepresentation(ctx context.Context, doc model.Document, content []byte) error {
-	_, err := s.generateTranscriptRepresentation(ctx, doc, content)
+	_, _, err := s.generateTranscriptRepresentation(ctx, doc, content)
 	return err
 }
 
@@ -6279,7 +6469,7 @@ func TranscriptLangSuffix(language string) string {
 }
 
 func (s *Service) readOrComputeTranscript(ctx context.Context, doc model.Document, content []byte, language string) (string, error) {
-	text, _, err := s.readOrComputeTranscriptWithWords(ctx, doc, content, language)
+	text, _, _, err := s.readOrComputeTranscriptWithWords(ctx, doc, content, language)
 	return text, err
 }
 
@@ -6289,14 +6479,14 @@ func (s *Service) readOrComputeTranscript(ctx context.Context, doc model.Documen
 // best-effort sidecar (.words.json) carried only when the transcriber implements
 // model.StructuredTranscriber. A missing or unreadable sidecar yields nil words
 // — behaviour identical to a provider without word timing.
-func (s *Service) readOrComputeTranscriptWithWords(ctx context.Context, doc model.Document, content []byte, language string) (string, []model.TimedWord, error) {
+func (s *Service) readOrComputeTranscriptWithWords(ctx context.Context, doc model.Document, content []byte, language string) (string, []model.TimedWord, *TranscriptCoverage, error) {
 	if s.transcriber == nil {
-		return "", nil, errors.New("transcriber not configured")
+		return "", nil, nil, errors.New("transcriber not configured")
 	}
 
 	cacheDir := filepath.Join(s.cfg.StateDir, "cache", "transcribe")
 	if err := statefs.MkdirAll(cacheDir); err != nil {
-		return "", nil, fmt.Errorf("create transcript cache dir: %w", err)
+		return "", nil, nil, fmt.Errorf("create transcript cache dir: %w", err)
 	}
 
 	// Key the cache on the media bytes AND the active STT derivation identity
@@ -6309,20 +6499,25 @@ func (s *Service) readOrComputeTranscriptWithWords(ctx context.Context, doc mode
 	base := s.transcriptCacheKey(content) + TranscriptLangSuffix(language)
 	cachePath := filepath.Join(cacheDir, base+".txt")
 	wordsPath := filepath.Join(cacheDir, base+".words.json")
+	coveragePath := filepath.Join(cacheDir, base+".coverage.json")
 	if cached, err := os.ReadFile(cachePath); err == nil {
-		return string(cached), readCachedWords(wordsPath), nil
+		// SPEC §8.6.13: the windowed-decode coverage is restored with the cached
+		// text. A cache hit that dropped it would re-index the same PARTIAL
+		// transcript as a complete one on the next run, which is the whole defect.
+		return string(cached), readCachedWords(wordsPath), readCachedCoverage(coveragePath), nil
 	}
 
-	transcript, words, err := s.transcribe(ctx, doc, content)
+	transcript, words, coverage, err := s.transcribe(ctx, doc, content)
 	if err != nil {
-		return "", nil, fmt.Errorf("%w: transcribe %s: %w", ErrTranscriptProviderFailure, doc.RelPath, err)
+		return "", nil, nil, fmt.Errorf("%w: transcribe %s: %w", ErrTranscriptProviderFailure, doc.RelPath, err)
 	}
 
 	transcriptBytes := []byte(strings.ReplaceAll(strings.ReplaceAll(transcript, "\r\n", "\n"), "\r", "\n"))
 	if err := statefs.WriteFile(cachePath, transcriptBytes); err != nil {
-		return "", nil, fmt.Errorf("write transcript cache: %w", err)
+		return "", nil, nil, fmt.Errorf("write transcript cache: %w", err)
 	}
 	s.writeCachedWords(wordsPath, words)
+	s.writeCachedCoverage(coveragePath, coverage)
 	shouldEnforceAfterWrite := s.markOCRCacheWrite()
 	if shouldEnforceAfterWrite {
 		// Reuse the same cache-policy limits/hooks as OCR for now so transcript
@@ -6340,7 +6535,7 @@ func (s *Service) readOrComputeTranscriptWithWords(ctx context.Context, doc mode
 			s.getLogger().Printf("enforceCachePolicy(%s) failed: %v", cacheDir, err)
 		}
 	}
-	return string(transcriptBytes), words, nil
+	return string(transcriptBytes), words, coverage, nil
 }
 
 // readOrComputeWhisperTranslation produces the English transcript for
@@ -6457,16 +6652,16 @@ func (s *Service) translateStructured(ctx context.Context, doc model.Document, c
 // request when it fits and decodes it in overlapping windows when it does not
 // (issue #954): a 3-hour recording used to be refused whole on the provider's
 // payload cap and left the document at status=error with no transcript.
-func (s *Service) transcribe(ctx context.Context, doc model.Document, content []byte) (string, []model.TimedWord, error) {
+func (s *Service) transcribe(ctx context.Context, doc model.Document, content []byte) (string, []model.TimedWord, *TranscriptCoverage, error) {
 	relPath := doc.RelPath
 	if doc.DocType == "video" {
 		audio, err := s.extractVideoAudioTrack(ctx, doc, content)
 		if err != nil {
 			if errors.Is(err, avutil.ErrNoAudioStream) {
 				s.getLogger().Printf("no audio track to transcribe in video %s; skipping STT", doc.RelPath)
-				return "", nil, nil
+				return "", nil, nil, nil
 			}
-			return "", nil, err
+			return "", nil, nil, err
 		}
 		content = audio
 		relPath = videoAudioRelPath(doc.RelPath)
@@ -6522,6 +6717,44 @@ func readCachedWords(path string) []model.TimedWord {
 	return words
 }
 
+// readCachedCoverage reads the windowed-decode coverage sidecar written beside a
+// cached transcript (SPEC §8.6.13). A missing or unreadable sidecar yields nil,
+// which per §5.2 means "no assertion", the same thing a single-request decode
+// records, so an older cache entry written before this sidecar existed degrades
+// to today's behavior instead of claiming completeness.
+func readCachedCoverage(path string) *TranscriptCoverage {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var coverage TranscriptCoverage
+	if err := json.Unmarshal(raw, &coverage); err != nil {
+		return nil
+	}
+	if coverage.WindowsAttempted < 2 {
+		return nil
+	}
+	return &coverage
+}
+
+// writeCachedCoverage persists the windowed-decode coverage alongside the cached
+// transcript so a cache hit reports the same partial coverage the decode did
+// (SPEC §8.6.13). Best-effort, mirroring writeCachedWords: a write failure is
+// logged, never fatal. No sidecar is written for a single-request decode.
+func (s *Service) writeCachedCoverage(path string, coverage *TranscriptCoverage) {
+	if coverage == nil {
+		return
+	}
+	raw, err := json.Marshal(coverage)
+	if err != nil {
+		s.getLogger().Printf("marshal transcript coverage cache: %v", err)
+		return
+	}
+	if err := statefs.WriteFile(path, raw); err != nil {
+		s.getLogger().Printf("write transcript coverage cache (%s): %v", path, err)
+	}
+}
+
 // writeCachedWords persists per-word timing alongside the transcript text. It is
 // best-effort: a write failure is logged and ignored so word timing never blocks
 // transcript ingest. No sidecar is written when there are no words.
@@ -6545,7 +6778,7 @@ func (s *Service) ReadOrComputeTranscript(ctx context.Context, doc model.Documen
 }
 
 // PurgeTranscriptCache removes the transcript cache entry (and its word-timing
-// sidecar) for the given content+language, using the same active-STT key
+// and §8.6.13 coverage sidecars) for the given content+language, using the same active-STT key
 // readOrComputeTranscriptWithWords writes under. Callers that gate the returned
 // transcript (e.g. the MCP secret-pattern gate) use this so refused text is
 // never left persisted in {StateDir}/cache/transcribe. Missing files are
@@ -6560,8 +6793,8 @@ func (s *Service) PurgeTranscriptCache(content []byte, language string) {
 	// refused) translated text must not be left persisted after a purge.
 	translateBase := key + "-translate" + TranscriptLangSuffix("en")
 	for _, p := range []string{
-		base + ".txt", base + ".words.json",
-		translateBase + ".txt", translateBase + ".words.json",
+		base + ".txt", base + ".words.json", base + ".coverage.json",
+		translateBase + ".txt", translateBase + ".words.json", translateBase + ".coverage.json",
 	} {
 		if err := os.Remove(filepath.Join(cacheDir, p)); err != nil && !errors.Is(err, os.ErrNotExist) {
 			s.getLogger().Printf("purge transcript cache: %v", err)

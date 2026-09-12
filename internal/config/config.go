@@ -1145,6 +1145,28 @@ type Config struct {
 	// The floor only applies when coverage is DECLARED (a non-empty stt_languages);
 	// unknown coverage never trips it under either mode.
 	MediaSTTOnUncoveredLanguage string
+
+	// MediaSTTMinCoverage is the partial-transcript floor (config
+	// `media.stt.min_coverage`, SPEC §8.6.13, #961): the fraction of a WINDOWED
+	// recording that must actually decode before its transcript is indexed as if
+	// it were whole. A long recording is decoded in several windows; when some of
+	// them fail the merged transcript covers only part of the audio, and nothing
+	// downstream can tell that from a complete one. 0 (the default) leaves the
+	// floor OFF, so shipped behavior is unchanged and coverage is still recorded
+	// on the transcript meta_json either way. Valid range [0,1].
+	MediaSTTMinCoverage float64
+
+	// MediaSTTOnPartialTranscript is the action taken when the decoded fraction
+	// falls below MediaSTTMinCoverage (config `media.stt.on_partial_transcript`,
+	// SPEC §8.6.13, #961). "warn" (default, fail-open) indexes the partial
+	// transcript and logs the decoded fraction; "skip" (strict) drops it and
+	// records the item as documents.status="skipped" with
+	// skip_reason="transcript_partial", so the gap surfaces as honest not-indexed
+	// coverage instead of a transcript that silently answers "no" for the audio it
+	// never saw. It mirrors MediaSTTOnUncoveredLanguage: a declaration key and an
+	// action key, the same shape an operator already learned for §8.2.1.
+	MediaSTTOnPartialTranscript string
+
 	// MediaSTTTracks selects WHICH audio tracks of a multi-track media container
 	// are transcribed (config `media.stt.tracks`, SPEC §8.6.12, issue #567). It is
 	// the RAW, unvalidated form as written in config: an empty slice (the default)
@@ -1444,6 +1466,8 @@ type fileConfig struct {
 	MediaSTTRequestTimeoutSec          *int
 	MediaSTTLanguageStrict             *bool
 	MediaSTTOnUncoveredLanguage        *string
+	MediaSTTMinCoverage                *float64
+	MediaSTTOnPartialTranscript        *string
 	MediaSTTTracks                     []string
 	ElevenLabsAPIKey                   *string
 	ServerTLSCertFile                  *string
@@ -1611,6 +1635,8 @@ type persistedConfig struct {
 	MediaSTTRequestTimeoutSec          int           `yaml:"media_stt_request_timeout_sec"`
 	MediaSTTLanguageStrict             bool          `yaml:"media_stt_language_strict"`
 	MediaSTTOnUncoveredLanguage        string        `yaml:"media_stt_on_uncovered_language"`
+	MediaSTTMinCoverage                float64       `yaml:"media_stt_min_coverage"`
+	MediaSTTOnPartialTranscript        string        `yaml:"media_stt_on_partial_transcript"`
 	MediaSTTTracks                     []string      `yaml:"media_stt_tracks"`
 	MediaBatchTwoPhase                 bool          `yaml:"media_batch_two_phase"`
 	MediaBatchProgress                 bool          `yaml:"media_batch_progress"`
@@ -1856,6 +1882,7 @@ func Default() Config {
 		// transcribe an uncovered-language item anyway and record the fact — so
 		// behavior is unchanged unless an operator opts into strict skipping.
 		MediaSTTOnUncoveredLanguage: onUncoveredLanguageWarn,
+		MediaSTTOnPartialTranscript: onPartialTranscriptWarn,
 		MediaVariantsGroup:          false,
 		MediaVariantsSelect:         "best",
 		MediaTranslateEnabled:       false,
@@ -2051,6 +2078,8 @@ func buildPersistedConfig(cfg *Config) persistedConfig {
 		MediaSTTRequestTimeoutSec:          cfg.MediaSTTRequestTimeoutSec,
 		MediaSTTLanguageStrict:             cfg.MediaSTTLanguageStrict,
 		MediaSTTOnUncoveredLanguage:        cfg.MediaSTTOnUncoveredLanguage,
+		MediaSTTMinCoverage:                cfg.MediaSTTMinCoverage,
+		MediaSTTOnPartialTranscript:        cfg.MediaSTTOnPartialTranscript,
 		MediaSTTTracks:                     append([]string(nil), cfg.MediaSTTTracks...),
 		ServerTLSCertFile:                  cfg.ServerTLSCertFile,
 		ServerTLSKeyFile:                   cfg.ServerTLSKeyFile,
@@ -3052,6 +3081,12 @@ func applyMediaSTTFileParsed(cfg *Config, fc fileConfig) {
 	if fc.MediaSTTOnUncoveredLanguage != nil {
 		cfg.MediaSTTOnUncoveredLanguage = *fc.MediaSTTOnUncoveredLanguage
 	}
+	if fc.MediaSTTMinCoverage != nil {
+		cfg.MediaSTTMinCoverage = *fc.MediaSTTMinCoverage
+	}
+	if fc.MediaSTTOnPartialTranscript != nil {
+		cfg.MediaSTTOnPartialTranscript = *fc.MediaSTTOnPartialTranscript
+	}
 	if fc.MediaSTTTracks != nil {
 		cfg.MediaSTTTracks = normalizeStringSlice(fc.MediaSTTTracks)
 	}
@@ -3559,6 +3594,8 @@ var configKeyAliases = map[string]string{
 	"media_stt_request_timeout_sec":           "media.stt.request_timeout_sec",
 	"media_stt_language_strict":               "media.stt.language_strict",
 	"media_stt_on_uncovered_language":         "media.stt.on_uncovered_language",
+	"media_stt_min_coverage":                  "media.stt.min_coverage",
+	"media_stt_on_partial_transcript":         "media.stt.on_partial_transcript",
 	"media_stt_tracks":                        "media.stt.tracks",
 	"stt_provider":                            "stt.provider",
 	"stt_mistral_model":                       "stt.mistral.model",
@@ -3865,6 +3902,8 @@ func setFloatFileScalar(cfg *fileConfig, key, value string) error {
 		target = &cfg.ContextCompressionTargetRatio
 	case "retrieval.mmr.lambda":
 		target = &cfg.RetrievalMMRLambda
+	case "media.stt.min_coverage":
+		target = &cfg.MediaSTTMinCoverage
 	case "recognize.timeout_per_media_second":
 		target = &cfg.RecognizeTimeoutPerMediaSecond
 	default:
@@ -4125,6 +4164,8 @@ func setMediaStringFileScalar(cfg *fileConfig, key, value string) {
 		cfg.MediaTranslateEngine = strPtr(value)
 	case "media.stt.on_uncovered_language":
 		cfg.MediaSTTOnUncoveredLanguage = strPtr(value)
+	case "media.stt.on_partial_transcript":
+		cfg.MediaSTTOnPartialTranscript = strPtr(value)
 	case "media.batch.manifest":
 		cfg.MediaBatchManifest = strPtr(value)
 	}
@@ -4416,6 +4457,8 @@ func marshalConfigYAML(cfg persistedConfig) ([]byte, error) {
 	writeInt("media_stt_request_timeout_sec", cfg.MediaSTTRequestTimeoutSec)
 	writeBool("media_stt_language_strict", cfg.MediaSTTLanguageStrict)
 	writeScalar("media_stt_on_uncovered_language", cfg.MediaSTTOnUncoveredLanguage)
+	writeScalar("media_stt_min_coverage", strconv.FormatFloat(cfg.MediaSTTMinCoverage, 'f', -1, 64))
+	writeScalar("media_stt_on_partial_transcript", cfg.MediaSTTOnPartialTranscript)
 	writeList("media_stt_tracks", cfg.MediaSTTTracks)
 	writeBool("media_batch_two_phase", cfg.MediaBatchTwoPhase)
 	writeBool("media_batch_progress", cfg.MediaBatchProgress)
@@ -4921,6 +4964,7 @@ func (c *Config) Validate() error {
 		// unknown or non-STT-capable profile (SPEC §8.2.1, #566) as CONFIG_INVALID.
 		c.validateSTTLanguageProviders,
 		c.validateMediaSTTOnUncoveredLanguage,
+		c.validateMediaSTTPartialTranscriptFloor,
 		c.validateRecognizeProvider,
 		c.validateRecognizeTimeouts,
 		c.validateMediaTranslate,
@@ -5563,6 +5607,40 @@ func (c *Config) validateMediaSTTOnUncoveredLanguage() error {
 		return fmt.Errorf("media.stt.on_uncovered_language must be one of warn, skip: %q", c.MediaSTTOnUncoveredLanguage)
 	}
 	c.MediaSTTOnUncoveredLanguage = action
+	return nil
+}
+
+// onPartialTranscriptWarn / onPartialTranscriptSkip are the two partial-transcript
+// floor actions for media.stt.on_partial_transcript (SPEC §8.6.13, #961). "warn"
+// (default, fail-open) indexes a partially decoded transcript and logs the
+// decoded fraction; "skip" (strict) drops it and records the item as
+// documents.status="skipped" with skip_reason="transcript_partial".
+const (
+	onPartialTranscriptWarn = "warn"
+	onPartialTranscriptSkip = "skip"
+)
+
+// validateMediaSTTPartialTranscriptFloor normalizes the §8.6.13 partial-transcript
+// floor: MediaSTTMinCoverage must be a finite fraction in [0,1], and
+// MediaSTTOnPartialTranscript must be warn or skip (empty defaults to the
+// fail-open "warn"). The two keys validate together because they are one floor:
+// the fraction declares it and the action answers it, exactly as stt_languages
+// and on_uncovered_language pair for §8.2.1.
+func (c *Config) validateMediaSTTPartialTranscriptFloor() error {
+	if c.MediaSTTMinCoverage < 0 || c.MediaSTTMinCoverage > 1 ||
+		math.IsNaN(c.MediaSTTMinCoverage) || math.IsInf(c.MediaSTTMinCoverage, 0) {
+		return fmt.Errorf("media.stt.min_coverage must be within [0,1]: %v", c.MediaSTTMinCoverage)
+	}
+	action := strings.ToLower(strings.TrimSpace(c.MediaSTTOnPartialTranscript))
+	if action == "" {
+		action = Default().MediaSTTOnPartialTranscript
+	}
+	switch action {
+	case onPartialTranscriptWarn, onPartialTranscriptSkip:
+	default:
+		return fmt.Errorf("media.stt.on_partial_transcript must be one of warn, skip: %q", c.MediaSTTOnPartialTranscript)
+	}
+	c.MediaSTTOnPartialTranscript = action
 	return nil
 }
 

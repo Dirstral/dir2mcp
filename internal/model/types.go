@@ -92,6 +92,13 @@ const (
 	// media.stt.on_uncovered_language=skip (SPEC §8.2.1) instead of transcribed to
 	// degraded output. No transcript representation is produced.
 	SkipReasonLanguageUncovered = "language_uncovered"
+	// SkipReasonTranscriptPartial: media whose WINDOWED decode covered less of the
+	// recording than media.stt.min_coverage requires, dropped under
+	// media.stt.on_partial_transcript=skip (SPEC §8.6.13) instead of indexed as a
+	// complete transcript. No transcript representation is produced, so the gap is
+	// declared not-indexed coverage rather than a transcript that silently answers
+	// "no" for the audio no window decoded.
+	SkipReasonTranscriptPartial = "transcript_partial"
 )
 
 type Representation struct {
