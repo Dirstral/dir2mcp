@@ -22,6 +22,7 @@
 package promptrules
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 	"unicode"
@@ -195,9 +196,14 @@ func UnknownReferences(prompt string) []string {
 		}
 		start := i + j
 		ref, complete := referenceAt(prompt[start:])
-		if (!complete || !known(ref)) && !seen[ref] {
-			seen[ref] = true
-			unknown = append(unknown, ref)
+		// `known` reads the reference as written; the caller is shown
+		// `reportable`, which is the same text only when the text is a
+		// plausible rule name. See reportable.
+		if !complete || !known(ref) {
+			if shown := reportable(ref); !seen[shown] {
+				seen[shown] = true
+				unknown = append(unknown, shown)
+			}
 		}
 		// Advance past the prefix, not past the reference: a malformed one has no
 		// reliable end, and a later reference may start inside its preview.
@@ -206,15 +212,13 @@ func UnknownReferences(prompt string) []string {
 }
 
 // referenceAt reads the reference that begins at the start of s and reports
-// whether it is complete. A malformed one is returned as a short literal
-// excerpt, so the operator can find it in their prompt.
+// whether it is complete. A malformed one is returned as a literal excerpt that
+// stops at the first whitespace: a reference contains none, so an unclosed brace
+// at the end of a line yields `${rag.` rather than the paragraph after it.
 //
-// The excerpt stops at the first whitespace. A reference contains none, so what
-// comes back is the broken reference and nothing else: an error can name the
-// fault without copying a line of the operator's prompt into a log, which is
-// where prompt text has no business being. An unclosed brace at the end of a
-// line therefore reports `${rag.` rather than the paragraph that follows it.
-// The rune cap covers the remaining case, a long unbroken run.
+// What comes back here is the reference AS WRITTEN, because `known` has to
+// compare it against the shipped tokens. Deciding what an error may repeat back
+// is a separate question, and `reportable` answers it.
 func referenceAt(s string) (string, bool) {
 	if ref := wellFormedReference.FindString(s); ref != "" {
 		return ref, true
@@ -223,17 +227,42 @@ func referenceAt(s string) (string, bool) {
 	if i := strings.IndexFunc(excerpt, unicode.IsSpace); i >= 0 {
 		excerpt = excerpt[:i]
 	}
-	if r := []rune(excerpt); len(r) > maxExcerptRunes {
-		excerpt = string(r[:maxExcerptRunes]) + "..."
-	}
 	return excerpt, false
 }
 
-// maxExcerptRunes bounds the malformed-reference excerpt an error quotes. Long
-// enough to show the whole of a real reference, short enough that an unbroken
-// run of prompt text cannot turn one error into a page. Runes, not bytes, so a
-// cut never splits a character.
-const maxExcerptRunes = 48
+// ruleNameShape is what a typo of a shipped token can look like: the namespace
+// prefix, a name of identifier characters, and an optional closing brace. The
+// shipped names are `rag.answer_language_rule` and `rag.citation_rule`, so the
+// charset covers every near miss of one, and covers nothing else.
+var ruleNameShape = regexp.MustCompile(`^\$\{rag\.[A-Za-z0-9_.-]*\}?$`)
+
+// maxReportedRunes bounds what a reference may contribute to an error message.
+// Long enough for any near miss of a shipped token (the longest is 27 runes
+// with the prefix), short enough that nothing that reaches it is a typo.
+const maxReportedRunes = 48
+
+// reportable is what an error message may repeat back about `ref`.
+//
+// `wellFormedReference` is deliberately loose about the NAME, because its job is
+// to decide the shape. That means `${rag.` + anything without a brace or a space
+// + `}` is well formed, and the operator's prompt text can sit inside it, at any
+// length. Quoting that verbatim puts prompt text into an error that a
+// CONFIG_INVALID carries to whoever reads it, which for this server includes an
+// MCP client (internal/mcp: a config fault is returned as a tool error). Prompt
+// text has no business there, and the value of quoting it is only ever to help
+// an operator find a typo.
+//
+// So: a reference that LOOKS like a typo of a shipped token is quoted exactly,
+// because that is the case the message exists for and the operator needs to see
+// which one is wrong. Anything else is described, never repeated: its length is
+// what the operator needs to find it, and the length is not sensitive.
+func reportable(ref string) string {
+	if utf8.RuneCountInString(ref) <= maxReportedRunes && ruleNameShape.MatchString(ref) {
+		return ref
+	}
+	return fmt.Sprintf("a %s reference %d characters long that is not a rule name",
+		namespacePrefix, utf8.RuneCountInString(ref))
+}
 
 func known(ref string) bool {
 	for _, r := range rules {

@@ -168,3 +168,88 @@ func TestPromptRules965_TheRegistryCannotBeEditedByACaller(t *testing.T) {
 		t.Errorf("an injected name must stay unknown, got %q", got)
 	}
 }
+
+// A CONFIG_INVALID carrying an unknown reference is read by whoever gets the
+// error, and for this server that includes an MCP client: internal/mcp returns
+// a config fault as a tool error with the message attached. wellFormedReference
+// is loose about the NAME by design, so `${rag.` + anything without a brace or a
+// space + `}` is well formed and can hold the operator's prompt text at any
+// length. These pin what an error may repeat back.
+func TestUnknownReferenceQuotesATypoAndDescribesAnythingElse(t *testing.T) {
+	secret := strings.Repeat("s3cr3t-", 50)
+
+	cases := []struct {
+		name   string
+		prompt string
+		want   string
+	}{
+		{
+			// The case the message exists for. An operator with three
+			// references needs to see WHICH one is wrong, so this is repeated
+			// exactly.
+			name:   "a near miss of a shipped token is quoted exactly",
+			prompt: "Answer well. ${rag.answer_language} Cite your sources.",
+			want:   "${rag.answer_language}",
+		},
+		{
+			name:   "an unclosed reference is quoted up to the first space",
+			prompt: "Answer well. ${rag.citation_rule and then some prose.",
+			want:   "${rag.citation_rule",
+		},
+		{
+			// Not a typo of anything. Described by length, never repeated.
+			name:   "prompt text inside the braces is described, not repeated",
+			prompt: "Answer well. ${rag." + secret + "} Cite your sources.",
+			want:   "a ${rag. reference 357 characters long that is not a rule name",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := promptrules.UnknownReferences(tc.prompt)
+			if len(got) != 1 {
+				t.Fatalf("want exactly one unknown reference, got %q", got)
+			}
+			if got[0] != tc.want {
+				t.Errorf("reported %q, want %q", got[0], tc.want)
+			}
+		})
+	}
+}
+
+func TestAnUnknownReferenceNeverCarriesPromptTextIntoTheError(t *testing.T) {
+	// The shape of a pasted credential: long, no spaces, no braces. It is well
+	// formed by wellFormedReference's rules, so nothing upstream stops it.
+	secret := "sk-proj-" + strings.Repeat("Ab3", 40)
+	prompt := "Follow these rules. ${rag." + secret + "} Always cite."
+
+	got := promptrules.UnknownReferences(prompt)
+	if len(got) != 1 {
+		t.Fatalf("want exactly one unknown reference, got %q", got)
+	}
+	if strings.Contains(got[0], "sk-proj-") {
+		t.Fatalf("the error would repeat the prompt text: %q", got[0])
+	}
+	if !strings.Contains(got[0], "not a rule name") {
+		t.Errorf("the error must still say what is wrong, got %q", got[0])
+	}
+}
+
+func TestALongReferenceIsStillRefused(t *testing.T) {
+	// Redacting the text must not redact the VERDICT. The reference is still
+	// unknown, so the config is still invalid.
+	prompt := "${rag." + strings.Repeat("x", 200) + "}"
+	if got := promptrules.UnknownReferences(prompt); len(got) != 1 {
+		t.Fatalf("a long unknown reference must still be reported, got %q", got)
+	}
+}
+
+func TestTwoDifferentLongReferencesReportOnce(t *testing.T) {
+	// Both describe as "not a rule name" with the same length, so they collapse
+	// to one line rather than repeating an identical sentence.
+	a := "${rag." + strings.Repeat("a", 100) + "}"
+	b := "${rag." + strings.Repeat("b", 100) + "}"
+	if got := promptrules.UnknownReferences(a + " and " + b); len(got) != 1 {
+		t.Errorf("want one deduplicated line, got %q", got)
+	}
+}
