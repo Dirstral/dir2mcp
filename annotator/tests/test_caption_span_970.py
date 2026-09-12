@@ -337,3 +337,25 @@ def test_a_boolean_is_not_a_span(fake_frames, bad):
     captioner = fake_frames([(GRAINY, 0.9)] * 4)
     with pytest.raises(RecognizerUnavailable, match="max_span"):
         SceneCaptionRecognizer(captioner=captioner, fps=0.2, max_span=bad)
+
+
+@pytest.mark.parametrize(
+    "bad, why",
+    [(float("nan"), "nan"), (float("inf"), "inf"), (float("-inf"), "-inf")],
+)
+def test_the_collapser_refuses_a_span_that_is_not_a_number(bad, why):
+    """The recognizer screens these, but the helper is public and the ticker
+    path calls it directly.
+
+    NaN is the dangerous one, and it fails quietly rather than loudly: every
+    comparison against it is false, so the join test is false for EVERY read
+    and each read opens its own run. Measured before the guard: 20 reads of one
+    unchanging passage came back as 20 cues, the exact opposite of the ceiling
+    that was asked for. Infinity is a second spelling of unbounded, and None is
+    the one this contract has.
+    """
+    with pytest.raises(ValueError, match="finite"):
+        collapse_text_sightings(
+            uniform(GRAINY, 0, 100, 5), source="caption", event="scene_other",
+            frame_gap=5.0, max_span=bad,
+        )

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import atexit
 import json
+import math
 import shutil
 import re
 import subprocess
@@ -653,6 +654,18 @@ def collapse_text_sightings(
         # negative extension puts end_s before start_s, which Cue refuses, and
         # with several it silently claims a span the overlay had already left.
         raise ValueError(f"cue_gap must not be negative: {trailing}")
+    if max_span is not None and not math.isfinite(max_span):
+        # NaN fails every comparison, so the join test below is false for EVERY
+        # read and each one opens its own run: the collapse degenerates to one
+        # cue per frame, silently, which is the opposite of what a ceiling was
+        # asked for (measured: 20 reads of one passage came back as 20 cues).
+        # Infinity is a second spelling of unbounded, and None is the one this
+        # contract has. Both are refused so that neither can be reached by
+        # accident through a float() of operator input.
+        raise ValueError(
+            f"max_span must be a finite number of seconds, or None for no "
+            f"ceiling: {max_span}"
+        )
     if max_span is not None and max_span < trailing:
         # Every cue spans at least `trailing`, so a ceiling below it could not
         # be honoured by any cue this returns, not even a single-read one. Say
