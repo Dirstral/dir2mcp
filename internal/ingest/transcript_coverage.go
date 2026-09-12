@@ -68,11 +68,24 @@ func (c *TranscriptCoverage) Fraction() float64 {
 	return float64(c.WindowsDecoded) / float64(c.WindowsAttempted)
 }
 
-// Complete reports whether every scheduled window decoded. It is the positive
-// statement §8.6.13 requires a fully decoded multi-window transcript to make, so
-// that absence of the whole object keeps its §5.2 "no assertion" meaning.
+// Complete reports whether the transcript covers the whole recording. It is the
+// positive statement §8.6.13 requires a fully decoded multi-window transcript to
+// make, so that absence of the whole object keeps its §5.2 "no assertion" meaning.
+//
+// With a known duration it asks the measured question ("does the decoded time
+// reach the end of the recording?") rather than the bookkeeping one ("did every
+// window I scheduled come back?"). The two normally agree, because the scheduled
+// windows tile the recording. When they disagree the measured answer is the one
+// that matters: a caller uses this to decide whether to ANNOUNCE a gap, and a gap
+// that the window counts cannot see is exactly the gap worth announcing.
 func (c *TranscriptCoverage) Complete() bool {
-	return c == nil || c.WindowsDecoded >= c.WindowsAttempted
+	if c == nil {
+		return true
+	}
+	if c.DurationMS > 0 {
+		return c.DecodedMS >= c.DurationMS
+	}
+	return c.WindowsDecoded >= c.WindowsAttempted
 }
 
 // coalesceCoverageRanges sorts ranges by start and merges every overlapping or

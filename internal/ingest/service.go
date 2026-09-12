@@ -5515,7 +5515,7 @@ func (s *Service) transcribeAndPersistTrack(ctx context.Context, doc model.Docum
 
 	transcriptText = strings.TrimSpace(transcriptText)
 	if transcriptText == "" {
-		return false, false, false, nil
+		return false, false, s.judgeEmptyTranscript(doc, tc, coverage), nil
 	}
 
 	// #681: a credential spoken on a call, or read out in a screen share, is audio
@@ -5652,6 +5652,23 @@ func (s *Service) transcribeAndPersistTrack(ctx context.Context, doc model.Docum
 		s.markActiveErrored(code, code+": transcript translation failed")
 	}
 	return true, false, false, nil
+}
+
+// judgeEmptyTranscript applies the §8.6.13 floor to a track that produced NO text
+// and reports whether it was refused (#961).
+//
+// An empty transcript normally means silent media, and the caller treats it as
+// such. After a partial windowed decode it means something else entirely: seven
+// of eight windows never reached the provider, and the one that did was quiet.
+// Recording that as ordinary silence would assert the recording had nothing to
+// say. An empty transcript cannot carry a secret, so the floor is the only
+// judgement left to make here.
+func (s *Service) judgeEmptyTranscript(doc model.Document, tc trackContext, coverage *TranscriptCoverage) bool {
+	if s.refusePartialTranscript(doc, tc, coverage) {
+		return true
+	}
+	s.warnPartialTranscript(doc, tc, coverage)
+	return false
 }
 
 // refusePartialTranscript applies the §8.6.13 floor's SKIP action (#961): it
@@ -6513,11 +6530,20 @@ func (s *Service) readOrComputeTranscriptWithWords(ctx context.Context, doc mode
 	}
 
 	transcriptBytes := []byte(strings.ReplaceAll(strings.ReplaceAll(transcript, "\r\n", "\n"), "\r", "\n"))
+	// SPEC §8.6.13: the coverage sidecar is written BEFORE the text it describes,
+	// and a failure to write it withholds the text cache entirely. The .txt file is
+	// what a later run reads; publishing it without its coverage would republish a
+	// PARTIAL transcript as a complete one, which is the defect this whole change
+	// exists to prevent. Skipping the cache costs one re-decode; getting it wrong
+	// costs an archive that lies. Word timing keeps its best-effort treatment
+	// (missing timing degrades gracefully; missing coverage asserts completeness).
+	if !s.publishCachedCoverage(coveragePath, coverage) {
+		return string(transcriptBytes), words, coverage, nil
+	}
 	if err := statefs.WriteFile(cachePath, transcriptBytes); err != nil {
 		return "", nil, nil, fmt.Errorf("write transcript cache: %w", err)
 	}
 	s.writeCachedWords(wordsPath, words)
-	s.writeCachedCoverage(coveragePath, coverage)
 	shouldEnforceAfterWrite := s.markOCRCacheWrite()
 	if shouldEnforceAfterWrite {
 		// Reuse the same cache-policy limits/hooks as OCR for now so transcript
@@ -6737,22 +6763,37 @@ func readCachedCoverage(path string) *TranscriptCoverage {
 	return &coverage
 }
 
-// writeCachedCoverage persists the windowed-decode coverage alongside the cached
-// transcript so a cache hit reports the same partial coverage the decode did
-// (SPEC §8.6.13). Best-effort, mirroring writeCachedWords: a write failure is
-// logged, never fatal. No sidecar is written for a single-request decode.
-func (s *Service) writeCachedCoverage(path string, coverage *TranscriptCoverage) {
+// publishCachedCoverage makes the cache entry's coverage sidecar match this
+// decode, and reports whether the transcript text may now be published alongside
+// it (SPEC §8.6.13).
+//
+// A windowed decode writes the sidecar. A single-request decode REMOVES any
+// sidecar left by an earlier windowed decode of the same bytes: the cache key is
+// the content plus the STT identity, so a provider whose payload cap changed can
+// decode the same media in one request where it previously used windows, and a
+// stale sidecar would then attach another decode's gaps to a complete transcript.
+//
+// It returns false when the sidecar could not be made correct. The caller then
+// leaves the text cache unwritten, so the next run re-decodes rather than reading
+// a cached transcript that silently claims to be whole.
+func (s *Service) publishCachedCoverage(path string, coverage *TranscriptCoverage) bool {
 	if coverage == nil {
-		return
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			s.getLogger().Printf("clear stale transcript coverage cache (%s): %v; not caching this transcript", path, err)
+			return false
+		}
+		return true
 	}
 	raw, err := json.Marshal(coverage)
 	if err != nil {
-		s.getLogger().Printf("marshal transcript coverage cache: %v", err)
-		return
+		s.getLogger().Printf("marshal transcript coverage cache: %v; not caching this transcript", err)
+		return false
 	}
 	if err := statefs.WriteFile(path, raw); err != nil {
-		s.getLogger().Printf("write transcript coverage cache (%s): %v", path, err)
+		s.getLogger().Printf("write transcript coverage cache (%s): %v; not caching this transcript", path, err)
+		return false
 	}
+	return true
 }
 
 // writeCachedWords persists per-word timing alongside the transcript text. It is

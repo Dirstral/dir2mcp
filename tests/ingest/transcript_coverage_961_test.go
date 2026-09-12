@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -427,5 +428,157 @@ func TestPartialTranscriptFloor_OffByDefault(t *testing.T) {
 	doc := mustGetDoc(t, st, "long.mp3")
 	if doc.Status == "skipped" {
 		t.Fatalf("min_coverage=0 disables the floor; status = %q, skip_reason = %q", doc.Status, doc.SkipReason)
+	}
+}
+
+// transcriptCachePath is the cache entry for content under the bytes-only key the
+// harness writes (no STT identity is set), with the given suffix.
+func transcriptCachePath(h *windowSTTHarness, content []byte, suffix string) string {
+	return filepath.Join(h.stateDir, "cache", "transcribe", ingest.ComputeContentHash(content)+suffix)
+}
+
+// TestWindowedSTT_UnwritableCoverageWithholdsTheTextCache pins the publish order
+// of §8.6.13: the coverage sidecar is written BEFORE the text it describes, and a
+// sidecar that cannot be written withholds the text cache entirely.
+//
+// Mutant killed: writing the .txt first and treating the coverage write as
+// best-effort. The transcript would then be cached WITHOUT its coverage, and the
+// next run would read it back and index a partial transcript as a complete one:
+// the same defect, one write failure away.
+//
+// The failure is injected by putting a directory where the sidecar file belongs,
+// so the write fails deterministically without a fake filesystem.
+func TestWindowedSTT_UnwritableCoverageWithholdsTheTextCache(t *testing.T) {
+	t.Parallel()
+	const totalMS = 30 * 60 * 1000
+	content := make([]byte, 300_000)
+	tr := &windowRecordingTranscriber{capBytes: 200_000}
+	h := newWindowSTTHarness(t, tr, totalMS, content)
+
+	blocked := transcriptCachePath(h, content, ".coverage.json")
+	if err := os.MkdirAll(blocked, 0o755); err != nil {
+		t.Fatalf("stage the blocked coverage path: %v", err)
+	}
+
+	if err := h.svc.GenerateTranscriptRepresentation(context.Background(), mediaDoc("talks/blocked.m4a"), content); err != nil {
+		t.Fatalf("an unwritable coverage sidecar must not fail the document: %v", err)
+	}
+	// The transcript itself is still produced and indexed for THIS run.
+	if len(h.store.reps) != 1 {
+		t.Fatalf("persisted %d representations, want 1", len(h.store.reps))
+	}
+	if _, present := transcriptCoverageFromMeta(t, h.store.reps[0].MetaJSON); !present {
+		t.Errorf("the in-memory coverage must still reach meta_json: %s", h.store.reps[0].MetaJSON)
+	}
+	// But the text cache is withheld, so the next run re-decodes rather than
+	// reading a transcript that would silently claim to be whole.
+	if _, err := os.Stat(transcriptCachePath(h, content, ".txt")); !os.IsNotExist(err) {
+		t.Fatalf("the transcript text was cached without its coverage sidecar (stat err = %v)", err)
+	}
+	requestsAfterFirst := len(tr.requests())
+	if err := h.svc.GenerateTranscriptRepresentation(context.Background(), mediaDoc("talks/blocked.m4a"), content); err != nil {
+		t.Fatalf("second run failed: %v", err)
+	}
+	if len(tr.requests()) == requestsAfterFirst {
+		t.Error("the second run read the withheld cache instead of re-decoding")
+	}
+}
+
+// TestWindowedSTT_SingleRequestClearsAStaleCoverageSidecar pins the other half of
+// the cache rule. The cache key is the content bytes plus the STT identity, so a
+// provider whose payload cap changed can decode the SAME media in one request
+// where it previously used windows. A sidecar left by the windowed decode would
+// then attach another decode's gaps to a complete transcript.
+//
+// Mutant killed: writing the sidecar only when coverage is non-nil, never
+// removing it.
+func TestWindowedSTT_SingleRequestClearsAStaleCoverageSidecar(t *testing.T) {
+	t.Parallel()
+	content := []byte("short-audio-bytes")
+	tr := &windowRecordingTranscriber{capBytes: 50 * 1024 * 1024}
+	h := newWindowSTTHarness(t, tr, 5*60*1000, content)
+
+	stale := transcriptCachePath(h, content, ".coverage.json")
+	if err := os.MkdirAll(filepath.Dir(stale), 0o755); err != nil {
+		t.Fatalf("create cache dir: %v", err)
+	}
+	if err := os.WriteFile(stale, []byte(`{"windows_attempted":8,"windows_decoded":1,"decoded_ms":600000,"duration_ms":4384000}`), 0o644); err != nil {
+		t.Fatalf("stage the stale sidecar: %v", err)
+	}
+
+	cov, present := onlyTranscriptCoverage(t, h, "talks/short.m4a", content)
+	if present {
+		t.Errorf("a single-request decode inherited a stale windowed coverage: %+v", cov)
+	}
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Errorf("the stale coverage sidecar survived a single-request decode (stat err = %v)", err)
+	}
+}
+
+// silentWindowTranscriber decodes the FIRST window to empty text (a quiet stretch
+// the provider heard and had nothing to transcribe) and fails every window after
+// it. The merged transcript is therefore empty, but for a reason that is not
+// silence: three quarters of the recording never reached the provider at all.
+type silentWindowTranscriber struct{ calls int }
+
+func (w *silentWindowTranscriber) Transcribe(ctx context.Context, relPath string, data []byte) (string, error) {
+	res, err := w.TranscribeStructured(ctx, relPath, data)
+	return res.Text, err
+}
+
+func (w *silentWindowTranscriber) TranscribeStructured(_ context.Context, _ string, _ []byte) (model.TranscriptResult, error) {
+	w.calls++
+	if w.calls == 1 {
+		return model.TranscriptResult{}, nil
+	}
+	return model.TranscriptResult{}, &model.ProviderError{
+		Code: "WHISPER_FAILED", Message: "transcription request failed", Retryable: false,
+	}
+}
+
+// TestPartialTranscriptFloor_EmptyTranscriptFromAPartialDecodeIsNotSilence pins the
+// case an empty-transcript early return used to swallow. When the one window that
+// reached the provider was quiet and the rest failed, the merged transcript is
+// empty, and recording that as ordinary silent media asserts the recording had
+// nothing to say, over audio no window ever decoded.
+//
+// Mutant killed: returning "no transcript produced" for an empty transcript before
+// the §8.6.13 floor is consulted, which leaves the document status="ok" with no
+// transcript and no trace of the failed windows.
+func TestPartialTranscriptFloor_EmptyTranscriptFromAPartialDecodeIsNotSilence(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "quiet.mp3"), "fake-audio")
+	st := newRealStore(t)
+
+	svc, _, _ := partialFloorService(t, root, st, 0.9, "skip")
+	svc.SetTranscriber(&silentWindowTranscriber{})
+
+	f := ingest.DiscoveredFile{RelPath: "quiet.mp3", SizeBytes: 10, MTimeUnix: time.Now().Unix()}
+	if err := svc.ProcessDocument(ctx, f, nil, false); err != nil {
+		t.Fatalf("ProcessDocument hard-failed: %v", err)
+	}
+
+	doc := mustGetDoc(t, st, "quiet.mp3")
+	if doc.SkipReason != model.SkipReasonTranscriptPartial {
+		t.Fatalf("quiet.mp3: status = %q, skip_reason = %q, want a %q skip: an empty transcript from a 1-of-4 decode is not silence",
+			doc.Status, doc.SkipReason, model.SkipReasonTranscriptPartial)
+	}
+}
+
+// TestTranscriptCoverage_CompleteUsesTheMeasuredTime pins that Complete asks the
+// measured question when a duration is known. A decode whose windows all came
+// back but whose ranges stop short of the end is still a gap, and it is exactly
+// the gap the window counts cannot see.
+func TestTranscriptCoverage_CompleteUsesTheMeasuredTime(t *testing.T) {
+	t.Parallel()
+	short := &ingest.TranscriptCoverage{WindowsAttempted: 4, WindowsDecoded: 4, DecodedMS: 900_000, DurationMS: 1_800_000}
+	if short.Complete() {
+		t.Error("4/4 windows covering half the recording must not report complete")
+	}
+	whole := &ingest.TranscriptCoverage{WindowsAttempted: 4, WindowsDecoded: 4, DecodedMS: 1_800_000, DurationMS: 1_800_000}
+	if !whole.Complete() {
+		t.Error("4/4 windows covering the whole recording must report complete")
 	}
 }
