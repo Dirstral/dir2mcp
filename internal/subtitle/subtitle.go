@@ -88,6 +88,14 @@ type TranscriptChunk struct {
 // playback order. Only spans of kind "time" contribute timing; chunks whose
 // text is empty after trimming are skipped (an empty cue has nothing to show).
 // A chunk whose span is non-time is dropped, since subtitles require timing.
+//
+// A chunk that the SPEC 8.6.1 chunk window merged carries the boundaries of the
+// transcript segments it was built from (Span.Cues), and BuildCues splits it
+// back into exactly those segments. That is what keeps subtitle export at the
+// transcript's own cue boundaries while retrieval scores forty-second windows
+// (SPEC 8.6.3): the retrieval unit and the on-screen unit are allowed to differ,
+// and only one of them may be forty seconds long. A chunk with no such
+// boundaries is one cue, exactly as before.
 func BuildCues(chunks []TranscriptChunk) []Cue {
 	type timed struct {
 		start   int
@@ -96,7 +104,7 @@ func BuildCues(chunks []TranscriptChunk) []Cue {
 		speaker string
 	}
 	timedChunks := make([]timed, 0, len(chunks))
-	for _, ch := range chunks {
+	for _, ch := range splitMergedChunks(chunks) {
 		if !strings.EqualFold(strings.TrimSpace(ch.Span.Kind), "time") {
 			continue
 		}
@@ -140,6 +148,76 @@ func BuildCues(chunks []TranscriptChunk) []Cue {
 		})
 	}
 	return cues
+}
+
+// splitMergedChunks expands every chunk that the SPEC 8.6.1 chunk window merged
+// back into the transcript segments recorded on its span, in order. Each entry
+// gives one segment's start, duration and rune length, and the merge joined
+// members with exactly one space, so the split takes N runes, then skips one
+// separator rune, and repeats.
+//
+// It is deliberately conservative. A chunk with no recorded boundaries is passed
+// through untouched, and so is one whose recorded lengths do not add up to the
+// chunk's own text (a chunk edited after the merge, or a truncated payload):
+// rendering the whole chunk as one long cue is ugly, while cutting text at the
+// wrong offsets would put half a word on screen and mistime it. The recorded
+// spans are used verbatim for timing, which is what makes the exported cue
+// identical to the one a corpus indexed without the chunk window would produce.
+func splitMergedChunks(chunks []TranscriptChunk) []TranscriptChunk {
+	needs := false
+	for _, ch := range chunks {
+		if len(ch.Span.Cues) > 1 {
+			needs = true
+			break
+		}
+	}
+	if !needs {
+		return chunks
+	}
+	out := make([]TranscriptChunk, 0, len(chunks))
+	for _, ch := range chunks {
+		parts, ok := splitMergedChunk(ch)
+		if !ok {
+			out = append(out, ch)
+			continue
+		}
+		out = append(out, parts...)
+	}
+	return out
+}
+
+// splitMergedChunk splits one merged chunk, reporting false when the recorded
+// boundaries do not describe the chunk's text and the caller must keep it whole.
+func splitMergedChunk(ch TranscriptChunk) ([]TranscriptChunk, bool) {
+	cues := ch.Span.Cues
+	if len(cues) < 2 {
+		return nil, false
+	}
+	runes := []rune(ch.Text)
+	total := 0
+	for _, c := range cues {
+		if c.N <= 0 {
+			return nil, false
+		}
+		total += c.N
+	}
+	// members joined by exactly one space each
+	if total+len(cues)-1 != len(runes) {
+		return nil, false
+	}
+	out := make([]TranscriptChunk, 0, len(cues))
+	at := 0
+	for _, c := range cues {
+		text := string(runes[at : at+c.N])
+		at += c.N + 1 // skip the single joining space
+		span := ch.Span
+		span.StartMS = c.T
+		span.EndMS = c.T + c.D
+		span.Words = nil
+		span.Cues = nil
+		out = append(out, TranscriptChunk{Text: text, Span: span})
+	}
+	return out, true
 }
 
 // Broadcast segmentation norms. BuildCues emits one cue per stored transcript

@@ -1434,11 +1434,18 @@ func normalizeWordToken(s string) string {
 }
 
 // shiftTranscriptSpans subtracts offsetMS from every "time" span's bounds and
-// from every attached word timestamp, clamping at 0 (dir2mcp#258 leading-silence
+// from every timestamp attached to it, clamping at 0 (dir2mcp#258 leading-silence
 // trim). It mutates segs in place and is deterministic for a given input. A
 // non-positive offset is a no-op; non-time spans are left untouched. Bounds stay
 // valid (EndMS > StartMS); a span that would collapse keeps a 1ms width so the
 // downstream EndMS > StartMS invariant holds.
+//
+// "Every timestamp attached to it" means the word array AND the merged-cue
+// record (SPEC 8.6.1). The chunk window runs after the trim today, so a shifted
+// span carries no cues yet, but a helper that claims to move a span's timing and
+// silently leaves one carrier behind is a trap for the next caller: the cues
+// would then place subtitle text where nobody speaks. Shifting all three costs
+// one loop and removes the ordering dependency.
 func shiftTranscriptSpans(segs []chunkSegment, offsetMS int) {
 	if offsetMS <= 0 {
 		return
@@ -1454,6 +1461,9 @@ func shiftTranscriptSpans(segs []chunkSegment, offsetMS int) {
 		}
 		for w := range segs[i].Span.Words {
 			segs[i].Span.Words[w].T = clampShift(segs[i].Span.Words[w].T, offsetMS)
+		}
+		for c := range segs[i].Span.Cues {
+			segs[i].Span.Cues[c].T = clampShift(segs[i].Span.Cues[c].T, offsetMS)
 		}
 	}
 }
@@ -2094,14 +2104,18 @@ func ApplyCueCleaningToSegments(segs []ChunkSegment, opts subtitle.CleanOptions)
 
 // ShiftTranscriptSpans is the exported counterpart of shiftTranscriptSpans,
 // exposed for tests in the tests/ tree. It subtracts offsetMS from every "time"
-// span's bounds and attached word timestamps (clamped at 0) and returns the
-// shifted segments; the input slice is not modified.
+// span's bounds and from every timestamp attached to it, the word array and the
+// merged-cue record alike (clamped at 0), and returns the shifted segments; the
+// input slice is not modified.
 func ShiftTranscriptSpans(segs []ChunkSegment, offsetMS int) []ChunkSegment {
 	raw := make([]chunkSegment, len(segs))
 	for i, seg := range segs {
 		raw[i] = chunkSegment(seg)
 		if seg.Span.Words != nil {
 			raw[i].Span.Words = append([]model.WordSpan(nil), seg.Span.Words...)
+		}
+		if seg.Span.Cues != nil {
+			raw[i].Span.Cues = append([]model.CueSpan(nil), seg.Span.Cues...)
 		}
 	}
 	shiftTranscriptSpans(raw, offsetMS)

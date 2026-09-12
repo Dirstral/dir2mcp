@@ -521,6 +521,14 @@ func (s *Service) ingestSidecarTranscripts(ctx context.Context, doc model.Docume
 	for _, lang := range langs {
 		segments := chunkSubtitleCuesFiltered(groups[lang], s.captionWordFilter())
 		segments = applyCueCleaningToSegments(segments, cleanOpts)
+		// SPEC 8.6.1 transcript chunk window. An authored cue is an editorial
+		// unit of a few seconds, so a sidecar transcript has the same retrieval
+		// problem as an STT one and gets the same merge. The authored cue
+		// boundaries are recorded on each merged span, so the export still
+		// renders the sidecar's own cues (SPEC 8.6.3) and a round-trip through
+		// dir2mcp does not re-cut a human's subtitles. A <v> voice tag already
+		// sits on the span here, so a window never crosses a speaker change.
+		segments = mergeTranscriptChunkWindows(segments, s.transcriptWindow())
 		if len(segments) == 0 {
 			continue
 		}
