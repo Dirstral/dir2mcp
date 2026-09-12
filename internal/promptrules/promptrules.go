@@ -25,6 +25,7 @@ import (
 	"regexp"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 const (
@@ -279,10 +280,12 @@ func StaleCopies(prompt string) []Rule {
 	return stale
 }
 
-// minFragment is the shortest verbatim run that counts as evidence of a copy.
-// Forty characters is far past the length of a phrase two people write the same
-// way by chance, and every fragment below is well over it.
-const minFragment = 40
+// minFragmentRunes is the shortest verbatim run that counts as evidence of a
+// copy. Forty characters is far past the length of a phrase two people write
+// the same way by chance, and every fragment of the shipped rules is well over
+// it. Runes, not bytes, so the threshold means the same thing for a rule
+// written in a script that does not fit one byte per character.
+const minFragmentRunes = 40
 
 // fragments splits a rule into the verbatim runs a stale copy is recognized by.
 //
@@ -296,7 +299,7 @@ func fragments(rule string) []string {
 	var out []string
 	for _, part := range splitAfterAny(collapseSpaces(rule), []string{". ", ", "}) {
 		part = strings.TrimSpace(part)
-		if len(part) >= minFragment {
+		if utf8.RuneCountInString(part) >= minFragmentRunes {
 			out = append(out, part)
 		}
 	}
