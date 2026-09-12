@@ -4289,6 +4289,10 @@ func buildRAGPrompt(question string, hits []model.SearchHit, moments []moment, f
 	contextSection := strings.TrimSpace(full[contextStart:])
 	if carriesAnswerLanguageRule(systemPrompt) {
 		b.WriteString(ragLanguageReminder)
+		// #957: on a corpus written in another script the wording alone loses.
+		// The script of the question is countable rather than guessable, so it is
+		// named here; see answer_script.go for the measurements.
+		b.WriteString(scriptReminder(question))
 	}
 	return b.String(), sortedIndices(used), contextSection
 }
