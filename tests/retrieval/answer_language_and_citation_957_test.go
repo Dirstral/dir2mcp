@@ -116,3 +116,41 @@ func TestAsk957_WizardPresetsCarryTheShippedRulesVerbatim(t *testing.T) {
 		}
 	}
 }
+
+// A word that merely contains the letters "cit" is not citation guidance. A
+// substring test read "Answer questions about city planning." as an operator
+// stating a citation rule and withheld the shipped one from exactly the person
+// the restore exists to protect.
+func TestAsk957_AWordContainingCitIsNotCitationGuidance(t *testing.T) {
+	for _, custom := range []string{
+		"Answer questions about city planning from the documents.",
+		"You advise citizens on their rights. Be brief.",
+		"Summarise the citrus export figures.",
+		"Do not solicit further questions.",
+		"Be explicit and concise.",
+	} {
+		prompt := askAndCapture(t, custom)
+		if !strings.Contains(prompt, strings.TrimSpace(retrieval.CitationRule())) {
+			t.Errorf("prompt %q says nothing about citing, so the shipped rule must be restored", custom)
+		}
+	}
+}
+
+// The whole citation word family suppresses the restore, in any case and any
+// inflection, so an operator's own rule is never doubled.
+func TestAsk957_EveryCitationWordSuppressesTheRestore(t *testing.T) {
+	for _, custom := range []string{
+		"Answer briefly. Cite the act and section.",
+		"Answer briefly. Cites must name the file.",
+		"Answer briefly. Every claim is cited by file name.",
+		"Answer briefly. Citing the page is required.",
+		"Answer briefly. Add a citation for each claim.",
+		"Answer briefly. Citations go at the end.",
+		"Answer briefly. No uncited claims.",
+	} {
+		prompt := askAndCapture(t, custom)
+		if strings.Contains(prompt, strings.TrimSpace(retrieval.CitationRule())) {
+			t.Errorf("prompt %q states a citation rule, so the shipped one must not be appended", custom)
+		}
+	}
+}

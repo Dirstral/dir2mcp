@@ -4156,14 +4156,21 @@ func withCitationRule(prompt string) string {
 	return prompt + ragCitationRule
 }
 
-// mentionsCiting reports whether a prompt says anything about citations. It
-// matches the stem, so cite/cites/citing/citation/citations all count, in any
-// case. A prompt that shows a bracketed tag example without the word also
-// counts: it is stating the format by demonstration.
+// mentionsCiting reports whether a prompt says anything about citations.
+//
+// It matches whole words, not the bare stem. A substring test on "cit" reads
+// "Answer questions about city planning." as citation guidance and silently
+// withholds the rule from exactly the operator this exists to protect; the same
+// goes for citizen, citrus, solicit, explicit and implicit. A prompt that shows
+// a bracketed tag example without using the word also counts: it is stating the
+// format by demonstration.
 func mentionsCiting(prompt string) bool {
-	lower := strings.ToLower(prompt)
-	return strings.Contains(lower, "cit") || ragTagExample.MatchString(prompt)
+	return ragCitationWord.MatchString(prompt) || ragTagExample.MatchString(prompt)
 }
+
+// ragCitationWord matches the citation word family, case-insensitively and on
+// word boundaries: cite, cites, cited, citing, citation, citations, uncited.
+var ragCitationWord = regexp.MustCompile(`(?i)\b(?:un)?cit(?:e|es|ed|ing|ation|ations)\b`)
 
 // ragTagExample matches a bracketed citation tag written out in a prompt, e.g.
 // [interview.mp4@t=02:13-02:41] or [notes.md]. It is intentionally loose: its
