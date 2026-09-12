@@ -140,6 +140,13 @@ CLAIM_PROBES: dict[str, str] = {
 #: should lower it; the recall column is what they buy.
 CLAIM_THRESHOLD = 0.99
 
+#: Prepended to every caption cue so a reader can tell an auto description from
+#: a recorded fact.
+#:
+#: The default names a sports broadcast, and it is prepended whatever the corpus
+#: holds: on the Apollo 11 moonwalk every cue read "not the game feed"
+#: (dir2mcp #966). Pass `prefix=` to describe another domain. It is display
+#: wording only, so unlike CAPTION_PROMPT it costs no calibration to change.
 CAPTION_PREFIX = "Scene (auto description, not the game feed): "
 
 #: Similarity above which two consecutive captions are treated as one passage.
@@ -234,6 +241,7 @@ class SceneCaptionRecognizer:
         *,
         prober: ProbeFn | None = None,
         claim_threshold: float = CLAIM_THRESHOLD,
+        prefix: str = CAPTION_PREFIX,
     ):
         if captioner is None:
             raise RecognizerUnavailable(
@@ -250,6 +258,9 @@ class SceneCaptionRecognizer:
         # the batch amortizes the weight reads.
         self.batch_size = max(1, int(batch_size))
         self.min_confidence = min_confidence
+        # Display wording, so it is stored verbatim and never validated: an
+        # operator who wants no marker at all passes "".
+        self._prefix = prefix
         # #923. None leaves the claim events ungated, which is what shipped
         # before and measured 0.35 precision on the reaction claim. Present
         # activates the gate; nothing else switches it on, so the capability
@@ -458,7 +469,7 @@ class SceneCaptionRecognizer:
                     confidence=cue.confidence,
                     # Prefixed only now, after collapsing has compared the raw
                     # captions, so the marker cannot influence grouping.
-                    text=CAPTION_PREFIX + cue.text,
+                    text=self._prefix + cue.text,
                 )
             )
         return cues

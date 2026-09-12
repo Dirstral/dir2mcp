@@ -53,6 +53,14 @@ MAX_PIXELS = 1280 * 720
 #: The caption prompt, verbatim from the calibration harness. The 0.94 / 0.63
 #: precision split the gate exists to fix was measured on these words, and the
 #: recognizer's scene classifier reads the vocabulary this prompt elicits.
+#:
+#: It is calibrated for a SPORTS BROADCAST and it describes whatever it is shown
+#: in those terms. Given the Apollo 11 moonwalk it answered "captured from a
+#: stationary camera on the field", because that is the question it was asked
+#: (dir2mcp #966). An operator indexing another domain should pass their own
+#: text through `load_backend(caption_prompt=...)`, and must then treat
+#: caption.CLAIM_THRESHOLD and the scene classifier as uncalibrated: both were
+#: measured against the vocabulary these exact words elicit.
 CAPTION_PROMPT = (
     "Describe what this broadcast frame shows in one sentence. "
     "Say whether the camera is on the field, the crowd, the dugout, a "
@@ -164,6 +172,7 @@ def load_backend(
     model_name: str = DEFAULT_MODEL,
     device: str = "cuda:0",
     max_pixels: int = MAX_PIXELS,
+    caption_prompt: str = CAPTION_PROMPT,
 ) -> tuple[CaptionFn, ProbeFn]:
     """Load the model once and return (captioner, prober) sharing it.
 
@@ -171,6 +180,10 @@ def load_backend(
     eager and happens here rather than on first call, so a missing extra or an
     unavailable device fails at construction where the operator can see it,
     exactly as faces.default_embedder does.
+
+    caption_prompt defaults to the calibrated sports wording. Supplying another
+    describes another domain in its own terms; see CAPTION_PROMPT for what that
+    costs.
     """
     try:
         import torch  # type: ignore
@@ -245,7 +258,7 @@ def load_backend(
     def captioner(paths: list[Path]) -> list[tuple[str, float]]:
         if not paths:
             return []
-        inputs = _inputs(paths, CAPTION_PROMPT)
+        inputs = _inputs(paths, caption_prompt)
         out = model.generate(
             **inputs, max_new_tokens=CAPTION_MAX_NEW_TOKENS, do_sample=False,
         )

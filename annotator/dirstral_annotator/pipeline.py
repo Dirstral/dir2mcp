@@ -193,6 +193,9 @@ class Pipeline:
     #: reaction claim; the recognizer's docstring says so.
     probe_fn: object | None = None
     caption_fps: float = 1.0
+    #: Marker prepended to each caption cue. None keeps the recognizer's own
+    #: default, which names a game feed; see recognizers/caption.CAPTION_PREFIX.
+    caption_prefix: str | None = None
     caption_windows: tuple[tuple[float, float], ...] | None = None
     #: Tier B (#860): a low rate across the WHOLE file, alongside the aimed
     #: windows rather than instead of them. Aiming alone is exclusive, and #860
@@ -340,14 +343,20 @@ class Pipeline:
                 # probe_fn joins the key too: a recognizer built ungated must
                 # not be reused once a prober is supplied, or the gate would
                 # silently stay off for the lifetime of the server.
+                # caption_prefix joins the key for the same reason probe_fn
+                # does: a recognizer built with one marker must not be reused
+                # once another is configured.
                 (self.caption_fn, self.probe_fn, self.caption_fps,
-                 self.caption_windows, self.caption_floor_fps),
+                 self.caption_windows, self.caption_floor_fps,
+                 self.caption_prefix),
                 lambda: SceneCaptionRecognizer(
                     captioner=self.caption_fn,
                     fps=self.caption_fps,
                     windows=self.caption_windows,
                     floor_fps=self.caption_floor_fps,
                     prober=self.probe_fn,
+                    **({} if self.caption_prefix is None
+                       else {"prefix": self.caption_prefix}),
                 ),
             )
         if self.news:

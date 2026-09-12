@@ -69,6 +69,15 @@ def build_parser() -> argparse.ArgumentParser:
         c.add_argument("--caption-fps", type=float, default=None, metavar="F",
                        help="frame rate for captioning (default: --fps); captions cost "
                             "~10x a face embedding, so a lower rate is the cost lever")
+        c.add_argument("--caption-prompt", default=None, metavar="TEXT",
+                       help="what to ask the vision model about each frame. The default "
+                            "is calibrated for a sports broadcast and describes any "
+                            "archive in those terms; supply your own domain's wording "
+                            "and treat the claim gate as uncalibrated")
+        c.add_argument("--caption-prefix", default=None, metavar="TEXT",
+                       help="marker prepended to each caption cue so a reader can tell "
+                            "an auto description from a recorded fact (default names a "
+                            "game feed); pass an empty string for no marker")
         c.add_argument("--news", action="store_true",
                        help="enable news overlay text (headline banner + ticker); needs no roster")
         c.add_argument("--news-min-chars", type=int, metavar="N",
@@ -141,6 +150,8 @@ def _caption_backend(args):
     kwargs = {"device": args.caption_device}
     if args.caption_model:
         kwargs["model_name"] = args.caption_model
+    if getattr(args, "caption_prompt", None):
+        kwargs["caption_prompt"] = args.caption_prompt
     try:
         return qwen_vl.load_backend(**kwargs)
     except RecognizerUnavailable as exc:
@@ -160,6 +171,10 @@ def _pipeline(args, roster: Roster, games) -> Pipeline:
         # the recognizer, which rejects it with a reason, rather than be read
         # as "unset" and silently sample at --fps.
         caption_fps=(args.caption_fps if getattr(args, "caption_fps", None) is not None else args.fps),
+        # `is not None` again: --caption-prefix "" is a request for no marker,
+        # not an absent flag.
+        caption_prefix=(args.caption_prefix
+                        if getattr(args, "caption_prefix", None) is not None else None),
         scorebug=args.scorebug,
         scorebug_pitch_counts=args.scorebug_pitch_counts,
         jersey=args.jersey,

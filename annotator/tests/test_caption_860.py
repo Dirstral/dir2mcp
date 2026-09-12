@@ -451,3 +451,52 @@ def test_923_the_domain_check_does_not_reject_the_endpoints(fake_frames):
     # A threshold of exactly 0 or 1 is an operator's call to make.
     SceneCaptionRecognizer(captioner=captioner, fps=1.0, claim_threshold=0.0)
     SceneCaptionRecognizer(captioner=captioner, fps=1.0, claim_threshold=1.0)
+
+
+# --- the wording is an input, not a constant (issue #966) -------------------
+#
+# The shipped prompt and prefix are calibrated for a sports broadcast, and they
+# described the Apollo 11 moonwalk as "captured from a stationary camera on the
+# field", under a cue reading "not the game feed". A content owner indexing any
+# other archive needs their own words without touching the calibrated default.
+
+
+def test_the_marker_can_name_another_domain(fake_frames):
+    captioner, _ = fake_frames([("astronauts planting a flag on the lunar surface", 0.9)])
+    cues = SceneCaptionRecognizer(
+        captioner=captioner, fps=1.0,
+        prefix="Scene (auto description, not a recorded fact): ",
+    ).recognize(MEDIA)
+    assert cues[0].text.startswith("Scene (auto description, not a recorded fact): ")
+    assert "game feed" not in cues[0].text
+
+
+def test_the_marker_can_be_dropped_entirely(fake_frames):
+    """An empty prefix is a request, not an absent argument: an operator whose
+    corpus is all generated description does not need it marked on every cue."""
+    captioner, _ = fake_frames([("a lunar module on the surface", 0.9)])
+    cues = SceneCaptionRecognizer(captioner=captioner, fps=1.0, prefix="").recognize(MEDIA)
+    assert cues[0].text == "a lunar module on the surface"
+
+
+def test_the_default_marker_is_unchanged(fake_frames):
+    """The default is what the pilot calibrated against. Changing it here would
+    silently move every cue in an existing corpus on its next re-index."""
+    captioner, _ = fake_frames([("the crowd in the stands is cheering", 0.9)])
+    cues = SceneCaptionRecognizer(captioner=captioner, fps=1.0).recognize(MEDIA)
+    assert cues[0].text.startswith(CAPTION_PREFIX)
+
+
+def test_the_caption_prompt_is_an_argument_with_the_calibrated_default():
+    """load_backend must accept another domain's question. Checked on the
+    signature rather than by loading: the weights are a multi-gigabyte opt-in
+    and this suite runs without a GPU."""
+    import inspect
+
+    from dirstral_annotator.recognizers import qwen_vl
+
+    sig = inspect.signature(qwen_vl.load_backend)
+    assert "caption_prompt" in sig.parameters
+    assert sig.parameters["caption_prompt"].default is qwen_vl.CAPTION_PROMPT
+    # the shipped default still asks the calibrated question
+    assert "on the field" in qwen_vl.CAPTION_PROMPT
