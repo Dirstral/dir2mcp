@@ -582,3 +582,60 @@ func TestTranscriptCoverage_CompleteUsesTheMeasuredTime(t *testing.T) {
 		t.Error("4/4 windows covering the whole recording must report complete")
 	}
 }
+
+// liveTranscriptReps counts the non-tombstoned transcript representations the
+// store still holds for relPath: the ones a query can still reach.
+func liveTranscriptReps(t *testing.T, st *store.SQLiteStore, relPath string) int {
+	t.Helper()
+	reps, err := st.ActiveRepresentations(context.Background(), relPath)
+	if err != nil {
+		t.Fatalf("ActiveRepresentations(%s): %v", relPath, err)
+	}
+	n := 0
+	for _, rep := range reps {
+		if rep.RepType == ingest.RepTypeTranscript || strings.HasPrefix(rep.RepType, ingest.RepTypeTranscript+"-") {
+			n++
+		}
+	}
+	return n
+}
+
+// TestPartialTranscriptFloor_SkipRetiresWhatAnEarlierRunIndexed pins the lifecycle
+// rule of §8.6.13. The floor is evaluated on EVERY run, and the likely adoption
+// path is "index the corpus with it off, discover the gap, turn it on".
+//
+// Mutant killed: recording status=skipped without retiring the representations an
+// earlier run persisted from the same partial decode. The document would then
+// report itself not indexed AND keep answering from the audio it never heard,
+// which is worse than either half alone.
+func TestPartialTranscriptFloor_SkipRetiresWhatAnEarlierRunIndexed(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "long.mp3"), "fake-audio")
+	st := newRealStore(t)
+	f := ingest.DiscoveredFile{RelPath: "long.mp3", SizeBytes: 10, MTimeUnix: time.Now().Unix()}
+
+	// Run 1: the floor is off, so the partial transcript is indexed and live.
+	lenient, _, _ := partialFloorService(t, root, st, 0, "warn")
+	if err := lenient.ProcessDocument(ctx, f, nil, false); err != nil {
+		t.Fatalf("first (lenient) run: %v", err)
+	}
+	if n := liveTranscriptReps(t, st, "long.mp3"); n != 1 {
+		t.Fatalf("first run left %d live transcript representation(s), want 1", n)
+	}
+
+	// Run 2: the operator turns the floor on and re-indexes.
+	strict, _, _ := partialFloorService(t, root, st, 0.9, "skip")
+	if err := strict.ProcessDocument(ctx, f, nil, true); err != nil {
+		t.Fatalf("second (strict) run: %v", err)
+	}
+
+	doc := mustGetDoc(t, st, "long.mp3")
+	if doc.SkipReason != model.SkipReasonTranscriptPartial {
+		t.Fatalf("long.mp3: status = %q, skip_reason = %q, want %q", doc.Status, doc.SkipReason, model.SkipReasonTranscriptPartial)
+	}
+	if n := liveTranscriptReps(t, st, "long.mp3"); n != 0 {
+		t.Fatalf("the refused document reports itself skipped but still holds %d live transcript representation(s); it would keep answering from audio it never heard", n)
+	}
+}
