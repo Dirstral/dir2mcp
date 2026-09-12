@@ -159,6 +159,16 @@ type transcriptMeta struct {
 	Track         int    `json:"track,omitempty"`
 	TrackLanguage string `json:"track_language,omitempty"`
 	TrackLabel    string `json:"track_label,omitempty"`
+
+	// Coverage records WHICH PART of the recording a WINDOWED decode actually
+	// produced text for (SPEC §8.6.13, #961). A long recording is decoded in
+	// several windows and merged; windows fail independently, so the merged
+	// transcript can cover a fraction of the audio while looking exactly like a
+	// complete one. It is recorded only for a decode of two or more windows, so a
+	// single-request decode and a sidecar transcript leave it absent (omitempty)
+	// and their meta_json is byte-for-byte unchanged. Per §5.2 absence MUST be read
+	// as "no assertion", never as "complete".
+	Coverage *TranscriptCoverage `json:"coverage,omitempty"`
 }
 
 // Speaker is one distinct speaker recorded in a diarized transcript's meta_json

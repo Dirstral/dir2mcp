@@ -215,6 +215,8 @@ var snapshotAllowedKeys = map[string]bool{
 	"media_stt_request_timeout_sec":           true,
 	"media_stt_language_strict":               true,
 	"media_stt_on_uncovered_language":         true,
+	"media_stt_min_coverage":                  true,
+	"media_stt_on_partial_transcript":         true,
 	"media_stt_tracks":                        true,
 	"media_batch_two_phase":                   true,
 	"media_batch_progress":                    true,

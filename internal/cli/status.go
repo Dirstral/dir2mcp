@@ -260,6 +260,8 @@ func skipReasonHint(reason string) string {
 		return "matched a secret pattern and was withheld on purpose — review ingest.secret_patterns if this was unintended"
 	case model.SkipReasonLanguageUncovered:
 		return "source language is outside the STT model's declared stt_languages coverage — route it via media.stt.language_providers to a model that covers it, or set media.stt.on_uncovered_language=warn to transcribe anyway"
+	case model.SkipReasonTranscriptPartial:
+		return "the windowed decode covered less of the recording than media.stt.min_coverage requires: check the STT endpoint for the window failures, then re-index, or set media.stt.on_partial_transcript=warn to index the partial transcript anyway"
 	default:
 		return ""
 	}
