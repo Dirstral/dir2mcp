@@ -3459,27 +3459,41 @@ func wordsFromExtraJSON(extraJSON string) []model.WordSpan {
 // "time" span from its stored extra_json (SPEC 8.6.1 chunk window). A NULL,
 // empty or malformed payload yields nil, so a chunk stored before the chunk
 // window existed degrades to exactly one cue covering the whole chunk, which is
-// the behaviour it had. An entry with a non-positive rune length is dropped: it
-// can cut nothing, and keeping it would shift every later cut point.
+// the behaviour it had. A record with any unusable entry yields nil as a whole:
+// the entries are read in order and summed, so dropping one would move every cut
+// point after it, and exporting the chunk whole is the documented fallback.
 func cuesFromExtraJSON(extraJSON string) []model.CueSpan {
 	if strings.TrimSpace(extraJSON) == "" {
 		return nil
 	}
+	// Pointers, not values: a missing JSON number decodes as 0, and 0 is a legal
+	// start for the first cue of a recording. Without presence checks an entry
+	// like {"n":5} would read as a cue at 0 ms lasting 0 ms, pass the rune-length
+	// test, and place five runes of subtitle text at the start of the file. A
+	// record that does not state all three fields is not a record.
 	var payload struct {
-		Cues []model.CueSpan `json:"cues"`
+		Cues []struct {
+			T *int `json:"t"`
+			D *int `json:"d"`
+			N *int `json:"n"`
+		} `json:"cues"`
 	}
 	if err := json.Unmarshal([]byte(extraJSON), &payload); err != nil || len(payload.Cues) == 0 {
 		return nil
 	}
 	out := make([]model.CueSpan, 0, len(payload.Cues))
 	for _, c := range payload.Cues {
-		if c.N <= 0 {
-			continue
+		// One unusable entry invalidates the whole record rather than being
+		// skipped. The entries are read in order and their lengths are summed, so
+		// dropping one silently shifts every cut point after it.
+		if c.T == nil || c.D == nil || c.N == nil || *c.N <= 0 || *c.T < 0 {
+			return nil
 		}
-		if c.D < 0 {
-			c.D = 0
+		d := *c.D
+		if d < 0 {
+			d = 0
 		}
-		out = append(out, c)
+		out = append(out, model.CueSpan{T: *c.T, D: d, N: *c.N})
 	}
 	if len(out) == 0 {
 		return nil

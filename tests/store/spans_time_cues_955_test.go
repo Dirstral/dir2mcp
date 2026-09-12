@@ -66,14 +66,24 @@ func TestTimeSpanWithoutCuesHasNoExtraJSON(t *testing.T) {
 	}
 }
 
-// TestTimeSpanCuesDropUnusableEntries pins the read-side guard: an entry that
-// can cut nothing is dropped rather than kept, because keeping it would shift
-// every later cut point and put half a word on screen.
-func TestTimeSpanCuesDropUnusableEntries(t *testing.T) {
+// TestTimeSpanCuesRejectAnUnusableEntry pins the read-side guard: an entry that
+// can cut nothing invalidates the whole record. Dropping it instead would shift
+// every later cut point and put half a word on screen, which is worse than
+// exporting the chunk whole.
+func TestTimeSpanCuesRejectAnUnusableEntry(t *testing.T) {
 	extra := `{"cues":[{"t":0,"d":1000,"n":5},{"t":1000,"d":1000,"n":0},{"t":2000,"d":-5,"n":4}]}`
-	out := store.SpanFromRow("time", 0, 3000, extra)
+	if out := store.SpanFromRow("time", 0, 3000, extra); len(out.Cues) != 0 {
+		t.Fatalf("cues = %+v, want the whole record rejected", out.Cues)
+	}
+}
+
+// A negative duration on an otherwise complete entry is clamped, not rejected:
+// the entry still says where the cue starts and how much text it covers, and a
+// zero-width cue is legible where a missing one is not.
+func TestTimeSpanCuesClampANegativeDuration(t *testing.T) {
+	out := store.SpanFromRow("time", 0, 3000, `{"cues":[{"t":0,"d":1000,"n":5},{"t":2000,"d":-5,"n":4}]}`)
 	if len(out.Cues) != 2 {
-		t.Fatalf("cues = %+v, want the 2 usable entries", out.Cues)
+		t.Fatalf("cues = %+v, want 2", out.Cues)
 	}
 	if out.Cues[1].D != 0 {
 		t.Errorf("negative duration = %d, want clamped to 0", out.Cues[1].D)
@@ -85,5 +95,45 @@ func TestTimeSpanCuesDropUnusableEntries(t *testing.T) {
 func TestTimeSpanCuesTolerateMalformedPayload(t *testing.T) {
 	if out := store.SpanFromRow("time", 0, 3000, `{"cues":`); len(out.Cues) != 0 {
 		t.Errorf("malformed payload produced %d cues", len(out.Cues))
+	}
+}
+
+// A cue that omits a timing field is not a cue. Numbers missing from JSON decode
+// as zero, and zero is a legal start for the first cue of a recording, so the
+// record must be rejected on PRESENCE rather than on value. Without this,
+// {"n":5} reads as a cue at 0 ms lasting 0 ms and puts five runes of subtitle
+// text at the start of the file.
+func TestTimeSpanCuesRejectRecordMissingTiming(t *testing.T) {
+	for name, extra := range map[string]string{
+		"no t":     `{"cues":[{"d":1000,"n":5},{"t":1000,"d":1000,"n":4}]}`,
+		"no d":     `{"cues":[{"t":0,"n":5},{"t":1000,"d":1000,"n":4}]}`,
+		"no n":     `{"cues":[{"t":0,"d":1000},{"t":1000,"d":1000,"n":4}]}`,
+		"empty":    `{"cues":[{}]}`,
+		"negative": `{"cues":[{"t":-5,"d":1000,"n":5}]}`,
+	} {
+		if out := store.SpanFromRow("time", 0, 3000, extra); len(out.Cues) != 0 {
+			t.Errorf("%s: expected the whole record rejected, got %+v", name, out.Cues)
+		}
+	}
+}
+
+// A zero start IS valid: the first cue of a recording begins at 0 ms. The
+// presence check must not turn into a value check.
+func TestTimeSpanCuesAcceptAZeroStart(t *testing.T) {
+	out := store.SpanFromRow("time", 0, 3000, `{"cues":[{"t":0,"d":1000,"n":5},{"t":1000,"d":900,"n":4}]}`)
+	if len(out.Cues) != 2 {
+		t.Fatalf("cues = %+v, want 2", out.Cues)
+	}
+	if out.Cues[0].T != 0 || out.Cues[0].D != 1000 || out.Cues[0].N != 5 {
+		t.Errorf("first cue = %+v, want {0 1000 5}", out.Cues[0])
+	}
+}
+
+// One unusable entry invalidates the record rather than being skipped: the
+// lengths are read in order and summed, so dropping one shifts every later cut.
+func TestTimeSpanCuesRejectRecordWithOneBadEntry(t *testing.T) {
+	out := store.SpanFromRow("time", 0, 3000, `{"cues":[{"t":0,"d":1000,"n":5},{"t":1000,"d":1000,"n":0}]}`)
+	if len(out.Cues) != 0 {
+		t.Errorf("cues = %+v, want the whole record rejected", out.Cues)
 	}
 }

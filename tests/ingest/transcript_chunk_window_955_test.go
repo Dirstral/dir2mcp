@@ -261,3 +261,51 @@ func TestTranscriptChunkWindowDefaults(t *testing.T) {
 		t.Error("the chunk window must ship enabled: one chunk per provider segment is the defect #955 reports")
 	}
 }
+
+// The leading-silence trim (#258) moves a span's bounds and its word timings. It
+// must move the merged-cue record too. The chunk window runs after the trim
+// today, so this is a latent trap rather than a live bug: a helper that claims
+// to move a span's timing and leaves one carrier behind would place subtitle
+// text where nobody speaks as soon as the order changed.
+func TestChunkWindowCuesFollowTheLeadingSilenceTrim(t *testing.T) {
+	merged := ingest.MergeTranscriptChunkWindows(speech(), 40, 6)
+	before := make([][]model.CueSpan, len(merged))
+	recorded := 0
+	for i, c := range merged {
+		before[i] = append([]model.CueSpan(nil), c.Span.Cues...)
+		recorded += len(c.Span.Cues)
+	}
+	if recorded < 2 {
+		t.Fatal("no merged cue record to trim")
+	}
+
+	const offset = 5000
+	shifted := ingest.ShiftTranscriptSpans(merged, offset)
+	if len(shifted) != len(merged) {
+		t.Fatalf("shift returned %d chunks, want %d", len(shifted), len(merged))
+	}
+	checked := 0
+	for i, c := range shifted {
+		if len(c.Span.Cues) != len(before[i]) {
+			t.Fatalf("chunk %d: cue count changed from %d to %d", i, len(before[i]), len(c.Span.Cues))
+		}
+		for j, cue := range c.Span.Cues {
+			want := before[i][j].T - offset
+			if want < 0 {
+				want = 0
+			}
+			if cue.T != want {
+				t.Errorf("chunk %d cue %d: start %d, want %d (was %d, offset %d)",
+					i, j, cue.T, want, before[i][j].T, offset)
+			}
+			if cue.D != before[i][j].D || cue.N != before[i][j].N {
+				t.Errorf("chunk %d cue %d: the trim changed duration or length: %+v was %+v",
+					i, j, cue, before[i][j])
+			}
+			checked++
+		}
+	}
+	if checked < 2 {
+		t.Fatalf("only %d cues checked, the case is not covered", checked)
+	}
+}
