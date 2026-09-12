@@ -258,10 +258,17 @@ def _report_collapse(
     """
     if not cues:
         return
-    frames = [
-        bisect.bisect_right(times, cue.end_s) - bisect.bisect_left(times, cue.start_s)
-        for cue in cues
-    ]
+    # Partition on the cue STARTS, not on [start_s, end_s]. A cue ends one
+    # frame gap past its last read, so with the ceiling in play two cues abut
+    # and a frame at the seam counts for both: every cue would over-report by
+    # one. Each read belongs to exactly one run, and the last cue that starts
+    # at or before it is that run.
+    starts = [cue.start_s for cue in cues]
+    frames = [0] * len(cues)
+    for t in times:
+        i = bisect.bisect_right(starts, t) - 1
+        if i >= 0:  # a read the collapser dropped, before any cue opened
+            frames[i] += 1
     widest = max(range(len(cues)), key=lambda i: cues[i].end_s - cues[i].start_s)
     log.info(
         "caption: %d frames collapsed to %d cues; the widest covers %.0fs from "
@@ -364,7 +371,10 @@ class SceneCaptionRecognizer:
         # Zero or negative is not "no ceiling", it is a ceiling no cue can meet,
         # and collapse_text_sightings would refuse it deep inside a run that has
         # already cost GPU hours. None is how the caller asks for no ceiling.
-        if max_span is not None and (not math.isfinite(max_span) or max_span <= 0):
+        if max_span is not None and (
+                isinstance(max_span, bool)
+                or not isinstance(max_span, (int, float))
+                or not math.isfinite(max_span) or max_span <= 0):
             raise RecognizerUnavailable(
                 "caption max_span must be a positive number of seconds, or None "
                 f"for no ceiling, got {max_span!r}"
@@ -526,10 +536,17 @@ class SceneCaptionRecognizer:
             # scene_other rather than dropped, because the passage still
             # describes a real moment and the timestamp is still worth keeping.
             if self.prober is not None and event in CLAIM_PROBES:
+                # Half-open at the end. A cue runs one frame gap past its
+                # last read, so an inclusive end also collects the FIRST frame
+                # of the next cue, and this gate publishes a claim when ANY
+                # frame in the run supports it: a neighbour's frame could carry
+                # a claim on footage this cue never showed. Two cues abut
+                # whenever a run was cut at the max_span ceiling, so that seam
+                # is now the ordinary case rather than a rare one.
                 run = [
                     frame_at[t]
                     for t, _, _ in sightings
-                    if cue.start_s <= t <= cue.end_s and t in frame_at
+                    if cue.start_s <= t < cue.end_s and t in frame_at
                 ]
                 if run and not self._claim_holds(event, run):
                     event = SCENE_OTHER

@@ -287,3 +287,53 @@ def test_the_pipeline_rebuilds_the_recognizer_when_the_ceiling_changes():
     assert first.recognizer.max_span == 30.0
     assert second.recognizer.max_span == 60.0
     assert first is not second
+
+
+# --- three things the ceiling changes elsewhere ----------------------------
+
+
+def test_the_report_counts_each_cue_s_own_frames(fake_frames, caplog):
+    """A frame at a seam belongs to ONE cue.
+
+    240 frames at 0.2 fps under the 120 s ceiling is 24 reads per cue
+    (t = 0 s to 115 s, then the next run opens at 120 s). Counting the span
+    inclusively at both ends would claim 25, because the seam frame at 120 s
+    is the next cue's first read.
+    """
+    captioner = fake_frames([(GRAINY, 0.9)] * 240)
+    with caplog.at_level(logging.INFO, logger=caption_mod.__name__):
+        SceneCaptionRecognizer(captioner=captioner, fps=0.2).recognize(MEDIA)
+    assert "from 24 frames" in "\n".join(r.getMessage() for r in caplog.records)
+
+
+def test_the_claim_gate_never_reads_a_neighbour_s_frame(fake_frames):
+    """The gate publishes a claim when ANY frame in the run supports it, so a
+    frame from the next cue is a frame that could carry a claim about footage
+    this cue never showed. Cues abut at every ceiling cut, so the seam is the
+    ordinary case now rather than a rare one."""
+    crowd = "a crowd of spectators fills the stands behind the plate"
+    captioner = fake_frames([(crowd, 0.9)] * 60, fps=0.2)
+    probed = []
+
+    def prober(paths, _question):
+        probed.extend(paths)
+        return [0.0] * len(paths)
+
+    cues = SceneCaptionRecognizer(
+        captioner=captioner, fps=0.2, max_span=60.0, prober=prober,
+    ).recognize(MEDIA)
+
+    assert len(cues) > 1
+    # 60 s ceiling at 0.2 fps is 12 reads per cue, and 60 frames is 5 cues.
+    # Every frame is probed exactly once; a seam read twice means a cue was
+    # judged partly on its neighbour.
+    assert len(probed) == len(set(probed)) == 60
+
+
+@pytest.mark.parametrize("bad", [True, False])
+def test_a_boolean_is_not_a_span(fake_frames, bad):
+    """`max_span=True` is 1.0 s, a ceiling no cue could meet, and it would fail
+    deep inside a run that has already cost GPU hours."""
+    captioner = fake_frames([(GRAINY, 0.9)] * 4)
+    with pytest.raises(RecognizerUnavailable, match="max_span"):
+        SceneCaptionRecognizer(captioner=captioner, fps=0.2, max_span=bad)
