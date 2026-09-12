@@ -347,6 +347,37 @@ type PayloadLimitedTranscriber interface {
 	MaxTranscribePayloadBytes() int
 }
 
+// AudioDurationTranscriber is an OPTIONAL capability a Transcriber MAY implement
+// to size ONE request to the audio that request carries (issue #962). The ingest
+// pipeline knows the duration of every slice it sends; the transcriber knows what
+// its own request timeout costs. This interface joins the two.
+//
+// ForAudioDuration returns the transcriber to use for a request carrying audioMS
+// of audio. Implementations MUST NOT mutate the receiver (the same client serves
+// concurrent documents): they return either the receiver itself or a copy.
+// Returning the receiver is always valid, and is what an implementation does when
+// the operator configured an explicit timeout, because an explicit setting wins
+// over a derived one.
+type AudioDurationTranscriber interface {
+	Transcriber
+	ForAudioDuration(audioMS int) Transcriber
+}
+
+// TranscriberForAudioDuration returns the transcriber to use for one request
+// carrying audioMS of audio. A transcriber without the optional capability, or an
+// unknown duration (audioMS <= 0), is returned unchanged, so every caller can size
+// its request without first testing for the capability.
+func TranscriberForAudioDuration(stt Transcriber, audioMS int) Transcriber {
+	sized, ok := stt.(AudioDurationTranscriber)
+	if !ok || audioMS <= 0 {
+		return stt
+	}
+	if out := sized.ForAudioDuration(audioMS); out != nil {
+		return out
+	}
+	return stt
+}
+
 // RecognizedAnnotation is one time-ranged statement a recognition backend
 // makes about a media file's content (design 0004 §5). StartMS/EndMS are
 // absolute offsets from the start of the media.

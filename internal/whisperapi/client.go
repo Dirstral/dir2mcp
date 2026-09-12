@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"io"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -35,7 +36,29 @@ import (
 )
 
 const (
+	// defaultRequestTimeout is the FLOOR of a transcription request timeout, not
+	// the whole rule: RequestTimeoutForAudio raises it for a request that carries
+	// real audio. It stays the value a caller gets when the audio duration is
+	// unknown, and it still bounds every non-transcription call.
 	defaultRequestTimeout = 120 * time.Second
+
+	// requestTimeoutRealtimeFactor multiplies the audio duration of ONE request to
+	// derive that request's timeout (issue #962). A fixed 120 s was sized for a
+	// short clip against a hosted API; the windowed STT path (#956) made a
+	// 10-minute window the normal unit, and 10 minutes at 5x realtime needs 120 s
+	// exactly, so the constant sat on the boundary. Measured on an L40S with
+	// faster-whisper large-v3, a 10-minute window decodes in 34 s of Russian or
+	// Ukrainian speech and in 110 to 140 s of Kyrgyz (a language large-v3 does not
+	// know, so it struggles). 10x realtime clears both with room for a busy GPU, a
+	// larger model or CPU inference, and it still fails a truly stuck server.
+	requestTimeoutRealtimeFactor = 10
+
+	// maxDerivedRequestTimeout caps the derived timeout so a bogus duration cannot
+	// produce an effectively unbounded request (or overflow the multiplication).
+	// Six hours is 36 minutes of audio at the factor above, far past any window the
+	// ingest pipeline schedules.
+	maxDerivedRequestTimeout = 6 * time.Hour
+
 	defaultMaxRetries     = 3
 	defaultInitialBackoff = 250 * time.Millisecond
 	defaultMaxBackoff     = 2 * time.Second
@@ -79,6 +102,14 @@ type Client struct {
 	// MaxPayloadBytes bounds the audio payload size (bytes). Values <= 0
 	// fall back to defaultMaxPayloadBytes.
 	MaxPayloadBytes int
+
+	// RequestTimeout records an EXPLICIT per-request timeout
+	// (media.stt.request_timeout_sec). A positive value wins over the
+	// duration-derived timeout: ForAudioDuration then returns the client
+	// unchanged, so the operator's number is the one that applies. Zero means
+	// "derive it", which is the default. The timeout itself is carried by
+	// HTTPClient.Timeout; this field only says who chose it.
+	RequestTimeout time.Duration
 
 	// DefaultModel is sent as the multipart `model` field. Empty falls
 	// back to the package DefaultModel constant.
@@ -205,6 +236,57 @@ func (c *Client) MaxTranscribePayloadBytes() int {
 
 // compile-time interface check for the optional payload-cap capability.
 var _ model.PayloadLimitedTranscriber = (*Client)(nil)
+
+// RequestTimeoutForAudio returns the request timeout for ONE transcription
+// request carrying audioMS of audio: max(120 s, 10 x the audio duration), capped
+// at six hours. An unknown duration (audioMS <= 0) keeps the 120 s floor.
+//
+// The timeout is derived from the work rather than fixed, because what matters is
+// decode time against audio length, not an absolute (issue #962).
+func RequestTimeoutForAudio(audioMS int) time.Duration {
+	if audioMS <= 0 {
+		return defaultRequestTimeout
+	}
+	maxAudioMS := int64(maxDerivedRequestTimeout/time.Millisecond) / requestTimeoutRealtimeFactor
+	if int64(audioMS) >= maxAudioMS {
+		return maxDerivedRequestTimeout
+	}
+	derived := time.Duration(int64(audioMS)*requestTimeoutRealtimeFactor) * time.Millisecond
+	if derived < defaultRequestTimeout {
+		return defaultRequestTimeout
+	}
+	return derived
+}
+
+// ForAudioDuration implements model.AudioDurationTranscriber: it returns the
+// client to use for a request carrying audioMS of audio, with a timeout sized to
+// that audio.
+//
+// The receiver is never mutated (one client serves concurrent documents): the
+// method returns either the receiver itself or a shallow copy that shares the
+// transport, and therefore the connection pool. The receiver is returned
+// unchanged when the operator set media.stt.request_timeout_sec (an explicit
+// setting wins), when the duration is unknown, and when the configured timeout
+// already covers the derived one, including a client deliberately left unbounded.
+func (c *Client) ForAudioDuration(audioMS int) model.Transcriber {
+	if c.RequestTimeout > 0 || audioMS <= 0 {
+		return c
+	}
+	want := RequestTimeoutForAudio(audioMS)
+	have := defaultRequestTimeout
+	if c.HTTPClient != nil {
+		have = c.HTTPClient.Timeout
+	}
+	if have <= 0 || have >= want {
+		return c
+	}
+	cp := *c
+	cp.HTTPClient = providerhttp.WithTimeout(c.HTTPClient, want)
+	return &cp
+}
+
+// compile-time interface check for the optional duration-sizing capability.
+var _ model.AudioDurationTranscriber = (*Client)(nil)
 
 func (c *Client) transcribeWithRetry(ctx context.Context, relPath string, data []byte) (model.TranscriptResult, error) {
 	maxAttempts := c.MaxRetries + 1
@@ -355,6 +437,61 @@ func transcriptionURL(baseURL string) string {
 	return base + "/v1/audio/transcriptions"
 }
 
+// isRequestTimeout reports whether err is this client giving up on the wait: the
+// http.Client timeout fired, or a lower layer reported a timeout. The caller
+// checks its own context first, so a cancelled or expired CALLER context is not
+// reported as a provider timeout.
+func isRequestTimeout(err error) bool {
+	// A connection that was never established is a transport failure, not a
+	// server that is still decoding, so it keeps the retryable classification a
+	// network error has always had.
+	var opErr *net.OpError
+	if errors.As(err, &opErr) && opErr.Op == "dial" {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
+}
+
+// timeoutError names the timeout, its value and the knob that changes it, the way
+// the windowed-STT payload-cap skip names the payload cap (issue #962). The plain
+// "transcription request failed" did not distinguish a timeout from a refusal, so
+// a slow decode looked like a provider fault.
+//
+// It is NOT retryable, and that is the point. The server does not stop decoding
+// when the client hangs up: it finishes the window and answers into a closed
+// connection. A retry therefore queues a SECOND decode of the same audio behind
+// the first, on the same busy GPU, which makes the retry slower than the attempt
+// that just failed. Three attempts spent three GPU-minutes and still skipped the
+// window. One named failure costs one decode and says what to change.
+func timeoutError(timeout time.Duration, cause error) *model.ProviderError {
+	msg := "transcription request timed out"
+	if timeout > 0 {
+		msg += " after " + timeout.String()
+	}
+	msg += "; the server is probably still decoding this audio, so it is not retried" +
+		" (raise media.stt.request_timeout_sec, or transcribe with a faster model or GPU)"
+	return &model.ProviderError{
+		Code:      "WHISPER_FAILED",
+		Message:   msg,
+		Retryable: false,
+		Cause:     cause,
+	}
+}
+
+// effectiveRequestTimeout reports the timeout the request just made was bound
+// by, so the error can quote it. 0 means the client was left unbounded, and the
+// message then omits the number rather than claiming "after 0s".
+func (c *Client) effectiveRequestTimeout() time.Duration {
+	if c.HTTPClient == nil {
+		return defaultRequestTimeout
+	}
+	return c.HTTPClient.Timeout
+}
+
 func (c *Client) transcribeOnce(ctx context.Context, relPath string, data []byte) (model.TranscriptResult, error) {
 	if strings.TrimSpace(c.BaseURL) == "" {
 		return model.TranscriptResult{}, &model.ProviderError{Code: "WHISPER_FAILED", Message: "missing whisper base_url", Retryable: false}
@@ -376,6 +513,9 @@ func (c *Client) transcribeOnce(ctx context.Context, relPath string, data []byte
 
 	resp, err := providerhttp.ClientOrDefault(c.HTTPClient, defaultRequestTimeout).Do(req)
 	if err != nil {
+		if ctx.Err() == nil && isRequestTimeout(err) {
+			return model.TranscriptResult{}, timeoutError(c.effectiveRequestTimeout(), err)
+		}
 		return model.TranscriptResult{}, &model.ProviderError{Code: "WHISPER_FAILED", Message: "transcription request failed", Retryable: true, Cause: err}
 	}
 	defer func() { _ = resp.Body.Close() }()
