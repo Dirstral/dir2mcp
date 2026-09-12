@@ -56,8 +56,9 @@ func (c *Config) validateRAGSystemPrompt() error {
 // knownRuleTokens lists the references Expand understands, for an error that
 // has to tell the operator what they may write.
 func knownRuleTokens() []string {
-	tokens := make([]string, 0, len(promptrules.Rules))
-	for _, r := range promptrules.Rules {
+	shipped := promptrules.Rules()
+	tokens := make([]string, 0, len(shipped))
+	for _, r := range shipped {
 		tokens = append(tokens, r.Token)
 	}
 	return tokens

@@ -163,7 +163,9 @@ func TestConfig965_AMalformedReferenceIsConfigInvalid(t *testing.T) {
 		quoted string
 	}{
 		{"Answer briefly. ${rag.answer_language_rule", "${rag.answer_language_rule"},
-		{"Answer briefly. ${rag. answer_language_rule}", "${rag. answer_language_rule}"},
+		// The excerpt stops at the whitespace that broke the reference, so the
+		// error names the fault and copies no prompt text past it.
+		{"Answer briefly. ${rag. answer_language_rule}", "${rag."},
 		{"Answer briefly. ${rag.answer_language_rule\nCite files.", "${rag.answer_language_rule"},
 		{"Answer briefly. ${rag.}", "${rag.}"},
 	} {
@@ -184,8 +186,9 @@ func TestConfig965_AMalformedReferenceIsConfigInvalid(t *testing.T) {
 }
 
 // TestConfig965_AMalformedReferenceIsQuotedBackShortly: the error cuts the
-// offending text at the line break. An unclosed brace otherwise swallows the
-// rest of a multi-line prompt into the message.
+// offending text at the first whitespace. An unclosed brace otherwise swallows
+// the rest of the prompt into the message, and prompt text does not belong in
+// a log.
 func TestConfig965_AMalformedReferenceIsQuotedBackShortly(t *testing.T) {
 	cfg := config.Default()
 	cfg.RAGSystemPrompt = "Answer briefly. ${rag.answer_language_rule\nNEVER QUOTE THIS LINE.\n"

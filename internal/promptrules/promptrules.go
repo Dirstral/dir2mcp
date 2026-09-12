@@ -24,6 +24,7 @@ package promptrules
 import (
 	"regexp"
 	"strings"
+	"unicode"
 )
 
 const (
@@ -105,8 +106,20 @@ type Rule struct {
 	Behaviour string
 }
 
-// Rules are the shipped rules a rag.system_prompt may reference.
-var Rules = []Rule{
+// Rules returns the shipped rules a rag.system_prompt may reference, in a
+// stable order, as a copy.
+//
+// The registry itself stays private and the copy is deliberate. Expand builds
+// its replacer once, at package initialization, while the validation path reads
+// the registry per call; a caller who appended to a shared slice would make the
+// two disagree, and the disagreement reads as "the config validated, and the
+// rule silently did not expand", which is the defect this package removes.
+func Rules() []Rule {
+	return append([]Rule(nil), rules...)
+}
+
+// rules is the registry. See Rules.
+var rules = []Rule{
 	{
 		Name:      AnswerLanguageRuleName,
 		Token:     AnswerLanguageRuleToken,
@@ -126,8 +139,8 @@ var Rules = []Rule{
 var expander = newExpander()
 
 func newExpander() *strings.Replacer {
-	pairs := make([]string, 0, 2*len(Rules))
-	for _, r := range Rules {
+	pairs := make([]string, 0, 2*len(rules))
+	for _, r := range rules {
 		pairs = append(pairs, r.Token, r.Text)
 	}
 	return strings.NewReplacer(pairs...)
@@ -193,30 +206,36 @@ func UnknownReferences(prompt string) []string {
 
 // referenceAt reads the reference that begins at the start of s and reports
 // whether it is complete. A malformed one is returned as a short literal
-// preview, so the operator can find it in their prompt; it is cut at the first
-// line break, because an unclosed brace otherwise swallows the rest of a
-// multi-line prompt.
+// excerpt, so the operator can find it in their prompt.
+//
+// The excerpt stops at the first whitespace. A reference contains none, so what
+// comes back is the broken reference and nothing else: an error can name the
+// fault without copying a line of the operator's prompt into a log, which is
+// where prompt text has no business being. An unclosed brace at the end of a
+// line therefore reports `${rag.` rather than the paragraph that follows it.
+// The rune cap covers the remaining case, a long unbroken run.
 func referenceAt(s string) (string, bool) {
 	if ref := wellFormedReference.FindString(s); ref != "" {
 		return ref, true
 	}
-	preview := s
-	if i := strings.IndexAny(preview, "\r\n"); i >= 0 {
-		preview = preview[:i]
+	excerpt := s
+	if i := strings.IndexFunc(excerpt, unicode.IsSpace); i >= 0 {
+		excerpt = excerpt[:i]
 	}
-	if r := []rune(preview); len(r) > maxPreviewRunes {
-		preview = string(r[:maxPreviewRunes]) + "..."
+	if r := []rune(excerpt); len(r) > maxExcerptRunes {
+		excerpt = string(r[:maxExcerptRunes]) + "..."
 	}
-	return strings.TrimRight(preview, " \t"), false
+	return excerpt, false
 }
 
-// maxPreviewRunes bounds the malformed-reference preview an error quotes. Long
-// enough to show the whole of a real reference plus its neighbourhood, short
-// enough that a prompt cannot turn one error into a page.
-const maxPreviewRunes = 48
+// maxExcerptRunes bounds the malformed-reference excerpt an error quotes. Long
+// enough to show the whole of a real reference, short enough that an unbroken
+// run of prompt text cannot turn one error into a page. Runes, not bytes, so a
+// cut never splits a character.
+const maxExcerptRunes = 48
 
 func known(ref string) bool {
-	for _, r := range Rules {
+	for _, r := range rules {
 		if ref == r.Token {
 			return true
 		}
@@ -245,7 +264,7 @@ func known(ref string) bool {
 func StaleCopies(prompt string) []Rule {
 	collapsed := collapseSpaces(prompt)
 	var stale []Rule
-	for _, r := range Rules {
+	for _, r := range rules {
 		if strings.Contains(collapsed, collapseSpaces(r.Text)) {
 			// The whole rule, as it ships today. Nothing to report.
 			continue
