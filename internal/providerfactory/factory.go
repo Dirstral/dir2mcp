@@ -362,16 +362,22 @@ func TranslateTranscriber(p provider.Profile) (model.Transcriber, error) {
 }
 
 // applyWhisperLimits overrides the whisper client's built-in request caps from
-// the resolved profile when set (>0). The defaults (50 MB payload, 120 s
-// timeout) are too small for long-form media, so an operator can raise them via
-// media.stt.max_payload_mb / media.stt.request_timeout_sec (dir2mcp#510/#511). A
-// zero value leaves the client's default in place.
+// the resolved profile when set (>0). The default 50 MB payload is too small for
+// long-form media, so an operator can raise it via media.stt.max_payload_mb
+// (dir2mcp#510). media.stt.request_timeout_sec (dir2mcp#511) sets the request
+// timeout outright: it wins over the timeout the client derives from the audio
+// duration of each request (dir2mcp#962), up or down. A zero value leaves the
+// derived timeout in place.
 func applyWhisperLimits(c *whisperapi.Client, p provider.Profile) {
 	if p.STTMaxPayloadMB > 0 {
 		c.MaxPayloadBytes = mbToBytes(p.STTMaxPayloadMB)
 	}
 	if p.STTRequestTimeoutSec > 0 && c.HTTPClient != nil {
-		c.HTTPClient.Timeout = secToDuration(p.STTRequestTimeoutSec)
+		timeout := secToDuration(p.STTRequestTimeoutSec)
+		c.HTTPClient.Timeout = timeout
+		// Record that the operator chose this number, so the duration-derived
+		// timeout (dir2mcp#962) does not overrule it in either direction.
+		c.RequestTimeout = timeout
 	}
 }
 

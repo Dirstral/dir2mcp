@@ -1094,11 +1094,12 @@ type Config struct {
 	// MediaSTTMaxPayloadMB / MediaSTTRequestTimeoutSec tune the self-hosted
 	// whisper STT client's request limits (config `media.stt.max_payload_mb` /
 	// `media.stt.request_timeout_sec`), applied onto whichever whisper STT profile
-	// resolves. The whisper client's built-in caps (50 MB payload, 120 s request
-	// timeout) are too small for long-form media — a 30-min mono file exceeds the
-	// payload cap and takes longer than 120 s to transcribe — so these let an
-	// operator raise them (dir2mcp#510, #511). 0 (default) means "use the client's
-	// built-in default"; negative is CONFIG_INVALID.
+	// resolves. The client's built-in 50 MB payload cap is too small for long-form
+	// media (a 30-min mono file exceeds it), so media.stt.max_payload_mb raises it
+	// (dir2mcp#510). media.stt.request_timeout_sec sets the request timeout
+	// outright and wins over the timeout the client derives from the audio each
+	// request carries (dir2mcp#511, #962). 0 (default) means "use the client's own
+	// rule"; negative is CONFIG_INVALID.
 	MediaSTTMaxPayloadMB      int
 	MediaSTTRequestTimeoutSec int
 

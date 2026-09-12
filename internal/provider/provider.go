@@ -249,7 +249,8 @@ type Profile struct {
 	STTVAD bool
 	// STTMaxPayloadMB / STTRequestTimeoutSec tune the self-hosted whisper client's
 	// request limits (config `media.stt.max_payload_mb` / `media.stt.request_timeout_sec`,
-	// dir2mcp#510/#511). 0 means "use the client's built-in default". Like STTVAD
+	// dir2mcp#510/#511). 0 means "use the client's own rule": its built-in payload
+	// cap, and a timeout derived from the audio each request carries (#962). Like STTVAD
 	// these are operational knobs, not part of the STT identity, so changing them
 	// is not reindex-bound.
 	STTMaxPayloadMB      int

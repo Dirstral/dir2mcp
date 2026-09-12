@@ -304,8 +304,9 @@ func TranscriptWindowStarts(totalMS, stepMS, overlapMS int) []int {
 // DefaultSTTWindowMS is the decode window used when a plain transcription has to
 // be windowed (issue #954). Ten minutes keeps one request comfortably inside every
 // shipped STT payload cap (self-hosted whisper 50 MB, Mistral 20 MB, OpenAI 25 MB)
-// at ordinary speech bitrates and inside the default 120 s request timeout, while
-// staying long enough that window boundaries remain rare.
+// at ordinary speech bitrates, while staying long enough that window boundaries
+// remain rare. The request timeout is derived from the window, not fixed, so a
+// window that decodes slowly is waited out rather than cut off (issue #962).
 const DefaultSTTWindowMS = 10 * 60 * 1000
 
 // minSTTWindowMS floors the window derived from a provider payload cap. A shorter
@@ -419,7 +420,10 @@ func (s *Service) transcribeStructuredWindowed(ctx context.Context, relPath stri
 			s.getLogger().Printf("windowed transcription %s: payload %d bytes exceeds the provider cap %d bytes but the duration probe failed; sending one request",
 				relPath, len(content), capBytes)
 		}
-		return s.transcribeWith(ctx, s.transcriber, relPath, content)
+		// One request still carries the WHOLE recording, so it gets a timeout sized
+		// to the whole recording (issue #962). A nine-minute file is under the
+		// windowing threshold, and a hard language decodes it well past 120 s.
+		return s.transcribeWith(ctx, model.TranscriberForAudioDuration(s.transcriber, totalMS), relPath, content)
 	}
 	text, words, err := s.decodeWindowedTranscript(ctx, relPath, tmpPath, s.transcriber, totalMS, windowMS, "transcription")
 	var cut *windowExtractError
@@ -430,7 +434,7 @@ func (s *Service) transcribeStructuredWindowed(ctx context.Context, relPath stri
 		// transcript into a failed document. A provider that then refuses the
 		// payload reports its own cap honestly.
 		s.getLogger().Printf("windowed transcription %s: the audio cannot be sliced (%v); sending one request", relPath, err)
-		return s.transcribeWith(ctx, s.transcriber, relPath, content)
+		return s.transcribeWith(ctx, model.TranscriberForAudioDuration(s.transcriber, totalMS), relPath, content)
 	}
 	return text, words, err
 }
@@ -462,7 +466,8 @@ func (s *Service) translateStructuredWindowed(ctx context.Context, doc model.Doc
 	// not fail a document that one request can still translate.
 	totalMS := s.probeStagedDurationMS(ctx, tmpPath)
 	if totalMS <= windowMS {
-		return s.translateStructured(ctx, doc, content)
+		// translateStructured with the request sized to the whole recording (#962).
+		return s.transcribeWith(ctx, model.TranscriberForAudioDuration(s.translateSTT, totalMS), doc.RelPath, content)
 	}
 	text, words, err := s.decodeWindowedTranscript(ctx, doc.RelPath, tmpPath, s.translateSTT, totalMS, windowMS, "translate")
 	var cut *windowExtractError
@@ -597,7 +602,10 @@ func (s *Service) decodeWindowPieces(ctx context.Context, relPath string, stt mo
 			s.getLogger().Printf("windowed %s: skip window of %s: %v (raise the provider payload cap or re-encode the media)", plan.label, relPath, err)
 			continue
 		}
-		text, words, err := s.transcribeWith(ctx, stt, relPath, p.data)
+		// Size the request to the audio this piece carries, so a window that decodes
+		// slowly (a hard language, a busy GPU, CPU inference) is waited out instead
+		// of cut off at a constant and left as a hole in the transcript (#962).
+		text, words, err := s.transcribeWith(ctx, model.TranscriberForAudioDuration(stt, p.endMS-p.startMS), relPath, p.data)
 		if err != nil {
 			if firstErr == nil {
 				firstErr = err
