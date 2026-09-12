@@ -487,16 +487,177 @@ def test_the_default_marker_is_unchanged(fake_frames):
     assert cues[0].text.startswith(CAPTION_PREFIX)
 
 
-def test_the_caption_prompt_is_an_argument_with_the_calibrated_default():
-    """load_backend must accept another domain's question. Checked on the
-    signature rather than by loading: the weights are a multi-gigabyte opt-in
-    and this suite runs without a GPU."""
-    import inspect
+class _Ids:
+    """Stands in for the token tensor the processor returns."""
+
+    shape = (1, 7)
+
+
+class _Inputs(dict):
+    def to(self, _device):
+        return self
+
+
+class _Tokenizer:
+    def encode(self, _word, add_special_tokens=False):  # noqa: ARG002
+        return [1]
+
+
+class _Processor:
+    """Records the prompt that reaches the model, which is the whole point."""
+
+    def __init__(self):
+        self.tokenizer = _Tokenizer()
+        self.prompts: list[str] = []
+
+    def apply_chat_template(self, messages, **_kw):
+        for conversation in messages:
+            for turn in conversation:
+                for part in turn["content"]:
+                    if part.get("type") == "text":
+                        self.prompts.append(part["text"])
+        return _Inputs(input_ids=_Ids())
+
+    def batch_decode(self, _out, **_kw):
+        return ["a caption of the frame\nconfidence: 0.9"]
+
+
+class _Out:
+    def __getitem__(self, _key):
+        return object()
+
+
+class _Model:
+    device = "cpu"
+
+    def eval(self):
+        return self
+
+    def generate(self, **_kw):
+        return _Out()
+
+
+@pytest.fixture
+def fake_backend(monkeypatch):
+    """Load qwen_vl.load_backend against stubs.
+
+    The real path wants a multi-gigabyte download and a GPU, and this suite has
+    neither. Stubbing the three imports is what lets the test assert the thing
+    that matters: WHICH prompt the captioner hands the model. A signature check
+    stays green when the closure ignores its argument and reaches for the
+    module constant instead, which is exactly the mistake being guarded.
+    """
+    import sys
+    import types
+
+    torch = types.ModuleType("torch")
+    torch.bfloat16 = "bfloat16"
+    torch.cuda = types.SimpleNamespace(is_available=lambda: True)
+
+    class _NoGrad:
+        def __call__(self, fn):
+            return fn
+
+    torch.no_grad = _NoGrad
+    pil = types.ModuleType("PIL")
+    image = types.ModuleType("PIL.Image")
+    image.open = lambda _p: types.SimpleNamespace(convert=lambda _m: object())
+    pil.Image = image
+    transformers = types.ModuleType("transformers")
+    processor = _Processor()
+    transformers.AutoProcessor = types.SimpleNamespace(
+        from_pretrained=lambda *_a, **_k: processor)
+    transformers.AutoModelForImageTextToText = types.SimpleNamespace(
+        from_pretrained=lambda *_a, **_k: _Model())
+
+    for name, mod in (("torch", torch), ("PIL", pil), ("PIL.Image", image),
+                      ("transformers", transformers)):
+        monkeypatch.setitem(sys.modules, name, mod)
 
     from dirstral_annotator.recognizers import qwen_vl
 
-    sig = inspect.signature(qwen_vl.load_backend)
-    assert "caption_prompt" in sig.parameters
-    assert sig.parameters["caption_prompt"].default is qwen_vl.CAPTION_PROMPT
-    # the shipped default still asks the calibrated question
+    monkeypatch.setattr(qwen_vl, "transformers_version", lambda: (99, 0, 0))
+    return qwen_vl, processor
+
+
+def test_the_captioner_asks_the_configured_question(fake_backend, tmp_path):
+    """A parameter that is accepted and then ignored is the usual way an option
+    silently does nothing, so this follows the prompt into the model call."""
+    qwen_vl, processor = fake_backend
+    frame = tmp_path / "f.jpg"
+    frame.write_bytes(b"x")
+
+    captioner, _ = qwen_vl.load_backend(
+        device="cpu", caption_prompt="Describe the lunar surface in one sentence.")
+    captioner([frame])
+
+    assert processor.prompts == ["Describe the lunar surface in one sentence."]
+    assert "on the field" not in processor.prompts[0]
+
+
+def test_the_captioner_defaults_to_the_calibrated_question(fake_backend, tmp_path):
+    """The default is the instrument: the gate's threshold was measured against
+    the vocabulary these words elicit."""
+    qwen_vl, processor = fake_backend
+    frame = tmp_path / "f.jpg"
+    frame.write_bytes(b"x")
+
+    captioner, _ = qwen_vl.load_backend(device="cpu")
+    captioner([frame])
+
+    assert processor.prompts == [qwen_vl.CAPTION_PROMPT]
     assert "on the field" in qwen_vl.CAPTION_PROMPT
+
+
+# --- and the flags reach those arguments from argv --------------------------
+
+
+def _serve_args(*extra):
+    from dirstral_annotator.cli import build_parser
+
+    return build_parser().parse_args(
+        ["serve", "--roster", "r.json", "--caption", *extra])
+
+
+def test_caption_prompt_reaches_the_backend_from_argv(monkeypatch):
+    from dirstral_annotator import cli
+
+    seen = {}
+
+    def fake_load(**kwargs):
+        seen.update(kwargs)
+        return (lambda _paths: []), (lambda _paths, _q: [])
+
+    monkeypatch.setattr(
+        "dirstral_annotator.recognizers.qwen_vl.load_backend", fake_load)
+    caption_fn, _ = cli._caption_backend(
+        _serve_args("--caption-prompt", "Describe the room."))
+
+    assert caption_fn is not None
+    assert seen["caption_prompt"] == "Describe the room."
+
+
+def test_an_empty_caption_prefix_reaches_the_recognizer_from_argv():
+    """`--caption-prefix ""` is a request for no marker, not an absent flag, so
+    it must survive the is-not-None threading all the way to the recognizer."""
+    from dirstral_annotator.cli import _pipeline
+    from dirstral_annotator.roster import Roster
+
+    args = _serve_args("--caption-prefix", "")
+    pipeline = _pipeline(args, Roster([]), {})
+    assert pipeline.caption_prefix == ""
+
+    built = SceneCaptionRecognizer(
+        captioner=lambda _paths: [], fps=1.0, prefix=pipeline.caption_prefix)
+    assert built._prefix == ""
+
+
+def test_an_absent_caption_prefix_leaves_the_default(monkeypatch):
+    from dirstral_annotator.cli import _pipeline
+    from dirstral_annotator.roster import Roster
+
+    monkeypatch.setattr(
+        "dirstral_annotator.recognizers.qwen_vl.load_backend",
+        lambda **_k: ((lambda _p: []), (lambda _p, _q: [])))
+    pipeline = _pipeline(_serve_args(), Roster([]), {})
+    assert pipeline.caption_prefix is None
